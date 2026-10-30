@@ -19,7 +19,7 @@ Diese Anleitung beschreibt den Betrieb von Earnie auf einem **Proxmox VE**-Host 
 | Disk | mind. **8 GB** Rootfs (optional zusätzlich ein Bind-Mount für Daten) | sehr knappe Rootfs |
 | Netz | Bridge (`vmbr0`), Port **8501** im LAN erreichbar; für den Miniserver-Rückkanal Port **8541** und eine feste IP bzw. DHCP-Reservierung (kein NAT), siehe [container.md](container.md) § Netzwerk | Port 8501 ungeschützt im Internet |
 
-Das Image `ghcr.io/jochentcc/earnie-energy:latest` liefert `linux/amd64` (wie bei Synology).
+Das Image `ghcr.io/stoeff99/earnie-energy:latest` liefert `linux/amd64` (wie bei Synology).
 
 ## 1. LXC anlegen (Proxmox-Host)
 
@@ -52,7 +52,7 @@ Damit liegen `earnie_env/config/` und `earnie_env/runtime/` auf dem Host-Storage
 ```bash
 pct enter 120
 # im CT:
-curl -fsSL https://raw.githubusercontent.com/JochenTCC/Earnie/main/docker/proxmox/bootstrap.sh -o /tmp/bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/stoeff99/Earnie/main/docker/proxmox/bootstrap.sh -o /tmp/bootstrap.sh
 chmod +x /tmp/bootstrap.sh
 /tmp/bootstrap.sh
 ```
@@ -65,7 +65,7 @@ Das Skript installiert standardmäßig nach **`/opt/earnie`**. Folgende Umgebung
 |----------|-----------|----------|
 | `EARNIE_DIR` | Installationsverzeichnis | `/opt/earnie` |
 | `COMPOSE_URL` | URL der Compose-Datei | Raw `…/docker/compose/proxmox_productive.yml` |
-| `IMAGE` | Image-Hinweis in der Ausgabe | `ghcr.io/jochentcc/earnie-energy:latest` |
+| `IMAGE` | Image-Hinweis in der Ausgabe | `ghcr.io/stoeff99/earnie-energy:latest` |
 
 Falls `docker info` fehlschlägt: die Features des CT prüfen und den CT neu starten (`pct reboot <VMID>`).
 

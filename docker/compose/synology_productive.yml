@@ -50,7 +50,7 @@ x-common-env: &common-env
 
 services:
   earnie-productive:
-    image: ghcr.io/jochentcc/earnie-energy:latest
+    image: ghcr.io/stoeff99/earnie-energy:latest
     container_name: earnie-productive
     command: >
       python -m scripts.run_streamlit

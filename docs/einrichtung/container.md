@@ -114,9 +114,9 @@ Der Befehl legt nur fehlende Dateien an; bestehende bleiben unverändert.
 
 ## Image bauen und deployen
 
-Das Image ist ein **Multi-Arch-Manifest** (`linux/amd64` für Synology, `linux/arm64` für LoxBerry). Beide Hosts referenzieren denselben Tag `ghcr.io/jochentcc/earnie-energy:latest`.
+Das Image ist ein **Multi-Arch-Manifest** (`linux/amd64` für Synology, `linux/arm64` für LoxBerry). Beide Hosts referenzieren denselben Tag `ghcr.io/stoeff99/earnie-energy:latest`.
 
-**Veröffentlichte Images** entstehen über GitHub Actions. Ein Tag `vX.Y.Z` (passend zu `version.py`) startet [`.github/workflows/release-publish.yml`](../../.github/workflows/release-publish.yml). Der Workflow baut zuerst nur den **Release-Kandidaten** `ghcr.io/jochentcc/earnie-energy:X.Y.Z`; der Tag allein setzt weder `:latest` noch `:next`. Nach manueller Freigabe des Jobs `promote` (Environment `release-approval`) folgen `:latest` (nur offizielle Versionen) bzw. `:next` sowie die veröffentlichte GitHub Release. Details: [DEVELOPER.md](../../DEVELOPER.md) § Release.
+**Veröffentlichte Images** entstehen über GitHub Actions. Ein Tag `vX.Y.Z` (passend zu `version.py`) startet [`.github/workflows/release-publish.yml`](../../.github/workflows/release-publish.yml). Der Workflow baut zuerst nur den **Release-Kandidaten** `ghcr.io/stoeff99/earnie-energy:X.Y.Z`; der Tag allein setzt weder `:latest` noch `:next`. Nach manueller Freigabe des Jobs `promote` (Environment `release-approval`) folgen `:latest` (nur offizielle Versionen) bzw. `:next` sowie die veröffentlichte GitHub Release. Details: [DEVELOPER.md](../../DEVELOPER.md) § Release.
 
 Ein Release kann auch nur für einen Kanal erscheinen (manueller Start mit `targets` = `docker` oder `ha`). Bei einem reinen Home-Assistant-Release bleiben `:latest` und `:next` auf dem bisherigen Stand; LoxBerry- und Synology-Installationen, die diesen Tags folgen, bekommen die neue Version dann erst mit dem Docker-Release.
 
@@ -211,13 +211,13 @@ python -m scripts.build_container --target all --push
 Nur ein bestimmter Tag:
 
 ```powershell
-python -m scripts.build_container --target all --tag ghcr.io/jochentcc/earnie-energy:latest --push
+python -m scripts.build_container --target all --tag ghcr.io/stoeff99/earnie-energy:latest --push
 ```
 
 Manifest prüfen:
 
 ```bash
-docker manifest inspect ghcr.io/jochentcc/earnie-energy:latest
+docker manifest inspect ghcr.io/stoeff99/earnie-energy:latest
 ```
 
 
@@ -256,7 +256,7 @@ Manuell (z. B. nach einer Config-Änderung ohne Neustart):
 python -m scripts.verify_loxone_setup
 ```
 
-`docker/compose/synology_productive.yml` referenziert `ghcr.io/jochentcc/earnie-energy:latest`.
+`docker/compose/synology_productive.yml` referenziert `ghcr.io/stoeff99/earnie-energy:latest`.
 
 ### Live-Zyklus-Profiling (NAS-Einmal-Test)
 
@@ -273,7 +273,7 @@ Die Tags kommen aus `version.py` (u. a. `:next` und `:<version>`; bei Dev-Versio
 **2. Image auf die NAS bringen** (Beispiel mit `docker save` / `load`; Tag ggf. anpassen):
 
 ```powershell
-docker save -o earnie-timing.tar ghcr.io/jochentcc/earnie-energy:next
+docker save -o earnie-timing.tar ghcr.io/stoeff99/earnie-energy:next
 # Datei auf die NAS kopieren, dann:
 docker load -i earnie-timing.tar
 ```
