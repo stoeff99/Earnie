@@ -10,6 +10,7 @@ from runtime_store.persist_paths import resolve_dotenv_path
 from settings import legacy_config_gates
 from settings import system_settings
 from settings.json_io import read_json_dict
+from settings.mqtt_settings import parse_mqtt_block, read_mqtt_password
 
 
 def get_strict(source: dict, keys_path: list, config_path: str) -> Any:
@@ -53,6 +54,7 @@ def load_env_vars(*, require_loxone_credentials: bool) -> dict[str, Any]:
         "LOXONE_PASS": os.getenv("LOXONE_PASS"),
         "EHAL_HA_BASE_URL": str(os.getenv("EHAL_HA_BASE_URL") or "").strip(),
         "EHAL_HA_TOKEN": str(os.getenv("EHAL_HA_TOKEN") or "").strip(),
+        "EHAL_MQTT_PASSWORD": read_mqtt_password(),
     }
     if require_loxone_credentials:
         loxone_attrs = {
@@ -129,6 +131,9 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
 
     HA is push-only (Binding P5e): leftover ``ehal.ha.transport`` fails loud.
     ``EHAL_HA_TRANSPORT`` stays ``push`` for callers that still read it.
+
+    ``ehal.mqtt`` (optional MQTT carrier) is validated here so a bad block fails
+    at config load; its password comes from ``.env`` (``EHAL_MQTT_PASSWORD``).
     """
     ehal = raw_config.get("ehal")
     if not isinstance(ehal, dict):
@@ -147,6 +152,7 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
     boolean_invert = (
         ha.get("boolean_invert") if isinstance(ha.get("boolean_invert"), dict) else {}
     )
+    mqtt = parse_mqtt_block(ehal.get("mqtt"), password=read_mqtt_password())
     return {
         "EHAL_BACKEND": backend,
         "EHAL_ADAPTER_ID": resolve_adapter_id(ehal.get("adapter_id"), backend),
@@ -172,6 +178,11 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
             if str(value).strip()
         },
         "EHAL_HA_TRANSPORT": HA_TRANSPORT_PUSH,
+        "EHAL_MQTT_ENABLED": mqtt.enabled,
+        "EHAL_MQTT_HOST": mqtt.host,
+        "EHAL_MQTT_PORT": mqtt.port,
+        "EHAL_MQTT_USERNAME": mqtt.username,
+        "EHAL_MQTT_TOPIC_PREFIX": mqtt.topic_prefix,
     }
 
 

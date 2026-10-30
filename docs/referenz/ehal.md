@@ -413,7 +413,7 @@ Fields map to known OpenEMS Edge channels (semantic reference). Channel architec
 
 ## Out of scope (this freeze)
 
-- MQTT / Matter as first-class hubs
+- MQTT / Matter as first-class hubs (MQTT ships as an optional carrier for the push contract instead: `integrations/ehal_mqtt.py`, user doc [mqtt.md](../einrichtung/mqtt.md))
 - HA WebSocket state subscription / direct evcc REST adapter (deferred; REST HA path shipped)
 - ARP scan / profile upload. Modbus/SunSpec **outline** schemas under `share/hardware_profiles/` — not a runtime Modbus client (direct Modbus profiles: Entwicklungsplan **M4**).
 - Live curtailment weights from measured inv PV (forecast shares remain; helper `attribute_plant_pv_to_inverters_w` ready).

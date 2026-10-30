@@ -34,6 +34,7 @@ Ist ein Backend verbunden, zeigt die Seite von oben nach unten:
 
 - Erfolgsmeldung mit dem aktiven Backend (EHAL-Com und Optimierer-Dienst sind freigeschaltet).
 - **Zugangsdaten** (zuklappbar): Zugangsdaten erneut eingeben oder prüfen. Bei einem Loxone-Auth-Fehler öffnet sich der Bereich automatisch.
+- **MQTT-Broker (optional):** Broker-IP, Port, Benutzername, Passwort und Topic-Präfix für die [MQTT-Anbindung](../einrichtung/mqtt.md) eintragen und die Verbindung testen.
 - **Backend ändern:** Discovery starten oder das Backend wechseln.
 - **Loxone-Import:** nur bei Loxone.
 

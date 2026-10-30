@@ -23,6 +23,8 @@ dependencies = [
     "jsonschema>=4.0.0",
     "cryptography>=42.0.0",
     "zeroconf>=0.130.0",
+    # Optional MQTT carrier for the EHAL push contract (integrations/ehal_mqtt.py).
+    "paho-mqtt>=2.1,<3",
     "PyYAML>=6.0",
     # Tariff library (separate repo, PolyForm Noncommercial); pinned git tag, decision: docs/dev/edibert-integration.md.
     # Source archive, so wheel-only installs need --no-binary=edibert.
