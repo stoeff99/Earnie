@@ -159,6 +159,64 @@ def test_loxone_t4_values_without_submit_are_not_written() -> None:
 
 
 # --------------------------------------------------------------------------
+# MQTT-Broker (config.json -> ehal.mqtt, Passwort in .env)
+# --------------------------------------------------------------------------
+
+def _fill_mqtt(at: AppTest, *, host: str = "192.168.178.40", password: str = "mqtt-test-pw") -> None:
+    at.checkbox(key="t_mqtt_enabled").check()
+    at.text_input(key="t_mqtt_host").set_value(host)
+    at.number_input(key="t_mqtt_port").set_value(1884)
+    at.text_input(key="t_mqtt_username").set_value("mqtt-tester")
+    at.text_input(key="t_mqtt_password").set_value(password)
+    at.text_input(key="t_mqtt_topic_prefix").set_value("home/earnie")
+
+
+def test_mqtt_t1_submit_persists_config_and_password(monkeypatch) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    at = _run("run_form_mqtt.py")
+    _fill_mqtt(at)
+    at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
+    assert not at.exception
+
+    assert _config()["ehal"]["mqtt"] == {
+        "enabled": True,
+        "host": "192.168.178.40",
+        "port": 1884,
+        "username": "mqtt-tester",
+        "topic_prefix": "home/earnie",
+    }
+    assert "mqtt-test-pw" not in _config_path().read_text(encoding="utf-8")
+    assert "EHAL_MQTT_PASSWORD" in _dotenv_path().read_text(encoding="utf-8")
+
+    fresh = _run("run_form_mqtt.py")
+    assert fresh.text_input(key="t_mqtt_host").value == "192.168.178.40"
+    assert fresh.number_input(key="t_mqtt_port").value == 1884
+    assert fresh.text_input(key="t_mqtt_password").value == ""
+
+
+def test_mqtt_t3_enabled_without_host_is_rejected(monkeypatch) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    before = _config_path().read_bytes()
+    at = _run("run_form_mqtt.py")
+    _fill_mqtt(at, host="")
+    at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
+
+    assert not at.exception
+    assert any("host fehlt" in e.value for e in at.error)
+    assert _config_path().read_bytes() == before
+    assert not _dotenv_path().exists()
+
+
+def test_mqtt_t4_changes_without_submit_are_not_persisted(monkeypatch) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    before = _config_path().read_bytes()
+    at = _run("run_form_mqtt.py")
+    _fill_mqtt(at)
+    at.run(timeout=_TIMEOUT_S)
+    assert _config_path().read_bytes() == before
+
+
+# --------------------------------------------------------------------------
 # Gerätestern-Schwellen (config.json -> appliance_recommendation)
 # --------------------------------------------------------------------------
 

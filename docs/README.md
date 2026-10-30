@@ -40,6 +40,7 @@ Der Szenario-Explorer lässt sich ohne Installation online ausprobieren:
 
 - [Smarthome-Backend wählen](einrichtung/smarthome-backend-wahl.md) – Loxone, HA+evcc oder OpenEMS über `ehal.backend`
 - [Loxone-Anbindung](einrichtung/loxone-anbindung.md) – HTTP-Schnittstelle und Prüfskript
+- [MQTT-Anbindung](einrichtung/mqtt.md) – Telemetrie und Sollwerte zusätzlich über einen MQTT-Broker (z. B. LoxBerry-Gateway)
 - [Home Assistant + evcc](einrichtung/ha-evcc.md) – Anbindung über Home Assistant, optional mit evcc (neues oder bestehendes HA)
 - [Home-Assistant-Add-on](einrichtung/homeassistant-addon.md) – Earnie als Supervisor-Add-on (Ingress, Options)
 - [Betrieb](einrichtung/betrieb.md) – `main.py` und App, Laufzeitdateien, Optimierungs-Takt, [Update und Migration](einrichtung/betrieb.md#update-und-migration)

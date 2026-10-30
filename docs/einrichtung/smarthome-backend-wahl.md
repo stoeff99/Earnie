@@ -12,6 +12,8 @@ Wie Earnie Backends erkennt und wie die Auswahl funktioniert, beschreibt die Sei
 | **Home Assistant + evcc** | `ha`                 | Breites Geräteangebot im DACH-Raum; neues oder bestehendes HA  | [Home Assistant + evcc](ha-evcc.md)     |
 | **OpenEMS**               | `openems`            | Lab- bzw. Industrie-Prototyp, kein Standard für Privathaushalte | [OpenEMS-Lab](openems-lab.md)           |
 
+Unabhängig vom Backend kann Earnie Telemetrie und Sollwerte zusätzlich über einen MQTT-Broker austauschen ([MQTT-Anbindung](mqtt.md)).
+
 Für neue Setups ohne bestehende Loxone-Anlage lautet die offizielle Empfehlung für den DACH-Raum **HA + evcc**. OpenEMS bleibt ein dokumentierter Validierungspfad.
 
 ## Umschalten

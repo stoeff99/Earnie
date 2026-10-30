@@ -34,6 +34,7 @@ from ui.ehal_connection import (
     render_ha_connection_form,
     render_openems_connection_form,
 )
+from ui.ehal_mqtt_form import render_mqtt_connection_form
 from ui.flash import flash
 from ui.help_hint import render_page_title_with_help
 from ui.setup_dotenv import render_loxone_credentials_form, render_loxone_verify_results
@@ -174,6 +175,8 @@ def _render_configured_summary(*, allow_change: bool = True) -> None:
         )
     if not allow_change:
         return
+    with st.expander("MQTT-Broker (optional)", expanded=False):
+        render_mqtt_connection_form(form_key="sb_mqtt_form")
     with st.expander("Backend ändern", expanded=False):
         _render_discovery_flow()
     _render_backend_import_section(backend)
