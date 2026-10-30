@@ -12,16 +12,16 @@ from version import __version__
 def test_default_tags_follow_version_py():
     """``default_tags()`` without args mirrors ``version.__version__`` (latest only if official)."""
     tags = bc.default_tags()
-    assert f"ghcr.io/jochentcc/earnie-energy:{__version__}" in tags
-    assert f"ghcr.io/jochentcc/ernie-energy:{__version__}" in tags
-    assert "ghcr.io/jochentcc/earnie-energy:next" in tags
-    assert "ghcr.io/jochentcc/ernie-energy:next" in tags
+    assert f"ghcr.io/stoeff99/earnie-energy:{__version__}" in tags
+    assert f"ghcr.io/stoeff99/ernie-energy:{__version__}" in tags
+    assert "ghcr.io/stoeff99/earnie-energy:next" in tags
+    assert "ghcr.io/stoeff99/ernie-energy:next" in tags
     if bc.is_prerelease_version(__version__):
-        assert "ghcr.io/jochentcc/earnie-energy:latest" not in tags
-        assert "ghcr.io/jochentcc/ernie-energy:latest" not in tags
+        assert "ghcr.io/stoeff99/earnie-energy:latest" not in tags
+        assert "ghcr.io/stoeff99/ernie-energy:latest" not in tags
     else:
-        assert "ghcr.io/jochentcc/earnie-energy:latest" in tags
-        assert "ghcr.io/jochentcc/ernie-energy:latest" in tags
+        assert "ghcr.io/stoeff99/earnie-energy:latest" in tags
+        assert "ghcr.io/stoeff99/ernie-energy:latest" in tags
 
 
 def test_is_prerelease_version():
@@ -34,18 +34,18 @@ def test_is_prerelease_version():
 def test_default_tags_prerelease_omits_latest():
     tags = bc.default_tags("2.2.0-alpha.1")
     assert tags == [
-        "ghcr.io/jochentcc/earnie-energy:next",
-        "ghcr.io/jochentcc/earnie-energy:2.2.0-alpha.1",
-        "ghcr.io/jochentcc/ernie-energy:next",
-        "ghcr.io/jochentcc/ernie-energy:2.2.0-alpha.1",
+        "ghcr.io/stoeff99/earnie-energy:next",
+        "ghcr.io/stoeff99/earnie-energy:2.2.0-alpha.1",
+        "ghcr.io/stoeff99/ernie-energy:next",
+        "ghcr.io/stoeff99/ernie-energy:2.2.0-alpha.1",
     ]
 
 
 def test_default_tags_official_includes_latest_and_next():
     tags = bc.default_tags("2.2.0")
-    assert "ghcr.io/jochentcc/earnie-energy:latest" in tags
-    assert "ghcr.io/jochentcc/earnie-energy:next" in tags
-    assert "ghcr.io/jochentcc/earnie-energy:2.2.0" in tags
+    assert "ghcr.io/stoeff99/earnie-energy:latest" in tags
+    assert "ghcr.io/stoeff99/earnie-energy:next" in tags
+    assert "ghcr.io/stoeff99/earnie-energy:2.2.0" in tags
 
 
 def test_versioned_and_floating_tags_partition_default_tags():
@@ -54,15 +54,15 @@ def test_versioned_and_floating_tags_partition_default_tags():
         floating = bc.floating_tags(ver)
         assert sorted(versioned + floating) == sorted(bc.default_tags(ver))
         assert versioned == [
-            f"ghcr.io/jochentcc/earnie-energy:{ver}",
-            f"ghcr.io/jochentcc/ernie-energy:{ver}",
+            f"ghcr.io/stoeff99/earnie-energy:{ver}",
+            f"ghcr.io/stoeff99/ernie-energy:{ver}",
         ]
 
 
 def test_floating_tags_prerelease_only_next():
     assert bc.floating_tags("2.2.0-alpha.1") == [
-        "ghcr.io/jochentcc/earnie-energy:next",
-        "ghcr.io/jochentcc/ernie-energy:next",
+        "ghcr.io/stoeff99/earnie-energy:next",
+        "ghcr.io/stoeff99/ernie-energy:next",
     ]
 
 
@@ -70,8 +70,8 @@ def test_promote_commands_retag_from_version_without_rebuild():
     cmds = bc.promote_commands("2.2.0")
     assert [
         "docker", "buildx", "imagetools", "create",
-        "-t", "ghcr.io/jochentcc/earnie-energy:latest",
-        "ghcr.io/jochentcc/earnie-energy:2.2.0",
+        "-t", "ghcr.io/stoeff99/earnie-energy:latest",
+        "ghcr.io/stoeff99/earnie-energy:2.2.0",
     ] in cmds
     assert len(cmds) == len(bc.floating_tags("2.2.0"))
     assert all(cmd[-1].endswith(":2.2.0") for cmd in cmds)

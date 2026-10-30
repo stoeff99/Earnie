@@ -51,7 +51,7 @@ jobs:
           PLATFORM: ${{ matrix.platform }}
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/jochentcc/earnie-energy:${VERSION}"
+          IMAGE="ghcr.io/stoeff99/earnie-energy:${VERSION}"
           echo "Pulling ${IMAGE} for ${PLATFORM}…"
           docker pull --platform "$PLATFORM" "$IMAGE"
           # Constrain x86 guest CPU via QEMU_CPU when using qemu-user through Docker.

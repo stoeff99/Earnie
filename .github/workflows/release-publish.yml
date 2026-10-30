@@ -185,7 +185,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: >-
           python -m scripts.release_image_gate
-          --image "ghcr.io/jochentcc/earnie-energy:${VERSION}"
+          --image "ghcr.io/stoeff99/earnie-energy:${VERSION}"
           --revision "$(git rev-parse HEAD)"
 
       # Always built: the HA add-on image is a wrapper around earnie-energy:<version>.

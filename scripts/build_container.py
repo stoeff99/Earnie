@@ -19,8 +19,8 @@ from pathlib import Path
 
 from version import __version__, normalize_for_image_build
 
-DEFAULT_REGISTRY_IMAGE = "ghcr.io/jochentcc/earnie-energy"
-LEGACY_REGISTRY_IMAGE = "ghcr.io/jochentcc/ernie-energy"
+DEFAULT_REGISTRY_IMAGE = "ghcr.io/stoeff99/earnie-energy"
+LEGACY_REGISTRY_IMAGE = "ghcr.io/stoeff99/ernie-energy"
 DEFAULT_PLATFORM = "linux/amd64"
 MULTIARCH_PLATFORM = "linux/amd64,linux/arm64"
 TARGET_PLATFORMS = {
