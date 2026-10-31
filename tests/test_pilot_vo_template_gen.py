@@ -312,3 +312,7 @@ def test_mqtt_topics_match_what_the_carrier_subscribes(tmp_path: Path) -> None:
     cmd = [c for c in ET.fromstring(text.encode("utf-8")) if c.tag == "VirtualOutCmd"][0]
     topic, _value = cmd.get("CmdOn").split(" ", 1)
     assert topic == ehal_mqtt.topic("earnie", ehal_mqtt.TOPIC_TELEMETRY, sig.ehal_id)
+
+
+def test_pv_energy_counter_keeps_decimals() -> None:
+    assert gen.value_placeholder("sens_pv_energy") == "<v.3>"
