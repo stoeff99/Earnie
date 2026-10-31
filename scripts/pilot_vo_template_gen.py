@@ -50,6 +50,8 @@ from integrations.ehal_request_http import REQUEST_OPTIMIZE_PATH
 TOKEN_ENV = "EARNIE_PUSH_TOKEN"
 TOKEN_ENV_LEGACY = "EARNIE_PILOT_PUSH_TOKEN"
 TOKEN_PLACEHOLDER = "PUSH_TOKEN_HIER_ERSETZEN"
+# LoxBerry MQTT gateway: default UDP input port (Gateway settings, "UDP-In Port").
+LOXBERRY_MQTT_UDP_PORT = 11884
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,}$")
 
 def collect_read_signals(config_dir: Path) -> list[Signal]:
@@ -141,9 +143,29 @@ def _cmd_attrs(
     if sig.digital:
         # Digital output: fixed values for On / Off (the value placeholder is for analog outputs).
         on_cmd, off_cmd = f"{base}1{query}", f"{base}0{query}"
-        comment = f"{sig.ehal_id} 0/1; parallel to {sig.old_name}"
     else:
         on_cmd, off_cmd = f"{base}{value_placeholder(sig.ehal_id)}{query}", ""
+    return _vo_cmd(sig, on_cmd, off_cmd, repeat, repeat_rate)
+
+
+def _mqtt_udp_cmd_attrs(
+    sig: Signal, topic_prefix: str, repeat: str, repeat_rate: str
+) -> dict[str, str]:
+    """LoxBerry MQTT gateway UDP line ``<topic> <value>``: the value is the payload."""
+    topic = f"{topic_prefix}/telemetry/{sig.ehal_id}"
+    if sig.digital:
+        on_cmd, off_cmd = f"{topic} 1", f"{topic} 0"
+    else:
+        on_cmd, off_cmd = f"{topic} {value_placeholder(sig.ehal_id)}", ""
+    return _vo_cmd(sig, on_cmd, off_cmd, repeat, repeat_rate)
+
+
+def _vo_cmd(
+    sig: Signal, on_cmd: str, off_cmd: str, repeat: str, repeat_rate: str
+) -> dict[str, str]:
+    if sig.digital:
+        comment = f"{sig.ehal_id} 0/1; parallel to {sig.old_name}"
+    else:
         comment = f"{sig.ehal_id}; parallel to {sig.old_name}"
     attrs = {
         "Title": sig.title,
@@ -167,6 +189,32 @@ def _cmd_attrs(
     return attrs
 
 
+def mqtt_udp_address(host: str, udp_port: int) -> str:
+    """Loxone VO address for a UDP target (LoxBerry MQTT gateway UDP input)."""
+    return f"/dev/udp/{host}/{udp_port}"
+
+
+def _virtual_out(title: str, comment: str, address: str, cmds: list[dict[str, str]]) -> str:
+    root = ET.Element(
+        "VirtualOut",
+        {
+            "HintText": "",
+            "Title": title,
+            "Comment": comment,
+            "Address": address,
+            "CmdInit": "",
+            "CloseAfterSend": "true",
+            "CmdSep": "",
+        },
+    )
+    ET.SubElement(root, "Info", INFO_ATTRS)
+    for attrs in cmds:
+        ET.SubElement(root, "VirtualOutCmd", attrs)
+    ET.indent(root, space="\t")
+    body = ET.tostring(root, encoding="unicode").replace(" />", "/>")
+    return '<?xml version="1.0" encoding="utf-8"?>\n' + body + "\n"
+
+
 def render_template(group: str, signals: list[Signal], *, host: str, port: int, token: str,
                     repeat: str = "10", repeat_rate: str = "10",
                     token_in_address: bool = False) -> str:
@@ -179,24 +227,30 @@ def render_template(group: str, signals: list[Signal], *, host: str, port: int, 
         f"http://{host}:{port}"
         + (f"/t/{token}" if token_in_address and token else "")
     )
-    root = ET.Element(
-        "VirtualOut",
-        {
-            "HintText": "",
-            "Title": f"Earnie Push - {group}",
-            "Comment": "Push telemetry to Earnie; parallel to the poll signals",
-            "Address": address,
-            "CmdInit": "",
-            "CloseAfterSend": "true",
-            "CmdSep": "",
-        },
+    cmds = [_cmd_attrs(sig, token, repeat, repeat_rate, token_in_address) for sig in signals]
+    return _virtual_out(
+        f"Earnie Push - {group}",
+        "Push telemetry to Earnie; parallel to the poll signals",
+        address,
+        cmds,
     )
-    ET.SubElement(root, "Info", INFO_ATTRS)
-    for sig in signals:
-        ET.SubElement(root, "VirtualOutCmd", _cmd_attrs(sig, token, repeat, repeat_rate, token_in_address))
-    ET.indent(root, space="\t")
-    body = ET.tostring(root, encoding="unicode").replace(" />", "/>")
-    return '<?xml version="1.0" encoding="utf-8"?>\n' + body + "\n"
+
+
+def render_mqtt_udp_template(group: str, signals: list[Signal], *, host: str, udp_port: int,
+                             topic_prefix: str, repeat: str = "10",
+                             repeat_rate: str = "10") -> str:
+    """VO template that sends telemetry over the LoxBerry MQTT gateway (UDP, without the BOM).
+
+    ``host`` is the LoxBerry; each Cmd sends ``<prefix>/telemetry/<EHAL-ID> <value>``,
+    which the gateway publishes on that topic. No push token: the broker login applies.
+    """
+    cmds = [_mqtt_udp_cmd_attrs(sig, topic_prefix, repeat, repeat_rate) for sig in signals]
+    return _virtual_out(
+        f"Earnie MQTT - {group}",
+        "Push telemetry to Earnie via the LoxBerry MQTT gateway",
+        mqtt_udp_address(host, udp_port),
+        cmds,
+    )
 
 
 def render_status_template(*, host: str, port: int) -> str:
@@ -204,43 +258,56 @@ def render_status_template(*, host: str, port: int) -> str:
 
     The request-optimize route takes no push token, so the command carries none.
     """
-    root = ET.Element(
-        "VirtualOut",
-        {
-            "HintText": "",
-            "Title": "Earnie Status Push",
-            "Comment": "Optional Request Optimize to Earnie",
-            "Address": f"http://{host}:{port}",
-            "CmdInit": "",
-            "CloseAfterSend": "true",
-            "CmdSep": "",
-        },
+    cmd = {
+        "Title": REQUEST_OPTIMIZE_TITLE,
+        "Comment": "Optional: request out-of-band optimize",
+        "CmdOnMethod": "POST",
+        "CmdOffMethod": "GET",
+        "CmdOn": REQUEST_OPTIMIZE_PATH,
+        "CmdOnHTTP": "Content-Type: application/json",
+        "CmdOnPost": "{}",
+        "CmdOff": "",
+        "CmdOffHTTP": "",
+        "CmdOffPost": "",
+        "CmdAnswer": "",
+        "Analog": "false",
+        "Repeat": "0",
+        "RepeatRate": "0",
+        "HintText": "",
+    }
+    return _virtual_out(
+        "Earnie Status Push",
+        "Optional Request Optimize to Earnie",
+        f"http://{host}:{port}",
+        [cmd],
     )
-    ET.SubElement(root, "Info", INFO_ATTRS)
-    ET.SubElement(
-        root,
-        "VirtualOutCmd",
-        {
-            "Title": REQUEST_OPTIMIZE_TITLE,
-            "Comment": "Optional: request out-of-band optimize",
-            "CmdOnMethod": "POST",
-            "CmdOffMethod": "GET",
-            "CmdOn": REQUEST_OPTIMIZE_PATH,
-            "CmdOnHTTP": "Content-Type: application/json",
-            "CmdOnPost": "{}",
-            "CmdOff": "",
-            "CmdOffHTTP": "",
-            "CmdOffPost": "",
-            "CmdAnswer": "",
-            "Analog": "false",
-            "Repeat": "0",
-            "RepeatRate": "0",
-            "HintText": "",
-        },
+
+
+def render_mqtt_udp_status_template(*, host: str, udp_port: int, topic_prefix: str) -> str:
+    """Status VO: ``Earnie_Request_Optimize`` as ``<prefix>/request_optimize 1`` over UDP."""
+    cmd = {
+        "Title": REQUEST_OPTIMIZE_TITLE,
+        "Comment": "Optional: request out-of-band optimize",
+        "CmdOnMethod": "GET",
+        "CmdOffMethod": "GET",
+        "CmdOn": f"{topic_prefix}/request_optimize 1",
+        "CmdOnHTTP": "",
+        "CmdOnPost": "",
+        "CmdOff": "",
+        "CmdOffHTTP": "",
+        "CmdOffPost": "",
+        "CmdAnswer": "",
+        "Analog": "false",
+        "Repeat": "0",
+        "RepeatRate": "0",
+        "HintText": "",
+    }
+    return _virtual_out(
+        "Earnie Status MQTT",
+        "Optional Request Optimize to Earnie via the LoxBerry MQTT gateway",
+        mqtt_udp_address(host, udp_port),
+        [cmd],
     )
-    ET.indent(root, space="\t")
-    body = ET.tostring(root, encoding="unicode").replace(" />", "/>")
-    return '<?xml version="1.0" encoding="utf-8"?>\n' + body + "\n"
 
 
 def write_template(path: Path, text: str) -> None:

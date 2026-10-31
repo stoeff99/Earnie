@@ -155,8 +155,11 @@ def test_activation_changes_the_match_text_of_the_row() -> None:
 def export_spy(monkeypatch):
     calls: list[dict] = []
 
-    def fake_build_export_zip(house, components, *, host, port, mode):
-        calls.append({"host": host, "port": port, "mode": mode})
+    def fake_build_export_zip(house, components, *, host, port, mode, mqtt=None):
+        call = {"host": host, "port": port, "mode": mode}
+        if mqtt is not None:
+            call["mqtt"] = mqtt
+        calls.append(call)
         return b"PK-fake"
 
     monkeypatch.setattr("ui.ehal_signal_list.build_export_zip", fake_build_export_zip)
@@ -209,6 +212,58 @@ def test_export_error_is_shown_as_message_not_as_exception(monkeypatch) -> None:
 
     assert messages(at)["error"] == ["Export fehlgeschlagen: boom"]
     assert not _download_buttons(at)
+
+
+def _stored_mqtt(monkeypatch, block: dict) -> None:
+    monkeypatch.setattr("ui.ehal_mqtt_form.stored_mqtt_block", lambda: dict(block))
+
+
+def test_export_defaults_to_http_transport(export_spy) -> None:
+    at = _run()
+
+    assert at.radio(key="ehal_signal_export_transport").value == "http"
+    assert "mqtt" not in export_spy[-1]
+
+
+def test_export_mqtt_prefills_loxberry_from_the_broker_settings(export_spy, monkeypatch) -> None:
+    from ehal.signal_export import MqttUdpTarget
+
+    _stored_mqtt(monkeypatch, {"enabled": True, "host": "192.168.20.10", "topic_prefix": "earnie"})
+    at = _run()
+
+    at.radio(key="ehal_signal_export_transport").set_value("mqtt").run(timeout=_TIMEOUT_S)
+
+    assert_clean(at)
+    assert at.text_input(key="ehal_signal_export_loxberry_host").value == "192.168.20.10"
+    assert at.number_input(key="ehal_signal_export_udp_port").value == 11884
+    assert export_spy[-1]["mqtt"] == MqttUdpTarget(
+        host="192.168.20.10", udp_port=11884, topic_prefix="earnie"
+    )
+    assert export_spy[-1]["host"] == "192.168.1.10"  # VI keep polling Earnie over HTTP
+    assert len(_download_buttons(at)) == 1
+
+
+def test_export_mqtt_without_loxberry_ip_hides_download(export_spy, monkeypatch) -> None:
+    _stored_mqtt(monkeypatch, {})
+    at = _run()
+
+    at.radio(key="ehal_signal_export_transport").set_value("mqtt").run(timeout=_TIMEOUT_S)
+
+    assert not _download_buttons(at)
+    assert "LoxBerry-IP eingeben, um den ZIP-Download freizuschalten." in messages(at)["caption"]
+    assert any("noch nicht aktiviert" in w for w in messages(at)["warning"])
+
+
+def test_export_mqtt_rejects_a_port_in_the_loxberry_field(export_spy, monkeypatch) -> None:
+    _stored_mqtt(monkeypatch, {"enabled": True, "host": "192.168.20.10"})
+    at = _run()
+    at.radio(key="ehal_signal_export_transport").set_value("mqtt").run(timeout=_TIMEOUT_S)
+
+    at.text_input(key="ehal_signal_export_loxberry_host").set_value("192.168.20.10:11884")
+    at.run(timeout=_TIMEOUT_S)
+
+    assert not _download_buttons(at)
+    assert any("UDP-Port des Gateways" in e for e in messages(at)["error"])
 
 
 def test_export_settings_are_not_persisted(export_spy) -> None:

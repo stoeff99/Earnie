@@ -54,9 +54,31 @@ Für Sollwerte gelten dieselben Regeln wie bei `status.json`, denn beide nutzen 
 
 ## LoxBerry-MQTT-Gateway
 
-- **Telemetrie:** Im Gateway pro Signal ein Topic `earnie/telemetry/<EHAL-ID>` mit dem Loxone-Wert füllen. Die EHAL-IDs stehen in der Signalliste bzw. in den exportierten Loxone-Vorlagen.
-- **Sollwerte:** `earnie/setpoint/#` abonnieren. Das Gateway reicht die Werte an den Miniserver weiter; die Namen der Virtual Inputs leitet es aus den Topics ab.
-- **Heartbeat:** `heartbeat_smarthome` regelmäßig (z. B. alle 10 Sekunden) senden, damit Earnie die Verbindung als lebendig erkennt.
+### Telemetrie von Loxone an Earnie
+
+Die Loxone-Vorlagen gibt es auch in einer MQTT-Variante. Sie schicken die Werte per UDP an das LoxBerry-MQTT-Gateway, das sie auf den Topics `earnie/telemetry/<EHAL-ID>` veröffentlicht.
+
+1. **Daemon Control → EHAL-Com → Signalliste → Export** öffnen.
+2. Bei **Telemetrie (VO) senden über** die Option **MQTT über das LoxBerry-MQTT-Gateway (UDP)** wählen.
+3. **IP-Adresse des LoxBerry** prüfen (vorbelegt mit dem Broker aus **MQTT-Broker (optional)**) und den **UDP-Port des Gateways** eintragen. Der Port steht im LoxBerry unter **MQTT → Gateway** („UDP-In Port“, Standard 11884).
+4. ZIP herunterladen und die `VO_Earnie_*.xml` in Loxone Config als Vorlagen für Virtuelle Ausgänge importieren.
+
+Jeder Befehl eines virtuellen Ausgangs sieht so aus:
+
+| Feld | Inhalt |
+| ---- | ------ |
+| Adresse | `/dev/udp/<LoxBerry-IP>/11884` |
+| Befehl bei EIN | `earnie/telemetry/grid.meter.sens_grid_power_active <v.3>` |
+
+Topic und Wert sind durch ein Leerzeichen getrennt. Das Gateway macht daraus eine Nachricht auf dem Topic mit dem Wert als Inhalt. Steht der Wert dagegen im Topic (z. B. die HTTP-Vorlage `/ehal/telemetry/<EHAL-ID>/<v>` an den LoxBerry geschickt), entsteht pro Wert ein neues Topic. Earnie kann diese Werte nicht lesen.
+
+Die MQTT-Vorlagen brauchen keinen Push-Token, die Anmeldung am Broker ersetzt ihn. Der Heartbeat (`heartbeat_smarthome`) und **Earnie_Request_Optimize** (`earnie/request_optimize 1`) sind in denselben Vorlagen enthalten.
+
+### Sollwerte von Earnie an Loxone
+
+Die `VI_Earnie_*.xml` aus demselben Export lesen `status.json` weiterhin per HTTP direkt von Earnie. Das funktioniert unabhängig von MQTT.
+
+Wer die Sollwerte lieber über das Gateway bezieht, abonniert dort `earnie/setpoint/#`. Das Gateway reicht die Werte an den Miniserver weiter und leitet die Namen der virtuellen Eingänge aus den Topics ab. Welche Namen dabei entstehen, zeigt das Gateway in seiner Übersicht der eingehenden Werte.
 
 ## Verbindungsstatus
 
@@ -67,5 +89,4 @@ Unter **MQTT-Broker (optional)** zeigt die Seite den letzten vom Optimierer-Dien
 ## Einschränkungen
 
 - **Keine Verschlüsselung (TLS):** Die Verbindung läuft unverschlüsselt. Der Broker sollte daher nur im Heimnetz erreichbar sein.
-- **Kein Shadow-Modus:** Im Shadow-Modus baut Earnie keine MQTT-Verbindung auf.
 - **Keine Home-Assistant-Discovery:** Earnie legt keine HA-Entities automatisch an.

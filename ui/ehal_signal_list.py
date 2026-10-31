@@ -6,7 +6,7 @@ from typing import Any
 import streamlit as st
 
 from ehal.signal_catalog import set_binding_activation
-from ehal.signal_export import build_export_zip, normalize_export_host
+from ehal.signal_export import MqttUdpTarget, build_export_zip, normalize_export_host
 from ehal.signal_list import SignalRow, build_signal_rows
 from runtime_store.ehal_setup import BACKEND_LOXONE, active_ehal_backend
 from runtime_store.shadow.errors import ConfigReadOnlyError
@@ -200,6 +200,9 @@ def _render_export(house: dict, components: dict, *, backend: str) -> None:
         return
     if export_host != str(host).strip():
         st.caption(f"Adresse ohne Schema übernommen: `{export_host}`")
+    mqtt_target = _render_vo_transport()
+    if mqtt_target is False:
+        return
     try:
         payload = build_export_zip(
             house,
@@ -207,6 +210,7 @@ def _render_export(house: dict, components: dict, *, backend: str) -> None:
             host=export_host,
             port=int(port),
             mode=mode,  # type: ignore[arg-type]
+            mqtt=mqtt_target,
         )
     except Exception as exc:  # noqa: BLE001 — show in UI
         st.error(f"Export fehlgeschlagen: {exc}")
@@ -218,6 +222,68 @@ def _render_export(house: dict, components: dict, *, backend: str) -> None:
         mime="application/zip",
         key="ehal_signal_export_zip",
     )
+
+
+def _render_vo_transport() -> MqttUdpTarget | None | bool:
+    """VO telemetry path: ``None`` = HTTP to Earnie, a target = LoxBerry MQTT gateway.
+
+    ``False`` when the MQTT inputs are incomplete or invalid (no download then).
+    """
+    from scripts.pilot_vo_template_gen import LOXBERRY_MQTT_UDP_PORT
+    from settings.mqtt_settings import DEFAULT_TOPIC_PREFIX, parse_topic_prefix
+    from ui.ehal_mqtt_form import stored_mqtt_block
+
+    transport = st.radio(
+        "Telemetrie (VO) senden über",
+        options=["http", "mqtt"],
+        format_func=lambda t: (
+            "HTTP direkt an Earnie"
+            if t == "http"
+            else "MQTT über das LoxBerry-MQTT-Gateway (UDP)"
+        ),
+        horizontal=True,
+        key="ehal_signal_export_transport",
+    )
+    if transport == "http":
+        return None
+    stored = stored_mqtt_block()
+    if not stored.get("enabled"):
+        st.warning(
+            "MQTT ist für Earnie noch nicht aktiviert (Smarthome-Backend → MQTT-Broker). "
+            "Ohne MQTT kommen die Werte aus diesen Vorlagen nicht bei Earnie an."
+        )
+    try:
+        prefix = parse_topic_prefix(stored.get("topic_prefix") or DEFAULT_TOPIC_PREFIX)
+    except ValueError as exc:
+        st.error(str(exc))
+        return False
+    loxberry = st.text_input(
+        "IP-Adresse des LoxBerry (MQTT-Gateway)",
+        value=str(stored.get("host") or ""),
+        key="ehal_signal_export_loxberry_host",
+    )
+    udp_port = st.number_input(
+        "UDP-Port des Gateways",
+        min_value=1,
+        max_value=65535,
+        value=LOXBERRY_MQTT_UDP_PORT,
+        key="ehal_signal_export_udp_port",
+        help="LoxBerry → MQTT → Gateway, „UDP-In Port“ (Standard 11884).",
+    )
+    if not str(loxberry or "").strip():
+        st.caption("LoxBerry-IP eingeben, um den ZIP-Download freizuschalten.")
+        return False
+    try:
+        loxberry_host = normalize_export_host(loxberry, port_field="UDP-Port des Gateways")
+    except ValueError as exc:
+        st.error(str(exc))
+        return False
+    st.caption(
+        f"Jeder VO-Befehl sendet `{prefix}/telemetry/<EHAL-ID> <Wert>` an "
+        f"`/dev/udp/{loxberry_host}/{int(udp_port)}`. Die VI-Vorlagen lesen weiter "
+        "`status.json` per HTTP von Earnie."
+    )
+    return MqttUdpTarget(host=loxberry_host, udp_port=int(udp_port), topic_prefix=prefix)
 
 
 def _load_docs() -> tuple[dict, dict]:

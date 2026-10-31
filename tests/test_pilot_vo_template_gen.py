@@ -270,3 +270,45 @@ def test_empty_token_omits_query_and_address_prefix(tmp_path: Path) -> None:
     root_addr = ET.fromstring(text_addr.encode("utf-8"))
     assert root_addr.get("Address") == "http://h:1"
     assert "/t/" not in (root_addr.get("Address") or "")
+
+
+def test_mqtt_udp_template_sends_topic_and_value_to_the_gateway(tmp_path: Path) -> None:
+    sigs = gen.collect_read_signals(_config(tmp_path))
+    text = gen.render_mqtt_udp_template(
+        "Plant", sigs, host="192.168.20.10", udp_port=11884, topic_prefix="earnie"
+    )
+    root = ET.fromstring(text.encode("utf-8"))
+    assert root.get("Address") == "/dev/udp/192.168.20.10/11884"
+    assert list(root.attrib) == ["HintText", "Title", "Comment", "Address", "CmdInit", "CloseAfterSend", "CmdSep"]
+    cmds = {c.get("Title"): c for c in root if c.tag == "VirtualOutCmd"}
+    analog = cmds["Push_grid_meter_sens_grid_power_active"]
+    # Value as payload, never as a topic level (the gateway would make one topic per value).
+    assert analog.get("CmdOn") == "earnie/telemetry/grid.meter.sens_grid_power_active <v.3>"
+    assert analog.get("CmdOff") == ""
+    assert list(analog.attrib) == ANALOG_ATTRS
+    digital = cmds["Push_sens_absent_mode"]
+    assert (digital.get("CmdOn"), digital.get("CmdOff")) == (
+        "earnie/telemetry/sens_absent_mode 1",
+        "earnie/telemetry/sens_absent_mode 0",
+    )
+    assert list(digital.attrib) == DIGITAL_ATTRS
+    assert "?t=" not in text and "/ehal/" not in text
+
+
+def test_mqtt_udp_status_template_requests_optimize_over_the_prefix() -> None:
+    text = gen.render_mqtt_udp_status_template(host="lb", udp_port=11884, topic_prefix="haus/earnie")
+    root = ET.fromstring(text.encode("utf-8"))
+    assert root.get("Address") == "/dev/udp/lb/11884"
+    (cmd,) = [c for c in root if c.tag == "VirtualOutCmd"]
+    assert cmd.get("Title") == gen.REQUEST_OPTIMIZE_TITLE
+    assert cmd.get("CmdOn") == "haus/earnie/request_optimize 1"
+
+
+def test_mqtt_topics_match_what_the_carrier_subscribes(tmp_path: Path) -> None:
+    from integrations import ehal_mqtt
+
+    sig = gen.heartbeat_signal()
+    text = gen.render_mqtt_udp_template("H", [sig], host="h", udp_port=1, topic_prefix="earnie")
+    cmd = [c for c in ET.fromstring(text.encode("utf-8")) if c.tag == "VirtualOutCmd"][0]
+    topic, _value = cmd.get("CmdOn").split(" ", 1)
+    assert topic == ehal_mqtt.topic("earnie", ehal_mqtt.TOPIC_TELEMETRY, sig.ehal_id)
