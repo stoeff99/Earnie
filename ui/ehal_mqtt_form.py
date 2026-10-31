@@ -25,6 +25,11 @@ def _mqtt_block(data: dict) -> dict[str, Any]:
     return dict(mqtt) if isinstance(mqtt, dict) else {}
 
 
+def stored_mqtt_block() -> dict[str, Any]:
+    """``ehal.mqtt`` as saved in config.json (empty when MQTT was never configured)."""
+    return _mqtt_block(load_main_config())
+
+
 def settings_from_form(values: dict[str, Any], *, password: str) -> MqttSettings:
     """Validate form values with the same rules as config load (raises ``ValueError``)."""
     return parse_mqtt_block(

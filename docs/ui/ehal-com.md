@@ -396,7 +396,7 @@ Shown for **every** backend. This is the binding UI (replaces the former Loxone 
 | EHAL unit | EHAL wire unit from the registry (e.g. **W**); `—` if none |
 | Required by | EHAL functions from `ehal/functions.py` that need the field |
 | Match | Read = last received in the push inbox (age) / never; write = last hub fetch of `status.json` / never published |
-| Export | Loxone: ZIP of VO + VI pilot templates + README; HA: use the **YAML-Paket** section (activated signals) |
+| Export | Loxone: ZIP of VO + VI pilot templates + README; VO either HTTP to Earnie or **MQTT via the LoxBerry MQTT gateway (UDP)**, see [MQTT](../einrichtung/mqtt.md); HA: use the **YAML-Paket** section (activated signals) |
 
 Optional signals default off; toggle them in the Signalliste (on = add activation key, off = remove). Required signals are activated when a component is saved in the Hauskonfigurator. For a grid-tied house battery this includes `ess.{id}.sens_ess_power`; changing an inverter's `ac_connection` re-evaluates its batteries. Existing packs get the key through the configuration migration (`dm4.required_signal_activation`); regenerate the HA YAML package afterwards and map the new `ENTITY_ess_<id>_sens_ess_power` placeholder.
 

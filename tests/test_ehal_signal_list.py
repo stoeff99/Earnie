@@ -333,3 +333,34 @@ def test_export_zip_address_has_one_scheme_after_normalizing() -> None:
     assert xml
     assert all("http://http" not in text for text in xml)
     assert any('Address="http://192.168.1.10:8541' in text for text in xml)
+
+
+def test_export_zip_mqtt_sends_vo_to_the_gateway_and_keeps_vi_on_http() -> None:
+    from ehal.signal_export import MqttUdpTarget
+
+    house, components = _minimal_docs()
+    payload = build_export_zip(
+        house,
+        components,
+        host="192.168.1.10",
+        port=8541,
+        mqtt=MqttUdpTarget(host="192.168.1.20", udp_port=11884, topic_prefix="earnie"),
+    )
+    with zipfile.ZipFile(BytesIO(payload)) as zf:
+        files = {n: zf.read(n).decode("utf-8-sig") for n in zf.namelist()}
+    vo = [t for n, t in files.items() if n.startswith("VO_Earnie_")]
+    vi = [t for n, t in files.items() if n.startswith("VI_Earnie_")]
+    assert vo and vi
+    assert all('Address="/dev/udp/192.168.1.20/11884"' in t for t in vo)
+    assert any('CmdOn="earnie/telemetry/grid.meter.sens_grid_power_active &lt;v.3&gt;"' in t for t in vo)
+    assert any('CmdOn="earnie/request_optimize 1"' in t for t in vo)
+    assert all("/ehal/telemetry" not in t and "PUSH_TOKEN" not in t for t in vo)
+    assert all('Address="http://192.168.1.10:8541' in t for t in vi)
+    readme = files["README.txt"]
+    assert "/dev/udp/192.168.1.20/11884" in readme
+    assert "PUSH_TOKEN_HIER_ERSETZEN" not in readme
+
+
+def test_normalize_export_host_names_the_given_port_field() -> None:
+    with pytest.raises(ValueError, match="UDP-Port"):
+        normalize_export_host("192.168.1.20:11884", port_field="UDP-Port des Gateways")
