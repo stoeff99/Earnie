@@ -90,7 +90,7 @@ Earnie kann den Bezugspreis statt aus EPEX aus einer externen Preisreihe über M
    - Typ **Spot** (`spot_hourly`), Land **CH**, Abrechnung je Viertelstunde (Standard),
    - Aufschlag und Abwicklungsgebühr **0**,
    - Preise **ohne** USt, USt **8,1 %**.
-2. Unter **Smarthome-Backend → MQTT-Broker (optional)** bei **Externe Bezugspreise** das **Topic der Preise** eintragen und diesen **Benutzertarif** wählen. Speichern und den Optimierer-Dienst neu starten.
+2. Unter **Smarthome-Backend → MQTT-Broker (optional)** bei **Externe Bezugspreise** das **Topic der Preise** eintragen und diesen **Benutzertarif** wählen. Speichern und den Optimierer-Dienst neu starten. Das Topic lässt sich auch ohne Tarif speichern: dann sammelt Earnie nur die Preise und rechnet noch nicht damit. Ein Tarif ohne Topic ist ein Fehler.
 3. Im **Szenarienkonfigurator** diesen Tarif als Bezugstarif des Live-Szenarios wählen.
 
 **So rechnet Earnie:**

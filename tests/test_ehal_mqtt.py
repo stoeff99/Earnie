@@ -369,8 +369,10 @@ def test_probe_unreachable():
 def test_price_topic_and_tariff_belong_together():
     from settings.mqtt_settings import parse_mqtt_block
 
-    with pytest.raises(ValueError, match="gehören zusammen"):
-        parse_mqtt_block({"price_topic": "ekz/ems/tariffs/intervals"}, password="")
+    collect_only = parse_mqtt_block({"price_topic": "ekz/ems/tariffs/intervals"}, password="")
+    assert (collect_only.price_topic, collect_only.price_tariff_id) == ("ekz/ems/tariffs/intervals", "")
+    with pytest.raises(ValueError, match="price_topic fehlt"):
+        parse_mqtt_block({"price_tariff_id": "user_ekz"}, password="")
     with pytest.raises(ValueError, match="Platzhalter"):
         parse_mqtt_block({"price_topic": "ekz/#", "price_tariff_id": "user_ekz"}, password="")
     parsed = parse_mqtt_block(

@@ -102,10 +102,11 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
     )
     price_topic = parse_price_topic(raw.get("price_topic"))
     price_tariff_id = str(raw.get("price_tariff_id") or "").strip()
-    if bool(price_topic) != bool(price_tariff_id):
+    # A topic alone only collects prices; a tariff without a topic would never get any.
+    if price_tariff_id and not price_topic:
         raise ValueError(
-            "ehal.mqtt.price_topic und ehal.mqtt.price_tariff_id gehören zusammen: "
-            "entweder beide setzen oder beide leer lassen."
+            "ehal.mqtt.price_tariff_id ist gesetzt, aber ehal.mqtt.price_topic fehlt: "
+            "ohne Topic bekommt der Tarif keine Preise."
         )
     return MqttSettings(
         enabled=enabled,
