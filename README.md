@@ -1,5 +1,13 @@
 # Earnie
 
+> [!WARNING]
+> **Inoffizieller Entwicklungsstand – kein Release, keine Beta.**
+> Dieses Repository ist ein privater Fork von [JochenTCC/Earnie](https://github.com/JochenTCC/Earnie) auf Basis des Entwicklungszweigs `main` (Version 2.8.0-dev). Er enthält eigene Erweiterungen (MQTT-Anbindung, externe Bezugspreise über MQTT) und ist nicht ausgiebig getestet.
+>
+> - Das Image heißt deshalb `ghcr.io/stoeff99/earnie-energy-dev`.
+> - **Es hebt die Konfiguration auf Datenmodell 5.** Die offizielle 2.7-Beta (Datenmodell 4) kann sie danach nicht mehr lesen; einen Weg zurück gibt es nur über eine Sicherung von `earnie_env/`. Vor dem ersten Start und vor jedem Update `earnie_env/` sichern.
+> - Für den normalen Betrieb die offiziellen Versionen von [JochenTCC/Earnie](https://github.com/JochenTCC/Earnie) verwenden. Fehler in diesem Fork bitte hier melden, nicht im Original-Repository.
+
 <p align="center">
   <img src="docs/assets/Earnie-Logo-Simple-Light.png" alt="Earnie" width="160">
 </p>
