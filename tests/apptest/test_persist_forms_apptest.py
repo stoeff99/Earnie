@@ -215,16 +215,18 @@ def test_mqtt_t1_price_feed_is_persisted(monkeypatch) -> None:
     assert fresh.selectbox(key="t_mqtt_price_tariff_id").value == "user_ekz_dyn"
 
 
-def test_mqtt_t3_price_topic_without_tariff_is_rejected(monkeypatch) -> None:
+def test_mqtt_t1_price_topic_alone_collects_prices(monkeypatch) -> None:
     monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
-    before = _config_path().read_bytes()
+    monkeypatch.setattr("ui.ehal_mqtt_form.price_tariff_options", lambda: [])
     at = _run("run_form_mqtt.py")
+    assert any("Noch kein passender Benutzertarif" in c.value for c in at.caption)
     _fill_mqtt(at)
     at.text_input(key="t_mqtt_price_topic").set_value("ekz/ems/tariffs/intervals")
     at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
 
-    assert any("gehören zusammen" in e.value for e in at.error)
-    assert _config_path().read_bytes() == before
+    assert not at.error, [e.value for e in at.error]
+    mqtt = _config()["ehal"]["mqtt"]
+    assert (mqtt["price_topic"], mqtt["price_tariff_id"]) == ("ekz/ems/tariffs/intervals", "")
 
 
 def test_mqtt_t3_enabled_without_host_is_rejected(monkeypatch) -> None:

@@ -184,7 +184,8 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
             value=str(stored.get("price_topic") or ""),
             help="z. B. ekz/ems/tariffs/intervals (LoxBerry-Plugin für EKZ-Dynamik).",
         )
-        options = [_NO_PRICE_TARIFF, *price_tariff_options()]
+        matching = price_tariff_options()
+        options = [_NO_PRICE_TARIFF, *matching]
         current = str(stored.get("price_tariff_id") or "")
         if current and current not in options:
             options.append(current)
@@ -200,6 +201,12 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
                 "externen Preisen; Netznutzung kommt nicht dazu."
             ),
         )
+        if not matching:
+            st.caption(
+                "Noch kein passender Benutzertarif. Unter **Konfiguration → Tarife** einen "
+                "Bezugstarif anlegen: Typ Spot, Land CH, Aufschlag und Abwicklungsgebühr 0, "
+                "Preise ohne USt, USt 8,1 %. Bis dahin sammelt Earnie mit dem Topic nur die Preise."
+            )
         col_save, col_test = st.columns(2)
         submitted = col_save.form_submit_button(
             "Speichern", type="primary", key=f"{form_key}_submit"
