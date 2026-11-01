@@ -6,7 +6,7 @@ set -euo pipefail
 
 EARNIE_DIR="${EARNIE_DIR:-/opt/earnie}"
 COMPOSE_URL="${COMPOSE_URL:-https://raw.githubusercontent.com/stoeff99/Earnie/main/docker/compose/proxmox_productive.yml}"
-IMAGE="${IMAGE:-ghcr.io/stoeff99/earnie-energy:latest}"
+IMAGE="${IMAGE:-ghcr.io/stoeff99/earnie-energy-dev:latest}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "Run as root inside the LXC." >&2

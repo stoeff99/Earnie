@@ -19,8 +19,9 @@ from pathlib import Path
 
 from version import __version__, normalize_for_image_build
 
-DEFAULT_REGISTRY_IMAGE = "ghcr.io/stoeff99/earnie-energy"
-LEGACY_REGISTRY_IMAGE = "ghcr.io/stoeff99/ernie-energy"
+# Fork of JochenTCC/Earnie: unofficial development builds, labelled as such in the name
+# (LICENSE.md § 4 Abs. 5); no legacy ``ernie-energy`` alias.
+DEFAULT_REGISTRY_IMAGE = "ghcr.io/stoeff99/earnie-energy-dev"
 DEFAULT_PLATFORM = "linux/amd64"
 MULTIARCH_PLATFORM = "linux/amd64,linux/arm64"
 TARGET_PLATFORMS = {
@@ -62,7 +63,7 @@ def is_prerelease_version(version: str) -> bool:
 def default_tags(version: str | None = None) -> list[str]:
     """Default GHCR tags for *version* (defaults to ``version.__version__``).
 
-    Every release gets ``:next`` and ``:<version>`` (plus legacy aliases).
+    Every release gets ``:next`` and ``:<version>``.
     Official releases also get ``:latest``. Pre-releases omit ``:latest`` so
     it stays on the last official build; ``:next`` always points at the newest
     build (stable or pre-release).
@@ -70,7 +71,7 @@ def default_tags(version: str | None = None) -> list[str]:
     ver = __version__ if version is None else version
     include_latest = not is_prerelease_version(ver)
     tags: list[str] = []
-    for image in (DEFAULT_REGISTRY_IMAGE, LEGACY_REGISTRY_IMAGE):
+    for image in (DEFAULT_REGISTRY_IMAGE,):
         if include_latest:
             tags.append(f"{image}:latest")
         tags.append(f"{image}:next")
