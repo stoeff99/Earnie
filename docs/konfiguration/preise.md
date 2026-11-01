@@ -133,6 +133,10 @@ Die Live-Optimierung löst die `export_tariff_id` des Live-Szenarios auf. Bei Ty
 
 > **Hinweis:** Die Vergütung kann sich ändern (z. B. monatlich). Tarif in `tariffs.json` bzw. die gewählte `export_tariff_id` aktuell halten.
 
+### Externe Preisreihe über MQTT
+
+Ein Spot-Benutzertarif kann seine Preise statt aus EPEX aus einer externen Reihe beziehen, z. B. den dynamischen EKZ-Tarif vom LoxBerry. Für diesen Tarif kommt keine Netznutzung aus dem Hausprofil dazu; fehlende Viertelstunden schätzt Earnie aus EPEX. Einrichtung und Rechenweg: [MQTT-Anbindung → Externe Bezugspreise](../einrichtung/mqtt.md#externe-bezugspreise-ekz).
+
 ### Benutzertarife (`user_tariffs.json`)
 
 Eigene Tarife entstehen auf der Seite **Konfiguration → Tarife** (Tarif-Editor von [Edibert](https://github.com/JochenTCC/Edibert), eingebettet in Earnie; Beschreibung im [Benutzer-Handbuch](../user-manual/Benutzer-Handbuch-Earnie.md#tarife-benutzertarife)). Sie liegen in `user_tariffs.json` **neben** `tariffs.json` (gleiches Verzeichnis, gleiche Struktur, IDs beginnen mit `user_`). Earnie liest die Datei, wenn sie existiert; fehlt sie, gibt es einfach keine Benutzertarife. Die Datei gehört zum Config-Paket (Export/Import).

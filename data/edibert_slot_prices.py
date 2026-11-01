@@ -193,7 +193,11 @@ def price_points(
         for slot, value in zip(utc_slots, epex_values)
         if value is not None
     }
-    _fill_partial_hours(tariff_obj, ctx, utc_slots, market, market_for)
+    if is_external_import(ref, direction):
+        market = _external_market(tariff_obj, utc_slots, market, warnings_out)
+        fee = None  # the external series already contains grid use and levies
+    else:
+        _fill_partial_hours(tariff_obj, ctx, utc_slots, market, market_for)
     points: list[Any] = []
     for start, end in _runs(utc_slots):
         series = eb.price_series(
@@ -209,6 +213,40 @@ def price_points(
             warnings_out.extend(eb.warning_text(warning) for warning in series.warnings)
         points.extend(series.points)
     return points
+
+
+def is_external_import(ref: dict[str, Any], direction: str) -> bool:
+    """True when this import tariff is priced from the external feed instead of EPEX."""
+    from data.external_prices import external_tariff_id
+
+    tariff_id = external_tariff_id()
+    return direction == eb.IMPORT and bool(tariff_id) and ref.get("import_tariff_id") == tariff_id
+
+
+def _external_market(
+    tariff_obj: Any,
+    utc_slots: Sequence[datetime],
+    epex: dict[datetime, float],
+    warnings_out: list[str] | None,
+) -> dict[datetime, float]:
+    from data.external_prices import external_market
+
+    if tariff_obj.type != "spot_hourly" or tariff_obj.settlement_mtu != "15min":
+        raise ValueError(
+            f"Tarif '{tariff_obj.id}' bekommt externe Preise und muss deshalb ein Spot-Tarif "
+            "(spot_hourly) mit Abrechnung je Viertelstunde (settlement_mtu 15min) sein."
+        )
+    result = external_market(utc_slots, epex)
+    if result.estimated and result.fit is not None:
+        a, b = result.fit
+        text = (
+            f"{result.estimated} Viertelstunden ohne externen Preis aus EPEX geschätzt "
+            f"({a:.2f} + {b:.3f} × EPEX)"
+        )
+        logger.info("Tariff '%s': %s", tariff_obj.id, text)
+        if warnings_out is not None:
+            warnings_out.append(text)
+    return result.market
 
 
 def import_cents(
@@ -250,11 +288,17 @@ def single_slot_cent(
     ctx = pricing_context(ref)
     tariff_obj = tariff(ref, direction)
     fee = grid_fee(ref) if direction == eb.IMPORT else None
+    slot_utc = ctx.to_local(slot).astimezone(UTC)
+    market_cent = None if epex_cent is None else float(epex_cent)
+    if is_external_import(ref, direction):
+        epex = {} if market_cent is None else {slot_utc: market_cent}
+        market_cent = _external_market(tariff_obj, [slot_utc], epex, None)[slot_utc]
+        fee = None
     result = eb.evaluate_slot(
         tariff_obj,
-        ctx.to_local(slot).astimezone(UTC),
+        slot_utc,
         ctx,
-        epex_cent=None if epex_cent is None else float(epex_cent),
+        epex_cent=market_cent,
         grid_fee=fee,
     )
     return float(result.cent)
@@ -302,6 +346,11 @@ def pricing_digest(ref: dict[str, Any]) -> str:
         tariff_id = ref.get(key)
         if tariff_id and tariff_id != eb.USER_FIXED_ID:
             payload[key] = [_entry_by_id(doc.get(section), tariff_id) for doc in tariff_docs]
+    if is_external_import(ref, eb.IMPORT):
+        from data.external_prices import load_store
+
+        # New feed data changes the prices of this tariff without touching any file above.
+        payload["external_prices"] = load_store().get("received_at")
     area_id = (ref.get("netznutzung") or {}).get("area_id")
     if area_id and ref.get("grid_fees_path"):
         grid_docs = [

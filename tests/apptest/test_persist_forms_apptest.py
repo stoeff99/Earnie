@@ -184,6 +184,8 @@ def test_mqtt_t1_submit_persists_config_and_password(monkeypatch) -> None:
         "port": 1884,
         "username": "mqtt-tester",
         "topic_prefix": "home/earnie",
+        "price_topic": "",
+        "price_tariff_id": "",
     }
     assert "mqtt-test-pw" not in _config_path().read_text(encoding="utf-8")
     assert "EHAL_MQTT_PASSWORD" in _dotenv_path().read_text(encoding="utf-8")
@@ -192,6 +194,37 @@ def test_mqtt_t1_submit_persists_config_and_password(monkeypatch) -> None:
     assert fresh.text_input(key="t_mqtt_host").value == "192.168.178.40"
     assert fresh.number_input(key="t_mqtt_port").value == 1884
     assert fresh.text_input(key="t_mqtt_password").value == ""
+
+
+def test_mqtt_t1_price_feed_is_persisted(monkeypatch) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    monkeypatch.setattr("ui.ehal_mqtt_form.price_tariff_options", lambda: ["user_ekz_dyn"])
+    at = _run("run_form_mqtt.py")
+    _fill_mqtt(at)
+    at.text_input(key="t_mqtt_price_topic").set_value("ekz/ems/tariffs/intervals")
+    at.selectbox(key="t_mqtt_price_tariff_id").set_value("user_ekz_dyn")
+    at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
+    assert not at.exception
+
+    mqtt = _config()["ehal"]["mqtt"]
+    assert (mqtt["price_topic"], mqtt["price_tariff_id"]) == (
+        "ekz/ems/tariffs/intervals",
+        "user_ekz_dyn",
+    )
+    fresh = _run("run_form_mqtt.py")
+    assert fresh.selectbox(key="t_mqtt_price_tariff_id").value == "user_ekz_dyn"
+
+
+def test_mqtt_t3_price_topic_without_tariff_is_rejected(monkeypatch) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    before = _config_path().read_bytes()
+    at = _run("run_form_mqtt.py")
+    _fill_mqtt(at)
+    at.text_input(key="t_mqtt_price_topic").set_value("ekz/ems/tariffs/intervals")
+    at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
+
+    assert any("gehören zusammen" in e.value for e in at.error)
+    assert _config_path().read_bytes() == before
 
 
 def test_mqtt_t3_enabled_without_host_is_rejected(monkeypatch) -> None:
