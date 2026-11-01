@@ -186,12 +186,13 @@ class EhalMqttCarrier:
             return
         self._refused = False
         prefix = self.settings.topic_prefix
-        client.subscribe(
-            [
-                (topic(prefix, TOPIC_TELEMETRY, "#"), 0),
-                (topic(prefix, TOPIC_REQUEST_OPTIMIZE), 0),
-            ]
-        )
+        subscriptions = [
+            (topic(prefix, TOPIC_TELEMETRY, "#"), 0),
+            (topic(prefix, TOPIC_REQUEST_OPTIMIZE), 0),
+        ]
+        if self.settings.price_topic:
+            subscriptions.append((self.settings.price_topic, 0))
+        client.subscribe(subscriptions)
         client.publish(topic(prefix, TOPIC_AVAILABILITY), PAYLOAD_ONLINE, qos=1, retain=True)
         with self._lock:
             self._connected = True
@@ -223,6 +224,9 @@ class EhalMqttCarrier:
         self._record_link(connected=False, error=str(reason_code))
 
     def _on_message(self, _client, _userdata, msg) -> None:
+        if self.settings.price_topic and str(msg.topic) == self.settings.price_topic:
+            self._on_price_message(bytes(msg.payload or b""))
+            return
         try:
             handle_inbound(
                 self.settings.topic_prefix,
@@ -232,6 +236,16 @@ class EhalMqttCarrier:
             )
         except Exception:  # noqa: BLE001 — the paho network thread must keep running
             logger.exception("MQTT message on %s failed", msg.topic)
+
+    def _on_price_message(self, payload: bytes) -> None:
+        from data.external_prices import ingest_ekz_payload
+
+        try:
+            ingest_ekz_payload(payload)
+        except ValueError as exc:
+            logger.error("MQTT price feed on %s rejected: %s", self.settings.price_topic, exc)
+        except Exception:  # noqa: BLE001 — the paho network thread must keep running
+            logger.exception("MQTT price feed on %s failed", self.settings.price_topic)
 
     # --- lifecycle ------------------------------------------------------------------------
 
@@ -347,6 +361,8 @@ def settings_from_config() -> MqttSettings:
         username=str(config.get("EHAL_MQTT_USERNAME") or ""),
         password=str(config.get("EHAL_MQTT_PASSWORD") or ""),
         topic_prefix=str(config.get("EHAL_MQTT_TOPIC_PREFIX")),
+        price_topic=str(config.get("EHAL_MQTT_PRICE_TOPIC") or ""),
+        price_tariff_id=str(config.get("EHAL_MQTT_PRICE_TARIFF_ID") or ""),
     )
 
 

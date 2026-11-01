@@ -80,6 +80,29 @@ Die `VI_Earnie_*.xml` aus demselben Export lesen `status.json` weiterhin per HTT
 
 Wer die Sollwerte lieber über das Gateway bezieht, abonniert dort `earnie/setpoint/#`. Das Gateway reicht die Werte an den Miniserver weiter und leitet die Namen der virtuellen Eingänge aus den Topics ab. Welche Namen dabei entstehen, zeigt das Gateway in seiner Übersicht der eingehenden Werte.
 
+## Externe Bezugspreise (EKZ)
+
+Earnie kann den Bezugspreis statt aus EPEX aus einer externen Preisreihe über MQTT rechnen. Unterstützt ist das Format des LoxBerry-Plugins für den dynamischen EKZ-Tarif (Topic z. B. `ekz/ems/tariffs/intervals`, Viertelstundenwerte).
+
+**Einrichten:**
+
+1. Unter **Konfiguration → Tarife** einen Benutzertarif für den Bezug anlegen:
+   - Typ **Spot** (`spot_hourly`), Land **CH**, Abrechnung je Viertelstunde (Standard),
+   - Aufschlag und Abwicklungsgebühr **0**,
+   - Preise **ohne** USt, USt **8,1 %**.
+2. Unter **Smarthome-Backend → MQTT-Broker (optional)** bei **Externe Bezugspreise** das **Topic der Preise** eintragen und diesen **Benutzertarif** wählen. Speichern und den Optimierer-Dienst neu starten.
+3. Im **Szenarienkonfigurator** diesen Tarif als Bezugstarif des Live-Szenarios wählen.
+
+**So rechnet Earnie:**
+
+- Für diesen Tarif nimmt Earnie je Viertelstunde den EKZ-Wert `chf_per_kwh_sum` (Energie, Netznutzung und Abgaben, ohne USt) an Stelle des EPEX-Preises und schlägt die USt des Tarifs auf.
+- Die Netznutzung aus dem Hausprofil kommt bei diesem Tarif **nicht** dazu, weil sie im EKZ-Preis schon enthalten ist. Andere Tarife rechnen unverändert mit EPEX und Netznutzung.
+- Das Feld `total_chf` ignoriert Earnie: es addiert eine Monatsgebühr pro Stunde zu einem Preis pro kWh.
+- Das Plugin füllt noch nicht veröffentlichte Viertelstunden mit dem letzten Wert auf. Earnie erkennt diese Wiederholung am Ende der Reihe und verwirft sie.
+- **Fehlende Viertelstunden** (z. B. der nächste Tag vor der Veröffentlichung) schätzt Earnie aus EPEX: `EKZ ≈ a + b × EPEX`, berechnet aus allen Viertelstunden der letzten 21 Tage, für die beide Preise vorliegen. Dafür braucht es mindestens 24 solcher Viertelstunden, also nach dem ersten Empfang einige Stunden Betrieb. Davor bricht die Berechnung mit einer Meldung ab. Wie viele Viertelstunden geschätzt sind, steht im Log.
+
+Unter **MQTT-Broker (optional)** zeigt Earnie, wie viele Viertelstunden gespeichert sind und bis wann die Preise veröffentlicht sind. Die Werte liegen in `runtime/external_import_prices.json`; der Szenario-Explorer nutzt dieselben gespeicherten Preise.
+
 ## Verbindungsstatus
 
 Unter **MQTT-Broker (optional)** zeigt die Seite den letzten vom Optimierer-Dienst gemeldeten Zustand: verbunden, getrennt oder abgelehnt (z. B. falsches Passwort). Ist der Broker beim Start nicht erreichbar, startet der Dienst trotzdem und versucht die Verbindung laufend neu (alle 1 bis 60 Sekunden). Jeder Abbruch steht als Fehler im Log.

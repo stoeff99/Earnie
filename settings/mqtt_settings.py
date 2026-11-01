@@ -23,6 +23,9 @@ class MqttSettings:
     username: str
     password: str
     topic_prefix: str
+    # Optional external import prices (EKZ interval JSON) and the user tariff priced from them.
+    price_topic: str = ""
+    price_tariff_id: str = ""
 
 
 DISABLED = MqttSettings(
@@ -66,6 +69,16 @@ def parse_topic_prefix(raw: object) -> str:
     return prefix
 
 
+def parse_price_topic(raw: object) -> str:
+    """Exact topic of the external price feed (no wildcards); empty = no feed."""
+    topic = str(raw or "").strip()
+    if any(ch in topic for ch in "#+\0"):
+        raise ValueError(
+            f"ehal.mqtt.price_topic darf keine MQTT-Platzhalter (#, +) enthalten: {topic!r}."
+        )
+    return topic
+
+
 def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
     """Validate an ``ehal.mqtt`` block; ``None`` (no block) → MQTT disabled."""
     if raw is None:
@@ -87,6 +100,13 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
         if "topic_prefix" in raw
         else DEFAULT_TOPIC_PREFIX
     )
+    price_topic = parse_price_topic(raw.get("price_topic"))
+    price_tariff_id = str(raw.get("price_tariff_id") or "").strip()
+    if bool(price_topic) != bool(price_tariff_id):
+        raise ValueError(
+            "ehal.mqtt.price_topic und ehal.mqtt.price_tariff_id gehören zusammen: "
+            "entweder beide setzen oder beide leer lassen."
+        )
     return MqttSettings(
         enabled=enabled,
         host=host,
@@ -94,6 +114,8 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
         username=str(raw.get("username") or "").strip(),
         password=str(password or ""),
         topic_prefix=prefix,
+        price_topic=price_topic,
+        price_tariff_id=price_tariff_id,
     )
 
 
@@ -105,4 +127,6 @@ def mqtt_block_from_settings(settings: MqttSettings) -> dict[str, object]:
         "port": settings.port,
         "username": settings.username,
         "topic_prefix": settings.topic_prefix,
+        "price_topic": settings.price_topic,
+        "price_tariff_id": settings.price_tariff_id,
     }

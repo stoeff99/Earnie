@@ -361,3 +361,59 @@ def test_probe_unreachable():
         client_factory=lambda cid: _ProbeClient(cid, fail=ConnectionRefusedError("refused")),
     )
     assert error.startswith("Broker 192.168.1.20:1883 nicht erreichbar")
+
+
+# --- external price feed ---------------------------------------------------------------------
+
+
+def test_price_topic_and_tariff_belong_together():
+    from settings.mqtt_settings import parse_mqtt_block
+
+    with pytest.raises(ValueError, match="gehören zusammen"):
+        parse_mqtt_block({"price_topic": "ekz/ems/tariffs/intervals"}, password="")
+    with pytest.raises(ValueError, match="Platzhalter"):
+        parse_mqtt_block({"price_topic": "ekz/#", "price_tariff_id": "user_ekz"}, password="")
+    parsed = parse_mqtt_block(
+        {"price_topic": " ekz/ems/tariffs/intervals ", "price_tariff_id": "user_ekz"}, password=""
+    )
+    assert (parsed.price_topic, parsed.price_tariff_id) == ("ekz/ems/tariffs/intervals", "user_ekz")
+
+
+def test_price_feed_is_subscribed_and_stored(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from data import external_prices
+
+    monkeypatch.setattr(ehal_mqtt, "_link_status_path", lambda: str(tmp_path / "mqtt.json"))
+    stored: list[bytes] = []
+    monkeypatch.setattr(external_prices, "ingest_ekz_payload", stored.append)
+    settings = replace(
+        _SETTINGS, price_topic="ekz/ems/tariffs/intervals", price_tariff_id="user_ekz"
+    )
+    client = _FakeClient("x")
+    instance = ehal_mqtt.EhalMqttCarrier(
+        settings, client_factory=lambda _cid: client, status_builder=dict, interval_s=3600
+    )
+    instance.start()
+    try:
+        instance._on_connect(client, None, None, _OK, None)
+        assert ("ekz/ems/tariffs/intervals", 0) in client.subscribed[0]
+        instance._on_message(
+            None, None, SimpleNamespace(topic="ekz/ems/tariffs/intervals", payload=b"{}")
+        )
+    finally:
+        instance.stop()
+    assert stored == [b"{}"]
+
+
+def test_bad_price_message_is_logged_not_raised(tmp_path, monkeypatch, caplog):
+    from dataclasses import replace
+
+    monkeypatch.setattr(ehal_mqtt, "_link_status_path", lambda: str(tmp_path / "mqtt.json"))
+    monkeypatch.setattr(
+        "data.external_prices._store_path", lambda: str(tmp_path / "prices.json")
+    )
+    settings = replace(_SETTINGS, price_topic="ekz/x", price_tariff_id="user_ekz")
+    instance = ehal_mqtt.EhalMqttCarrier(settings, client_factory=_FakeClient, interval_s=3600)
+    instance._on_message(None, None, SimpleNamespace(topic="ekz/x", payload=b"not json"))
+    assert "price feed on ekz/x rejected" in caplog.text

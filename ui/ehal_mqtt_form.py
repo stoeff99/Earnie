@@ -39,6 +39,8 @@ def settings_from_form(values: dict[str, Any], *, password: str) -> MqttSettings
             "port": values["port"],
             "username": str(values["username"]).strip(),
             "topic_prefix": str(values["topic_prefix"]).strip(),
+            "price_topic": str(values.get("price_topic") or "").strip(),
+            "price_tariff_id": str(values.get("price_tariff_id") or "").strip(),
         },
         password=password,
     )
@@ -86,6 +88,40 @@ def _render_link_caption() -> None:
         st.caption(f"Optimierer-Dienst: nicht verbunden mit {where} (Stand {status.get('ts')}).")
 
 
+_NO_PRICE_TARIFF = ""
+
+
+def price_tariff_options() -> list[str]:
+    """User import tariffs that can take the external series (spot, 15-min settlement)."""
+    from house_config.tariffs_store import ORIGIN_KEY, ORIGIN_USER
+    from ui.house_config_io import load_tariffs
+
+    tariffs = load_tariffs().get("import_tariffs") or {}
+    return sorted(
+        tid
+        for tid, spec in tariffs.items()
+        if spec.get(ORIGIN_KEY) == ORIGIN_USER and spec.get("type") == "spot_hourly"
+    )
+
+
+def _render_price_feed_caption() -> None:
+    from data.external_prices import store_summary
+
+    try:
+        summary = store_summary()
+    except ValueError as exc:
+        st.caption(str(exc))
+        return
+    if not summary["slots"]:
+        st.caption("Noch keine externen Preise empfangen.")
+        return
+    st.caption(
+        f"Externe Preise: {summary['slots']} Viertelstunden gespeichert, veröffentlicht bis "
+        f"{summary['until']} (zuletzt empfangen {summary['received_at']}); "
+        f"{summary['pairs']} Viertelstunden mit EPEX zum Vergleich."
+    )
+
+
 def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
     """Broker address, port and login for the MQTT carrier."""
     stored = _mqtt_block(load_main_config())
@@ -98,6 +134,7 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
         "Optimierer-Dienstes."
     )
     _render_link_caption()
+    _render_price_feed_caption()
     with st.form(form_key):
         enabled = st.checkbox(
             "MQTT aktivieren",
@@ -140,6 +177,29 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
             key=f"{form_key}_topic_prefix",
             value=str(stored.get("topic_prefix") or DEFAULT_TOPIC_PREFIX),
         )
+        st.markdown("**Externe Bezugspreise (optional)**")
+        price_topic = st.text_input(
+            "Topic der Preise (EKZ-Format)",
+            key=f"{form_key}_price_topic",
+            value=str(stored.get("price_topic") or ""),
+            help="z. B. ekz/ems/tariffs/intervals (LoxBerry-Plugin für EKZ-Dynamik).",
+        )
+        options = [_NO_PRICE_TARIFF, *price_tariff_options()]
+        current = str(stored.get("price_tariff_id") or "")
+        if current and current not in options:
+            options.append(current)
+        price_tariff_id = st.selectbox(
+            "Benutzertarif für diese Preise",
+            options=options,
+            index=options.index(current),
+            format_func=lambda tid: tid or "—",
+            key=f"{form_key}_price_tariff_id",
+            help=(
+                "Spot-Benutzertarif (Konfiguration → Tarife) mit Abrechnung je Viertelstunde, "
+                "ohne Aufschlag und mit der USt (CH 8,1 %). Statt EPEX rechnet er mit den "
+                "externen Preisen; Netznutzung kommt nicht dazu."
+            ),
+        )
         col_save, col_test = st.columns(2)
         submitted = col_save.form_submit_button(
             "Speichern", type="primary", key=f"{form_key}_submit"
@@ -154,6 +214,8 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
         "port": int(port),
         "username": username,
         "topic_prefix": topic_prefix,
+        "price_topic": price_topic,
+        "price_tariff_id": price_tariff_id,
     }
     try:
         settings = settings_from_form(

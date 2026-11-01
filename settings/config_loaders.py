@@ -183,6 +183,8 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
         "EHAL_MQTT_PORT": mqtt.port,
         "EHAL_MQTT_USERNAME": mqtt.username,
         "EHAL_MQTT_TOPIC_PREFIX": mqtt.topic_prefix,
+        "EHAL_MQTT_PRICE_TOPIC": mqtt.price_topic,
+        "EHAL_MQTT_PRICE_TARIFF_ID": mqtt.price_tariff_id,
     }
 
 
