@@ -419,3 +419,98 @@ def test_bad_price_message_is_logged_not_raised(tmp_path, monkeypatch, caplog):
     instance = ehal_mqtt.EhalMqttCarrier(settings, client_factory=_FakeClient, interval_s=3600)
     instance._on_message(None, None, SimpleNamespace(topic="ekz/x", payload=b"not json"))
     assert "price feed on ekz/x rejected" in caplog.text
+
+
+# --- foreign topic mapping (ehal.mqtt.topic_map) -------------------------------------------
+
+_TESLA_SOC = "ioBroker/tesla-motors/0/VIN/charge_state/battery_level"
+
+
+def test_topic_map_roundtrips():
+    parsed = parse_mqtt_block(
+        {"topic_map": [{"topic": f" {_TESLA_SOC} ", "ehal_id": " ev.e_auto.sens_evcs_soc_act "}]},
+        password="",
+    )
+    assert dict(parsed.topic_map) == {_TESLA_SOC: "ev.e_auto.sens_evcs_soc_act"}
+    block = mqtt_block_from_settings(parsed)
+    assert block["topic_map"] == [{"topic": _TESLA_SOC, "ehal_id": "ev.e_auto.sens_evcs_soc_act"}]
+    assert parse_mqtt_block(block, password="") == parsed
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ([{"topic": _TESLA_SOC}], "beide nötig"),
+        ([{"topic": "ioBroker/#", "ehal_id": "ev.e_auto.sens_evcs_soc_act"}], "Platzhalter"),
+        ([{"topic": "earnie/x", "ehal_id": "ev.e_auto.sens_evcs_soc_act"}], "Earnie-Präfix"),
+        ([{"topic": "ekz/prices", "ehal_id": "ev.e_auto.sens_evcs_soc_act"}], "Topic der Preise"),
+        ([{"topic": _TESLA_SOC, "ehal_id": "set_ess_active_power"}], "kein lesbares"),
+        (
+            [
+                {"topic": _TESLA_SOC, "ehal_id": "ev.e_auto.sens_evcs_soc_act"},
+                {"topic": _TESLA_SOC, "ehal_id": "ev.e_auto.get_evcs_limit_soc"},
+            ],
+            "doppelt",
+        ),
+        (
+            [
+                {"topic": _TESLA_SOC, "ehal_id": "ev.e_auto.sens_evcs_soc_act"},
+                {"topic": "other/soc", "ehal_id": "ev.e_auto.sens_evcs_soc_act"},
+            ],
+            "schon ein Topic",
+        ),
+        ({"x": "y"}, "Liste"),
+    ],
+)
+def test_topic_map_rejects_bad_rows(rows, message):
+    with pytest.raises(ValueError, match=message):
+        parse_mqtt_block({"price_topic": "ekz/prices", "topic_map": rows}, password="")
+
+
+def test_topic_map_reaches_runtime_config():
+    params = load_ehal_params(
+        {"ehal": {"mqtt": {"topic_map": [{"topic": _TESLA_SOC, "ehal_id": "ev.e_auto.sens_evcs_soc_act"}]}}}
+    )
+    assert params["EHAL_MQTT_TOPIC_MAP"] == {_TESLA_SOC: "ev.e_auto.sens_evcs_soc_act"}
+
+
+def test_mapped_topic_is_subscribed_and_recorded(inbox, tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    monkeypatch.setattr(ehal_mqtt, "_link_status_path", lambda: str(tmp_path / "mqtt.json"))
+    settings = replace(_SETTINGS, topic_map={_TESLA_SOC: "ev.e_auto.sens_evcs_soc_act"})
+    client = _FakeClient("x")
+    instance = ehal_mqtt.EhalMqttCarrier(
+        settings, client_factory=lambda _cid: client, status_builder=dict, interval_s=3600
+    )
+    instance.start()
+    try:
+        instance._on_connect(client, None, None, _OK, None)
+        assert (_TESLA_SOC, 0) in client.subscribed[0]
+        instance._on_message(None, None, SimpleNamespace(topic=_TESLA_SOC, payload=b"56"))
+    finally:
+        instance.stop()
+    assert inbox == [("ev.e_auto.sens_evcs_soc_act", "56", "mqtt:192.168.1.20:1883")]
+
+
+def test_rejected_mapped_value_is_logged(monkeypatch, caplog):
+    from dataclasses import replace
+
+    monkeypatch.setattr(
+        "runtime_store.ehal_push_inbox.record_push", lambda *_a, **_k: "bad_value"
+    )
+    settings = replace(_SETTINGS, topic_map={_TESLA_SOC: "ev.e_auto.sens_evcs_soc_act"})
+    instance = ehal_mqtt.EhalMqttCarrier(settings, client_factory=_FakeClient, interval_s=3600)
+    instance._on_message(None, None, SimpleNamespace(topic=_TESLA_SOC, payload=b"{\"val\":56}"))
+    assert f"rejected (bad_value): topic={_TESLA_SOC}" in caplog.text
+
+
+def test_mapped_topic_without_number_is_warned_once(inbox, caplog):
+    from dataclasses import replace
+
+    settings = replace(_SETTINGS, topic_map={_TESLA_SOC: "ev.e_auto.sens_evcs_soc_act"})
+    instance = ehal_mqtt.EhalMqttCarrier(settings, client_factory=_FakeClient, interval_s=3600)
+    for payload in (b'{"val":56}', b'{"val":57}', b"58", b'{"val":59}'):
+        instance._on_message(None, None, SimpleNamespace(topic=_TESLA_SOC, payload=payload))
+    assert caplog.text.count("sends no plain number") == 2
+    assert [raw for _id, raw, _peer in inbox] == ['{"val":56}', '{"val":57}', "58", '{"val":59}']

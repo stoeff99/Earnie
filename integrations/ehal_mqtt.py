@@ -12,6 +12,8 @@ Topics under ``<prefix>`` (``ehal.mqtt.topic_prefix``, default ``earnie``):
 - ``<prefix>/setpoint/<EHAL-ID>`` (publish, retained): one value per
   ``status.json`` key, for gateways that map one topic to one input.
 - ``<prefix>/availability`` (publish, retained): ``online`` / ``offline`` (last will).
+- Mapped foreign topics (``ehal.mqtt.topic_map``, e.g. ioBroker states): plain value,
+  recorded under the mapped EHAL ID exactly like ``<prefix>/telemetry/<EHAL-ID>``.
 
 Earnie cannot see whether a subscriber consumed a retained message, so a publish
 is never counted as a hub fetch; only the hub heartbeat
@@ -65,7 +67,7 @@ def peer_label(settings: MqttSettings) -> str:
 
 def handle_inbound(prefix: str, msg_topic: str, payload: bytes, peer: str) -> str:
     """Route one received message; returns ``record_push`` result or ``unknown_topic``."""
-    from ehal.push_signals import HEARTBEAT_ID, REQUEST_OPTIMIZE_ID
+    from ehal.push_signals import REQUEST_OPTIMIZE_ID
     from runtime_store.ehal_push_inbox import record_push
 
     text = payload.decode("utf-8", errors="replace").strip()
@@ -85,7 +87,14 @@ def handle_inbound(prefix: str, msg_topic: str, payload: bytes, peer: str) -> st
     telemetry_root = topic(prefix, TOPIC_TELEMETRY) + "/"
     if not msg_topic.startswith(telemetry_root):
         return RESULT_UNKNOWN_TOPIC
-    ehal_id = msg_topic[len(telemetry_root):]
+    return record_telemetry(msg_topic[len(telemetry_root):], text, peer, msg_topic)
+
+
+def record_telemetry(ehal_id: str, text: str, peer: str, msg_topic: str) -> str:
+    """One telemetry value → push inbox (hub units, as from a VO push); logs rejections."""
+    from ehal.push_signals import HEARTBEAT_ID
+    from runtime_store.ehal_push_inbox import record_push
+
     result = record_push(ehal_id, text, peer)
     if result in ("ok", "new"):
         if ehal_id == HEARTBEAT_ID:
@@ -170,6 +179,8 @@ class EhalMqttCarrier:
         self._connected = False
         self._refused = False
         self._last_sent: dict[str, str] = {}
+        # Mapped topics whose last value was no plain number (warned once until one parses).
+        self._unparsed_topics: set[str] = set()
 
     # --- broker callbacks (paho callback API v2) -------------------------------------------
 
@@ -192,6 +203,7 @@ class EhalMqttCarrier:
         ]
         if self.settings.price_topic:
             subscriptions.append((self.settings.price_topic, 0))
+        subscriptions.extend((mapped, 0) for mapped in self.settings.topic_map)
         client.subscribe(subscriptions)
         client.publish(topic(prefix, TOPIC_AVAILABILITY), PAYLOAD_ONLINE, qos=1, retain=True)
         with self._lock:
@@ -227,7 +239,11 @@ class EhalMqttCarrier:
         if self.settings.price_topic and str(msg.topic) == self.settings.price_topic:
             self._on_price_message(bytes(msg.payload or b""))
             return
+        mapped_id = self.settings.topic_map.get(str(msg.topic))
         try:
+            if mapped_id is not None:
+                self._on_mapped_message(str(msg.topic), mapped_id, bytes(msg.payload or b""))
+                return
             handle_inbound(
                 self.settings.topic_prefix,
                 str(msg.topic),
@@ -236,6 +252,20 @@ class EhalMqttCarrier:
             )
         except Exception:  # noqa: BLE001 — the paho network thread must keep running
             logger.exception("MQTT message on %s failed", msg.topic)
+
+    def _on_mapped_message(self, msg_topic: str, ehal_id: str, payload: bytes) -> None:
+        from runtime_store.loxone_push_parse import parse_push_value
+
+        text = payload.decode("utf-8", errors="replace").strip()
+        if parse_push_value(text) is None:
+            if msg_topic not in self._unparsed_topics:
+                self._unparsed_topics.add(msg_topic)
+                logger.warning(
+                    "MQTT topic %s (→ %s) sends no plain number: %r", msg_topic, ehal_id, text[:64]
+                )
+        else:
+            self._unparsed_topics.discard(msg_topic)
+        record_telemetry(ehal_id, text, peer_label(self.settings), msg_topic)
 
     def _on_price_message(self, payload: bytes) -> None:
         from data.external_prices import ingest_ekz_payload
@@ -363,6 +393,7 @@ def settings_from_config() -> MqttSettings:
         topic_prefix=str(config.get("EHAL_MQTT_TOPIC_PREFIX")),
         price_topic=str(config.get("EHAL_MQTT_PRICE_TOPIC") or ""),
         price_tariff_id=str(config.get("EHAL_MQTT_PRICE_TARIFF_ID") or ""),
+        topic_map=dict(config.get("EHAL_MQTT_TOPIC_MAP") or {}),
     )
 
 

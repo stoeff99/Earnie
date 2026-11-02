@@ -37,7 +37,7 @@ Fehlt der Block `ehal.mqtt`, ist MQTT aus. Ist `enabled` gesetzt, aber kein `hos
 
 ## Topics
 
-Alle Topics beginnen mit dem Präfix (hier `earnie`). Die EHAL-IDs sind dieselben wie in der Signalliste auf **EHAL-Com** und in den Loxone-Vorlagen.
+Alle Topics von Earnie beginnen mit dem Präfix (hier `earnie`); nur zugeordnete fremde Topics nicht. Die EHAL-IDs sind dieselben wie in der Signalliste auf **EHAL-Com** und in den Loxone-Vorlagen.
 
 | Topic | Richtung | Inhalt |
 | ----- | -------- | ------ |
@@ -47,6 +47,7 @@ Alle Topics beginnen mit dem Präfix (hier `earnie`). Die EHAL-IDs sind dieselbe
 | `earnie/status` | von Earnie (retained) | Der komplette Inhalt von `status.json` als JSON. |
 | `earnie/setpoint/<EHAL-ID>` | von Earnie (retained) | Je ein Wert aus `status.json`, z. B. `earnie/setpoint/heartbeat_earnie`. Gedacht für Gateways, die ein Topic auf einen Eingang abbilden. |
 | `earnie/availability` | von Earnie (retained) | `online` nach dem Verbinden, `offline` beim Beenden oder Verbindungsabbruch (Last Will). |
+| beliebiges zugeordnetes Topic | an Earnie | Ein Wert für das zugeordnete EHAL-Signal, siehe [Fremde Topics zuordnen](#fremde-topics-zuordnen-z-b-iobroker). |
 
 Earnie sendet `earnie/status` alle 10 Sekunden. Einzelne `setpoint`-Topics gehen nur bei Änderung raus. Nach jedem (Wieder-)Verbinden sendet Earnie alle Werte erneut.
 
@@ -79,6 +80,26 @@ Die MQTT-Vorlagen brauchen keinen Push-Token, die Anmeldung am Broker ersetzt ih
 Die `VI_Earnie_*.xml` aus demselben Export lesen `status.json` weiterhin per HTTP direkt von Earnie. Das funktioniert unabhängig von MQTT.
 
 Wer die Sollwerte lieber über das Gateway bezieht, abonniert dort `earnie/setpoint/#`. Das Gateway reicht die Werte an den Miniserver weiter und leitet die Namen der virtuellen Eingänge aus den Topics ab. Welche Namen dabei entstehen, zeigt das Gateway in seiner Übersicht der eingehenden Werte.
+
+## Fremde Topics zuordnen (z. B. ioBroker)
+
+Werte, die ein anderes System schon auf den Broker schreibt, kann Earnie direkt lesen, ohne Umweg über Loxone oder ein Skript. Beispiel: Der ioBroker-Adapter für Tesla veröffentlicht den Ladestand unter `ioBroker/tesla-motors/0/<VIN>/charge_state/battery_level`.
+
+**Einrichten:**
+
+1. Unter **Smarthome-Backend → MQTT-Broker (optional)** in der Tabelle **Fremde Topics zuordnen** eine Zeile hinzufügen.
+2. **Quell-Topic:** das exakte Topic eintragen (ohne `#` oder `+`).
+3. **EHAL-Signal:** das Signal aus der Liste wählen, z. B. `ev.e_auto.sens_evcs_soc_act` für den Ladestand des E-Autos. Die Liste zeigt die lesbaren Signale der konfigurierten Komponenten, wie in der Signalliste auf **EHAL-Com**.
+4. Speichern und den Optimierer-Dienst neu starten.
+
+**So verarbeitet Earnie die Werte:**
+
+- Jeder Wert auf dem Quell-Topic zählt genau wie `earnie/telemetry/<EHAL-ID>`: gleiche Prüfung, gleiche Haltezeit, gleiche Anzeige in der Signalliste.
+- Der Wert muss eine **einfache Zahl** sein (z. B. `56`), in der Einheit, die die Signalliste für das Signal zeigt. Earnie rechnet nichts um. Sendet das Quellsystem etwas anderes (z. B. JSON), gilt der Wert als ungültig: Die Signalliste zeigt ihn so an, und das Log meldet es einmal je Topic. Dann im Quellsystem auf einfache Werte umstellen.
+- Jedes Topic und jedes Signal darf nur einmal vorkommen. Topics unter dem Earnie-Präfix und das Topic der Preise sind nicht erlaubt.
+- Unter der Tabelle zeigt Earnie zu jeder Zuordnung den zuletzt empfangenen Wert. Gibt es ein Signal nach einer Änderung der Komponenten nicht mehr, steht das dort; die Zuordnung dann anpassen.
+
+> **Hinweis:** Die Zuordnung liest nur. Earnie schreibt keine Werte auf fremde Topics, also z. B. kein Ladelimit ins Auto. Gesteuert wird weiter über die Sollwerte (`earnie/setpoint/<EHAL-ID>`).
 
 ## Externe Bezugspreise (EKZ)
 

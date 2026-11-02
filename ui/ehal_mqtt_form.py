@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import pandas as pd
 import streamlit as st
 
 from settings.mqtt_settings import (
@@ -41,9 +42,62 @@ def settings_from_form(values: dict[str, Any], *, password: str) -> MqttSettings
             "topic_prefix": str(values["topic_prefix"]).strip(),
             "price_topic": str(values.get("price_topic") or "").strip(),
             "price_tariff_id": str(values.get("price_tariff_id") or "").strip(),
+            "topic_map": topic_map_from_rows(values.get("topic_map") or []),
         },
         password=password,
     )
+
+
+_MAP_TOPIC = "topic"
+_MAP_EHAL_ID = "ehal_id"
+
+
+def _cell(value: object) -> str:
+    # Empty data_editor cells come back as None or NaN.
+    if value is None or (isinstance(value, float) and value != value):
+        return ""
+    return str(value).strip()
+
+
+def topic_map_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Editor rows → ``ehal.mqtt.topic_map``; fully empty rows are dropped, half-filled stay
+    (validation reports them)."""
+    out: list[dict[str, str]] = []
+    for row in rows:
+        topic, ehal_id = _cell(row.get(_MAP_TOPIC)), _cell(row.get(_MAP_EHAL_ID))
+        if topic or ehal_id:
+            out.append({_MAP_TOPIC: topic, _MAP_EHAL_ID: ehal_id})
+    return out
+
+
+def mapping_signal_options() -> list[str]:
+    """EHAL read signals of the configured components (Signalliste), for the topic map."""
+    from ehal.signal_catalog import iter_catalog_entries
+    from ui.house_config_io import _load_components_document, load_house_profiles
+
+    entries = iter_catalog_entries(load_house_profiles(), _load_components_document())
+    return sorted({entry.ehal_id for entry in entries if entry.direction == "read"})
+
+
+def _render_topic_map_status(mapping: list[dict[str, Any]], known: list[str]) -> None:
+    from runtime_store.ehal_push_inbox import load_inbox
+
+    if not mapping:
+        return
+    inbox = load_inbox()
+    lines = []
+    for row in mapping:
+        ehal_id = str(row.get(_MAP_EHAL_ID) or "")
+        topic = str(row.get(_MAP_TOPIC) or "")
+        last = inbox.get(ehal_id) or {}
+        if ehal_id not in known:
+            state = "**Signal gibt es in der Signalliste nicht mehr**"
+        elif last.get("last_ts"):
+            state = f"zuletzt `{last.get('raw')}` um {last.get('last_ts')}"
+        else:
+            state = "noch kein Wert empfangen"
+        lines.append(f"- `{topic}` → `{ehal_id}`: {state}")
+    st.markdown("\n".join(lines))
 
 
 def resolve_form_password(entered: str, *, clear: bool) -> str:
@@ -207,6 +261,41 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
                 "Bezugstarif anlegen: Typ Spot, Land CH, Aufschlag und Abwicklungsgebühr 0, "
                 "Preise ohne USt, USt 8,1 %. Bis dahin sammelt Earnie mit dem Topic nur die Preise."
             )
+        st.markdown("**Fremde Topics zuordnen (optional)**")
+        st.caption(
+            "Werte anderer Systeme (z. B. ioBroker) direkt einem EHAL-Signal zuordnen. Earnie "
+            "abonniert das Topic und behandelt jeden Wert wie `<Präfix>/telemetry/<EHAL-ID>`: "
+            "einfache Zahl, in der Einheit, die die Signalliste für das Signal zeigt."
+        )
+        stored_map = list(stored.get("topic_map") or [])
+        known = mapping_signal_options()
+        signal_options = sorted({*known, *(str(r.get(_MAP_EHAL_ID) or "") for r in stored_map)} - {""})
+
+        map_rows = st.data_editor(
+            pd.DataFrame(
+                [
+                    {_MAP_TOPIC: r.get(_MAP_TOPIC, ""), _MAP_EHAL_ID: r.get(_MAP_EHAL_ID, "")}
+                    for r in stored_map
+                ],
+                columns=[_MAP_TOPIC, _MAP_EHAL_ID],
+                dtype="object",
+            ),
+            key=f"{form_key}_topic_map",
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                _MAP_TOPIC: st.column_config.TextColumn(
+                    "Quell-Topic",
+                    help="Exaktes Topic, z. B. ioBroker/tesla-motors/0/<VIN>/charge_state/battery_level",
+                    width="large",
+                ),
+                _MAP_EHAL_ID: st.column_config.SelectboxColumn(
+                    "EHAL-Signal", options=signal_options, width="medium"
+                ),
+            },
+        )
+        _render_topic_map_status(stored_map, known)
         col_save, col_test = st.columns(2)
         submitted = col_save.form_submit_button(
             "Speichern", type="primary", key=f"{form_key}_submit"
@@ -223,6 +312,7 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
         "topic_prefix": topic_prefix,
         "price_topic": price_topic,
         "price_tariff_id": price_tariff_id,
+        "topic_map": map_rows.to_dict("records"),
     }
     try:
         settings = settings_from_form(
