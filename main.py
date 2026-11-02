@@ -1060,6 +1060,7 @@ if __name__ == "__main__":
         run_live_scenario_entity_check_on_startup,
         run_loxone_verify_on_startup,
         run_tariff_plausibility_on_startup,
+        run_timezone_check_on_startup,
     )
     from integrations.ehal_mqtt import start_ehal_mqtt
     from integrations.ehal_request_http import start_ehal_request_http
@@ -1068,6 +1069,7 @@ if __name__ == "__main__":
 
     # Clock-skew diagnostics from Date headers of responses the cycle receives anyway.
     install_requests_hook()
+    run_timezone_check_on_startup()
     run_tariff_plausibility_on_startup()
     run_live_scenario_entity_check_on_startup()
     def _start_hub_carriers() -> None:
