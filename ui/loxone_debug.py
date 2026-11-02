@@ -154,7 +154,13 @@ def _render_live_reads_fragment() -> None:
     st.caption(f"{ok}/{len(checks)} Merker erfolgreich gelesen · Stand **{read_at}**")
     rows = build_read_rows(checks, read_at)
     if rows:
-        from ui.ehal_live_read_style import style_live_read_rows
+        from ui.ehal_live_read_style import (
+            inactive_consumer_read_ids,
+            mark_not_activated,
+            style_live_read_rows,
+        )
+
+        rows = mark_not_activated(rows, inactive_consumer_read_ids())
 
         st.dataframe(
             style_live_read_rows(rows),
@@ -245,17 +251,24 @@ def _render_ehal_telemetry_fragment() -> None:
     else:
         push_info = None
         push_details = None
-    from ui.ehal_live_read_style import style_live_read_rows
+    from ui.ehal_live_read_style import (
+        inactive_consumer_read_ids,
+        mark_not_activated,
+        style_live_read_rows,
+    )
 
     st.dataframe(
         style_live_read_rows(
-            build_telemetry_rows(
-                telemetry_payload,
-                read_at,
-                mapping=mapping,
-                expected_fields=expected,
-                push_info=push_info,
-                push_details=push_details,
+            mark_not_activated(
+                build_telemetry_rows(
+                    telemetry_payload,
+                    read_at,
+                    mapping=mapping,
+                    expected_fields=expected,
+                    push_info=push_info,
+                    push_details=push_details,
+                ),
+                inactive_consumer_read_ids(),
             )
         ),
         width="stretch",

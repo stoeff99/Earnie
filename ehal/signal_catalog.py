@@ -362,35 +362,40 @@ def set_binding_activation(
         return house_out, comp_out
 
     if component_kind == "consumer":
+        found = False
+
+        def _with_binding(profile: Any) -> Any:
+            nonlocal found
+            if not isinstance(profile, dict):
+                return profile
+            consumers = []
+            for consumer in profile.get("consumers") or []:
+                if not isinstance(consumer, dict) or str(consumer.get("id") or "").strip() != entity_id:
+                    consumers.append(consumer)
+                    continue
+                found = True
+                c = dict(consumer)
+                bindings = dict(c.get("ehal_bindings") or {})
+                if activated:
+                    bindings.setdefault(key, "")
+                else:
+                    bindings.pop(key, None)
+                    # Drop legacy flex peer of the same kind.
+                    kind = field_kind(key)
+                    flex = f"flex.{entity_id}.{kind}"
+                    bindings.pop(flex, None)
+                c["ehal_bindings"] = bindings
+                consumers.append(c)
+            return {**profile, "consumers": consumers}
+
+        # Stored as a list (data model 5); older documents keyed profiles by name.
         profiles = house_out.get("profiles")
         if isinstance(profiles, dict):
-            new_profiles: dict[str, Any] = {}
-            for pname, profile in profiles.items():
-                if not isinstance(profile, dict):
-                    new_profiles[pname] = profile
-                    continue
-                consumers = []
-                for consumer in profile.get("consumers") or []:
-                    if not isinstance(consumer, dict):
-                        consumers.append(consumer)
-                        continue
-                    if str(consumer.get("id") or "").strip() != entity_id:
-                        consumers.append(consumer)
-                        continue
-                    c = dict(consumer)
-                    bindings = dict(c.get("ehal_bindings") or {})
-                    if activated:
-                        bindings.setdefault(key, "")
-                    else:
-                        bindings.pop(key, None)
-                        # Drop legacy flex peer of the same kind.
-                        kind = field_kind(key)
-                        flex = f"flex.{entity_id}.{kind}"
-                        bindings.pop(flex, None)
-                    c["ehal_bindings"] = bindings
-                    consumers.append(c)
-                new_profiles[pname] = {**profile, "consumers": consumers}
-            house_out["profiles"] = new_profiles
+            house_out["profiles"] = {name: _with_binding(pr) for name, pr in profiles.items()}
+        elif isinstance(profiles, list):
+            house_out["profiles"] = [_with_binding(pr) for pr in profiles]
+        if not found:
+            raise ValueError(f"consumer {entity_id!r} not found in house profiles ({binding_key})")
         return house_out, comp_out
 
     list_key = {

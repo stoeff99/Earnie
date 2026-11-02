@@ -474,3 +474,35 @@ def test_export_reads_match_live_read_fields(monkeypatch) -> None:
     exported = {s.ehal_id for s in reads} - {HEARTBEAT_ID}
     assert live == _SETUP_LIVE_READ_IDS
     assert exported == live, (sorted(live - exported), sorted(exported - live))
+
+
+def _heatpump_house(profiles_as_list: bool) -> dict:
+    consumer = {"id": "wp_heating", "type": "thermal_annual", "name": "WP",
+                "ehal_bindings": {"heatpump.wp_heating.set_enable": ""}}
+    profile = {"name": "default", "consumers": [consumer]}
+    return {"profiles": [profile] if profiles_as_list else {"default": profile}}
+
+
+@pytest.mark.parametrize("profiles_as_list", [True, False])
+def test_consumer_activation_persists_for_list_and_dict_profiles(profiles_as_list) -> None:
+    from ehal.signal_catalog import iter_catalog_entries
+
+    house = _heatpump_house(profiles_as_list)
+    entry = next(e for e in iter_catalog_entries(house, {}) if e.ehal_id.endswith("sens_power_act"))
+    assert not entry.is_activated
+
+    house2, _ = set_binding_activation(
+        house, {}, component_kind="consumer", entity_id="wp_heating",
+        binding_key=entry.binding_key, activated=True, consumer_type="thermal_annual",
+    )
+    after = next(e for e in iter_catalog_entries(house2, {}) if e.ehal_id == entry.ehal_id)
+    assert after.is_activated
+    assert isinstance(house2["profiles"], list) is profiles_as_list
+
+
+def test_consumer_activation_of_unknown_consumer_fails_loud() -> None:
+    with pytest.raises(ValueError, match="not found"):
+        set_binding_activation(
+            _heatpump_house(True), {}, component_kind="consumer", entity_id="nope",
+            binding_key="heatpump.nope.sens_power_act", activated=True,
+        )
