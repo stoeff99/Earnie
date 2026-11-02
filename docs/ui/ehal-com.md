@@ -286,13 +286,13 @@ Only `sens_*` and `get_*` (measurements / inputs). The table lists **all** expec
 | `EHAL-Feld` (EHAL field) | Exchange EHAL ID (qualified where that is the wire form). |
 | `Wert` (value)         | Hub/raw side (Loxone push/check value with hub unit when known). Same header on HA/OpenEMS: filled only when reverse conversion is possible, else `—`. |
 | `Wert (EHAL)`          | Value in EHAL units (Loxone: after role-registry conversion; HA push: already canonical on the wire). `—` when no conversion path exists. |
-| `Status`               | `OK`, `Warnung`, error states, or `Kein Mapping`. For push backends also push-state strings (`0 angenommen (verstummt)`, `0 (gehalten)`, `Zuletzt bekannt (gehalten)`, …). |
+| `Status`               | `OK`, `Warnung`, error states, or `Kein Mapping`. For push backends also push-state strings (`0 angenommen (verstummt)`, `0 (gehalten)`, `Zuletzt bekannt (gehalten)`, …). `Nicht aktiviert (nicht verwendet)`: a consumer signal receives values but is not activated in the signal list, so Earnie ignores it (e.g. no heat pump power in the energy flow); `Detail` keeps the receipt state. Activate it under **Optionale Signale aktivieren / deaktivieren**. |
 | `Detail`               | Error text (empty when OK); optional empty rows may show a fallback hint. |
 | `Zuletzt gelesen` (last read) | Timestamp of the query; for push rows the inbox `last_ts` (local clock) is preferred when available. |
 
 **Units:** from role `loxone` / `openems` blocks in `share/ehal/roles/*.json` (HA: EHAL wire units; conversion happens in the carrier YAML Jinja) — not hard-coded in the UI. Every value cell shows its unit as a suffix when known.
 
-**Row colours (additive; Status stays authoritative):** black/default = mandatory fresh OK; gray = optional; blue = cached held; yellow = outdated/assumed/warning; red = no mapping or read error.
+**Row colours (additive; Status stays authoritative):** black/default = mandatory fresh OK; gray = optional; blue = cached held; yellow = outdated/assumed/warning or received but not activated; red = no mapping or read error.
 
 
 **Loxone:**

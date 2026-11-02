@@ -27,7 +27,14 @@ _CACHED_STATES = {
     "0 (gehalten, Verbindung unbekannt)",
     "Digital (gehalten)",
 }
+NOT_ACTIVATED_STATUS = "Nicht aktiviert (nicht verwendet)"
+_NOT_ACTIVATED_HINT = (
+    "Wert kommt an, aber Earnie verwendet ihn erst nach dem Aktivieren "
+    "(Signalliste → Optionale Signale aktivieren)."
+)
+
 _STALE_STATES = {
+    NOT_ACTIVATED_STATUS,
     "0 angenommen (verstummt)",
     "0 angenommen (nie gesendet)",
     "Warnung",
@@ -102,6 +109,47 @@ def apply_optional_fallback_hint(row: dict[str, str]) -> dict[str, str]:
         out["Detail"] = (
             f"{detail}; {_OPTIONAL_FALLBACK_HINT}" if detail else _OPTIONAL_FALLBACK_HINT
         )
+    return out
+
+
+def inactive_consumer_read_ids() -> frozenset[str]:
+    """Consumer read signals of the catalog that are not activated in the Signalliste.
+
+    Only consumers: their live power / state is read from ``ehal_bindings`` alone, so a
+    received but non-activated value is never used.
+    """
+    from ehal.signal_catalog import iter_catalog_entries
+    from ui.house_config_io import _load_components_document, load_house_profiles
+
+    return frozenset(
+        entry.ehal_id
+        for entry in iter_catalog_entries(load_house_profiles(), _load_components_document())
+        if entry.component_kind == "consumer"
+        and entry.direction == "read"
+        and not entry.is_activated
+    )
+
+
+def mark_not_activated(
+    rows: list[dict[str, str]], inactive_ids: frozenset[str]
+) -> list[dict[str, str]]:
+    """Rows of non-activated signals that still receive a value get their own status."""
+    out: list[dict[str, str]] = []
+    for row in rows:
+        field = str(row.get("EHAL-Feld") or "")
+        wert = str(row.get("Wert") or "").strip()
+        status = str(row.get("Status") or "")
+        # "0 angenommen …" is a placeholder, not a received value.
+        received_value = wert and wert != "—" and not status.startswith("0 angenommen")
+        if field not in inactive_ids or not received_value or status == "Kein Mapping":
+            out.append(row)
+            continue
+        marked = dict(row)
+        marked["Status"] = NOT_ACTIVATED_STATUS
+        detail = str(row.get("Detail") or "").strip()
+        received = f"Empfang: {status}" if status else ""
+        marked["Detail"] = "; ".join(part for part in (received, _NOT_ACTIVATED_HINT, detail) if part)
+        out.append(marked)
     return out
 
 
