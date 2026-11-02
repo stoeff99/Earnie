@@ -186,6 +186,7 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
         "EHAL_MQTT_PRICE_TOPIC": mqtt.price_topic,
         "EHAL_MQTT_PRICE_TARIFF_ID": mqtt.price_tariff_id,
         "EHAL_MQTT_TOPIC_MAP": dict(mqtt.topic_map),
+        "EHAL_MQTT_PV_SOLCAST": dict(mqtt.pv_solcast),
     }
 
 

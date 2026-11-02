@@ -43,6 +43,7 @@ def settings_from_form(values: dict[str, Any], *, password: str) -> MqttSettings
             "price_topic": str(values.get("price_topic") or "").strip(),
             "price_tariff_id": str(values.get("price_tariff_id") or "").strip(),
             "topic_map": topic_map_from_rows(values.get("topic_map") or []),
+            "pv_solcast": pv_solcast_from_rows(values.get("pv_solcast") or []),
         },
         password=password,
     )
@@ -68,6 +69,66 @@ def topic_map_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
         if topic or ehal_id:
             out.append({_MAP_TOPIC: topic, _MAP_EHAL_ID: ehal_id})
     return out
+
+
+_SOLCAST_SYSTEM = "pv_system_id"
+_SOLCAST_TOPIC = "topic"
+
+
+def pv_solcast_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+    """Editor rows → ``ehal.mqtt.pv_solcast``; fully empty rows are dropped."""
+    out: list[dict[str, str]] = []
+    for row in rows:
+        system_id, branch = _cell(row.get(_SOLCAST_SYSTEM)), _cell(row.get(_SOLCAST_TOPIC))
+        if system_id or branch:
+            out.append({_SOLCAST_SYSTEM: system_id, _SOLCAST_TOPIC: branch})
+    return out
+
+
+def pv_system_options() -> list[str]:
+    """PV systems of the live scenario (ids as in the PV forecast)."""
+    import config
+
+    return sorted(
+        str(system.get("id") or "").strip() or "pv" for system in config.get_planning_pv_systems()
+    )
+
+
+def _render_pv_solcast_status(mapping: list[dict[str, Any]], known: list[str]) -> None:
+    from data.solcast_forecast import last_plan_usage, store_summary
+
+    if not mapping:
+        return
+    try:
+        plan = last_plan_usage()
+    except ValueError as exc:
+        st.caption(str(exc))
+        return
+    usage = plan.get("systems") or {}
+    lines = []
+    for row in mapping:
+        system_id = str(row.get(_SOLCAST_SYSTEM) or "")
+        branch = str(row.get(_SOLCAST_TOPIC) or "")
+        summary = store_summary(branch)
+        if system_id not in known:
+            state = "**PV-Anlage gibt es im Live-Szenario nicht**"
+        elif not summary["hours"]:
+            state = "noch keine Prognose empfangen"
+        else:
+            state = (
+                f"Stunden {summary['first_hour']} bis {summary['last_hour']}, "
+                f"Solcast-Abruf {summary['last_update'] or '?'}, "
+                f"zuletzt empfangen {summary['received_at']}"
+            )
+        used = usage.get(system_id) or {}
+        gaps = list(used.get("gap_hours") or [])
+        if gaps:
+            state += (
+                f"; **letzte Planung ({plan.get('at')}): {len(gaps)} Stunde(n) ohne Solcast-Wert "
+                f"({gaps[0]} … {gaps[-1]}), dort Forecast.Solar**"
+            )
+        lines.append(f"- `{branch}` → `{system_id}`: {state}")
+    st.markdown("\n".join(lines))
 
 
 def mapping_signal_options() -> list[str]:
@@ -296,6 +357,46 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
             },
         )
         _render_topic_map_status(stored_map, known)
+        st.markdown("**PV-Prognose von Solcast (optional)**")
+        st.caption(
+            "Stundenprognose des LoxBerry-Plugins *PV Solcast NG* statt Forecast.Solar, je "
+            "PV-Anlage. Topic ist der Zweig des Plugins, z. B. `solcast/system_1` oder "
+            "`solcast/sum`. Stunden ohne Solcast-Wert rechnet Earnie mit Forecast.Solar und "
+            "warnt im Log und hier."
+        )
+        stored_solcast = list(stored.get("pv_solcast") or [])
+        pv_known = pv_system_options()
+        pv_options = sorted(
+            {*pv_known, *(str(r.get(_SOLCAST_SYSTEM) or "") for r in stored_solcast)} - {""}
+        )
+        solcast_rows = st.data_editor(
+            pd.DataFrame(
+                [
+                    {
+                        _SOLCAST_SYSTEM: r.get(_SOLCAST_SYSTEM, ""),
+                        _SOLCAST_TOPIC: r.get(_SOLCAST_TOPIC, ""),
+                    }
+                    for r in stored_solcast
+                ],
+                columns=[_SOLCAST_SYSTEM, _SOLCAST_TOPIC],
+                dtype="object",
+            ),
+            key=f"{form_key}_pv_solcast",
+            num_rows="dynamic",
+            hide_index=True,
+            width="stretch",
+            column_config={
+                _SOLCAST_SYSTEM: st.column_config.SelectboxColumn(
+                    "PV-Anlage", options=pv_options, width="medium"
+                ),
+                _SOLCAST_TOPIC: st.column_config.TextColumn(
+                    "Solcast-Topic",
+                    help="Zweig des Plugins ohne / am Ende, z. B. solcast/system_1",
+                    width="large",
+                ),
+            },
+        )
+        _render_pv_solcast_status(stored_solcast, pv_known)
         col_save, col_test = st.columns(2)
         submitted = col_save.form_submit_button(
             "Speichern", type="primary", key=f"{form_key}_submit"
@@ -313,6 +414,7 @@ def render_mqtt_connection_form(*, form_key: str = "ehal_mqtt_form") -> None:
         "price_topic": price_topic,
         "price_tariff_id": price_tariff_id,
         "topic_map": map_rows.to_dict("records"),
+        "pv_solcast": solcast_rows.to_dict("records"),
     }
     try:
         settings = settings_from_form(

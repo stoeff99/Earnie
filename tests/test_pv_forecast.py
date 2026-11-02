@@ -27,6 +27,7 @@ def _config_get_side_effect(key, *, cast=None):
         "PV_TILT": 35.0,
         "PV_AZIMUTH": 0.0,
         "PV_KWP": 6.0,
+        "EHAL_MQTT_PV_SOLCAST": {},
     }
     value = values[key]
     return cast(value) if cast else value

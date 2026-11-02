@@ -29,6 +29,9 @@ class MqttSettings:
     price_tariff_id: str = ""
     # Foreign topic → EHAL read ID (e.g. ioBroker states); values go to the push inbox as-is.
     topic_map: Mapping[str, str] = field(default_factory=dict)
+    # Earnie PV system id → Solcast branch of the LoxBerry plugin "PV Solcast NG"
+    # (e.g. ``solcast/system_1``); mapped systems take their PV forecast from it.
+    pv_solcast: Mapping[str, str] = field(default_factory=dict)
 
 
 DISABLED = MqttSettings(
@@ -124,6 +127,53 @@ def parse_topic_map(raw: object, *, topic_prefix: str, price_topic: str) -> dict
     return mapping
 
 
+def parse_pv_solcast(
+    raw: object,
+    *,
+    topic_prefix: str,
+    price_topic: str,
+    topic_map: Mapping[str, str],
+) -> dict[str, str]:
+    """``ehal.mqtt.pv_solcast`` (list of ``{pv_system_id, topic}``) → ``{pv_system_id: topic}``.
+
+    ``topic`` is the plugin branch (``solcast/sum`` or ``solcast/system_<n>``) whose
+    ``today_hour_XX_kwh`` / ``tomorrow_hour_XX_kwh`` sub-topics Earnie reads. Each PV system
+    and each branch is used at most once.
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ValueError(f"ehal.mqtt.pv_solcast muss eine Liste sein, nicht {type(raw).__name__}.")
+    mapping: dict[str, str] = {}
+    for index, item in enumerate(raw):
+        where = f"ehal.mqtt.pv_solcast[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{where} muss ein Objekt mit pv_system_id und topic sein.")
+        system_id = str(item.get("pv_system_id") or "").strip()
+        branch = str(item.get("topic") or "").strip()
+        if not system_id or not branch:
+            raise ValueError(f"{where}: PV-Anlage und Solcast-Topic sind beide nötig.")
+        if any(ch in branch for ch in "#+\0"):
+            raise ValueError(f"{where}: Topic ohne MQTT-Platzhalter (#, +) angeben: {branch!r}.")
+        if branch.startswith("/") or branch.endswith("/"):
+            raise ValueError(
+                f"{where}: Topic ohne führenden/abschließenden '/' angeben, nicht {branch!r}."
+            )
+        if branch == topic_prefix or branch.startswith(f"{topic_prefix}/"):
+            raise ValueError(f"{where}: {branch!r} liegt unter dem Earnie-Präfix {topic_prefix!r}.")
+        if price_topic and (price_topic == branch or price_topic.startswith(f"{branch}/")):
+            raise ValueError(f"{where}: Unter {branch!r} liegt schon das Topic der Preise.")
+        clash = next((t for t in topic_map if t.startswith(f"{branch}/")), None)
+        if clash:
+            raise ValueError(f"{where}: Unter {branch!r} liegt schon das zugeordnete Topic {clash!r}.")
+        if system_id in mapping:
+            raise ValueError(f"{where}: PV-Anlage {system_id!r} ist doppelt zugeordnet.")
+        if branch in mapping.values():
+            raise ValueError(f"{where}: Solcast-Topic {branch!r} ist schon einer PV-Anlage zugeordnet.")
+        mapping[system_id] = branch
+    return mapping
+
+
 def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
     """Validate an ``ehal.mqtt`` block; ``None`` (no block) → MQTT disabled."""
     if raw is None:
@@ -156,6 +206,12 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
     topic_map = parse_topic_map(
         raw.get("topic_map"), topic_prefix=prefix, price_topic=price_topic
     )
+    pv_solcast = parse_pv_solcast(
+        raw.get("pv_solcast"),
+        topic_prefix=prefix,
+        price_topic=price_topic,
+        topic_map=topic_map,
+    )
     return MqttSettings(
         enabled=enabled,
         host=host,
@@ -166,6 +222,7 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
         price_topic=price_topic,
         price_tariff_id=price_tariff_id,
         topic_map=topic_map,
+        pv_solcast=pv_solcast,
     )
 
 
@@ -181,5 +238,9 @@ def mqtt_block_from_settings(settings: MqttSettings) -> dict[str, object]:
         "price_tariff_id": settings.price_tariff_id,
         "topic_map": [
             {"topic": topic, "ehal_id": ehal_id} for topic, ehal_id in settings.topic_map.items()
+        ],
+        "pv_solcast": [
+            {"pv_system_id": system_id, "topic": branch}
+            for system_id, branch in settings.pv_solcast.items()
         ],
     }
