@@ -4,7 +4,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import time
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 
 from house_config.tariff_plausibility import (
     collect_tariff_plausibility_errors,
@@ -257,6 +259,64 @@ def run_tariff_plausibility_on_startup() -> None:
         )
         raise SystemExit(1)
     logger.error("%s Optimierung startet trotzdem.", message)
+
+
+# Half a year later: catches a system zone with other (or no) daylight saving time.
+_TZ_CHECK_OFFSETS_DAYS = (0, 182)
+
+
+def _system_utc_offset(ts: float) -> timedelta:
+    """UTC offset of the process' local time (container ``TZ`` / ``/etc/localtime``)."""
+    return timedelta(seconds=time.localtime(ts).tm_gmtoff)
+
+
+def timezone_mismatch(
+    planning_timezone: str,
+    *,
+    now: datetime | None = None,
+    system_offset: Callable[[float], timedelta] | None = None,
+) -> str | None:
+    """German error text when local time differs from the planning timezone, else ``None``.
+
+    Earnie stores run times as naive local time (``completed_at``) and reads them in the
+    planning timezone; a container on UTC shifts the history chart by the offset.
+    """
+    from zoneinfo import ZoneInfo
+
+    tz = ZoneInfo(planning_timezone)
+    offset_of = system_offset or _system_utc_offset
+    base = now or datetime.now(UTC)
+    for days in _TZ_CHECK_OFFSETS_DAYS:
+        moment = base + timedelta(days=days)
+        planning = moment.astimezone(tz).utcoffset()
+        system = offset_of(moment.timestamp())
+        if planning != system:
+            return (
+                f"Systemzeit des Containers (UTC{_format_offset(system)}) passt nicht zur "
+                f"Planungszeitzone {planning_timezone} (UTC{_format_offset(planning)}) "
+                f"am {moment.astimezone(tz):%Y-%m-%d}. Die Historie im Monitor ist dadurch "
+                "verschoben (leerer Bereich vor „Jetzt“). Abhilfe: in der Compose-Datei unter "
+                f"environment TZ: {planning_timezone} setzen und den Container neu erstellen "
+                "(docker compose … up -d)."
+            )
+    return None
+
+
+def _format_offset(offset: timedelta | None) -> str:
+    minutes = int((offset or timedelta()).total_seconds() // 60)
+    sign = "+" if minutes >= 0 else "-"
+    return f"{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def run_timezone_check_on_startup() -> None:
+    """Logs an error when the container's local time is not the planning timezone."""
+    import config
+
+    message = timezone_mismatch(config.get_planning_timezone())
+    if message is None:
+        logger.info("Zeitzonen-Prüfung: Systemzeit = Planungszeitzone.")
+        return
+    logger.error("Zeitzonen-Prüfung: %s", message)
 
 
 def main() -> int:

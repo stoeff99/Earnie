@@ -28,6 +28,12 @@ Meist liegt die Ursache nicht in der Hardware. Häufiger steckt eine **VM mit CP
 
 Proxmox-**LXC** nutzt die CPU des Hosts direkt; dort tritt das Problem nur bei sehr alter Hardware auf. Zur Prüfung muss `grep -o -w -E 'sse4_2|popcnt' /proc/cpuinfo | sort -u` beide Begriffe ausgeben.
 
+## Zeitzone (`TZ`)
+
+Earnie speichert die Laufzeiten der Optimierung in der lokalen Zeit des Containers und liest sie in der Planungszeitzone des Hausprofils. Beide müssen übereinstimmen. Die mitgelieferten Compose-Dateien setzen dafür `TZ` (z. B. `TZ: Europe/Vienna`; in der Schweiz `Europe/Zurich`). Fehlt `TZ` beim Dienst, läuft der Container auf UTC: die Historie im Monitor ist dann um eine Stunde verschoben, und vor „Jetzt“ bleibt ein leerer Bereich.
+
+Earnie prüft das beim Start und schreibt bei einer Abweichung einen Fehler „Zeitzonen-Prüfung“ ins Log. Kontrolle von Hand: `docker exec <container> date` muss die Ortszeit zeigen, nicht UTC. Nach dem Korrigieren der Compose-Datei den Container mit `docker compose … up -d` neu erstellen; ein Neustart allein übernimmt geänderte Umgebungsvariablen nicht. Einträge, die vorher geschrieben wurden, bleiben verschoben.
+
 ## Healthcheck (Docker `HEALTHCHECK`)
 
 Das Image enthält einen `HEALTHCHECK` auf `http://127.0.0.1:<Streamlit-Port>/_stcore/health` (Standard **8501**; im HA-Add-on intern **8502**). Läuft der Optimierer-Dienst (`main.py`), muss zusätzlich die Datei `runtime/daemon_heartbeat.json` frisch sein, sonst meldet der Container `unhealthy`.
