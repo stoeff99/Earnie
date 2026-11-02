@@ -8,7 +8,8 @@ invalid values fail loud instead of being replaced.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 PASSWORD_ENV = "EHAL_MQTT_PASSWORD"
 DEFAULT_PORT = 1883
@@ -26,6 +27,8 @@ class MqttSettings:
     # Optional external import prices (EKZ interval JSON) and the user tariff priced from them.
     price_topic: str = ""
     price_tariff_id: str = ""
+    # Foreign topic → EHAL read ID (e.g. ioBroker states); values go to the push inbox as-is.
+    topic_map: Mapping[str, str] = field(default_factory=dict)
 
 
 DISABLED = MqttSettings(
@@ -79,6 +82,48 @@ def parse_price_topic(raw: object) -> str:
     return topic
 
 
+def parse_topic_map(raw: object, *, topic_prefix: str, price_topic: str) -> dict[str, str]:
+    """``ehal.mqtt.topic_map`` (list of ``{topic, ehal_id}``) → ``{topic: ehal_id}``.
+
+    Each topic is exact (no wildcards), outside ``<prefix>/`` and not the price topic;
+    each EHAL ID is a read signal (``sens_`` / ``get_``) and mapped at most once.
+    """
+    from runtime_store.loxone_push_parse import is_valid_ehal_id
+
+    if raw is None:
+        return {}
+    if not isinstance(raw, list):
+        raise ValueError(f"ehal.mqtt.topic_map muss eine Liste sein, nicht {type(raw).__name__}.")
+    mapping: dict[str, str] = {}
+    for index, item in enumerate(raw):
+        where = f"ehal.mqtt.topic_map[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{where} muss ein Objekt mit topic und ehal_id sein.")
+        topic = str(item.get("topic") or "").strip()
+        ehal_id = str(item.get("ehal_id") or "").strip()
+        if not topic or not ehal_id:
+            raise ValueError(f"{where}: Topic und EHAL-Signal sind beide nötig.")
+        if any(ch in topic for ch in "#+\0"):
+            raise ValueError(f"{where}: Topic ohne MQTT-Platzhalter (#, +) angeben: {topic!r}.")
+        if topic == topic_prefix or topic.startswith(f"{topic_prefix}/"):
+            raise ValueError(
+                f"{where}: {topic!r} liegt unter dem Earnie-Präfix {topic_prefix!r}; "
+                f"dafür direkt {topic_prefix}/telemetry/<EHAL-ID> verwenden."
+            )
+        if topic == price_topic:
+            raise ValueError(f"{where}: {topic!r} ist schon das Topic der Preise.")
+        if not is_valid_ehal_id(ehal_id):
+            raise ValueError(
+                f"{where}: {ehal_id!r} ist kein lesbares EHAL-Signal (sens_… / get_…)."
+            )
+        if topic in mapping:
+            raise ValueError(f"{where}: Topic {topic!r} ist doppelt zugeordnet.")
+        if ehal_id in mapping.values():
+            raise ValueError(f"{where}: Signal {ehal_id!r} hat schon ein Topic.")
+        mapping[topic] = ehal_id
+    return mapping
+
+
 def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
     """Validate an ``ehal.mqtt`` block; ``None`` (no block) → MQTT disabled."""
     if raw is None:
@@ -108,6 +153,9 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
             "ehal.mqtt.price_tariff_id ist gesetzt, aber ehal.mqtt.price_topic fehlt: "
             "ohne Topic bekommt der Tarif keine Preise."
         )
+    topic_map = parse_topic_map(
+        raw.get("topic_map"), topic_prefix=prefix, price_topic=price_topic
+    )
     return MqttSettings(
         enabled=enabled,
         host=host,
@@ -117,6 +165,7 @@ def parse_mqtt_block(raw: object, *, password: str) -> MqttSettings:
         topic_prefix=prefix,
         price_topic=price_topic,
         price_tariff_id=price_tariff_id,
+        topic_map=topic_map,
     )
 
 
@@ -130,4 +179,7 @@ def mqtt_block_from_settings(settings: MqttSettings) -> dict[str, object]:
         "topic_prefix": settings.topic_prefix,
         "price_topic": settings.price_topic,
         "price_tariff_id": settings.price_tariff_id,
+        "topic_map": [
+            {"topic": topic, "ehal_id": ehal_id} for topic, ehal_id in settings.topic_map.items()
+        ],
     }

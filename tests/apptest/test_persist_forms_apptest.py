@@ -186,6 +186,7 @@ def test_mqtt_t1_submit_persists_config_and_password(monkeypatch) -> None:
         "topic_prefix": "home/earnie",
         "price_topic": "",
         "price_tariff_id": "",
+        "topic_map": [],
     }
     assert "mqtt-test-pw" not in _config_path().read_text(encoding="utf-8")
     assert "EHAL_MQTT_PASSWORD" in _dotenv_path().read_text(encoding="utf-8")
@@ -227,6 +228,33 @@ def test_mqtt_t1_price_topic_alone_collects_prices(monkeypatch) -> None:
     assert not at.error, [e.value for e in at.error]
     mqtt = _config()["ehal"]["mqtt"]
     assert (mqtt["price_topic"], mqtt["price_tariff_id"]) == ("ekz/ems/tariffs/intervals", "")
+
+
+def test_mqtt_t1_stored_topic_map_survives_save_and_shows_status(monkeypatch) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    monkeypatch.setattr(
+        "ui.ehal_mqtt_form.mapping_signal_options", lambda: ["ev.e_auto.sens_evcs_soc_act"]
+    )
+    monkeypatch.setattr(
+        "runtime_store.ehal_push_inbox.load_inbox",
+        lambda: {"ev.e_auto.sens_evcs_soc_act": {"raw": "56", "last_ts": "2026-11-02T08:57:33"}},
+    )
+    topic_map = [
+        {"topic": "ioBroker/tesla/battery_level", "ehal_id": "ev.e_auto.sens_evcs_soc_act"},
+        {"topic": "ioBroker/old/soc", "ehal_id": "ev.alt.sens_evcs_soc_act"},
+    ]
+    data = _config()
+    data.setdefault("ehal", {})["mqtt"] = {"enabled": False, "host": "", "topic_map": topic_map}
+    _config_path().write_text(json.dumps(data), encoding="utf-8")
+
+    at = _run("run_form_mqtt.py")
+    status = "\n".join(m.value for m in at.markdown)
+    assert "zuletzt `56`" in status
+    assert "Signal gibt es in der Signalliste nicht mehr" in status
+    at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
+
+    assert not at.error, [e.value for e in at.error]
+    assert _config()["ehal"]["mqtt"]["topic_map"] == topic_map
 
 
 def test_mqtt_t3_enabled_without_host_is_rejected(monkeypatch) -> None:
