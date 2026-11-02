@@ -187,6 +187,7 @@ def test_mqtt_t1_submit_persists_config_and_password(monkeypatch) -> None:
         "price_topic": "",
         "price_tariff_id": "",
         "topic_map": [],
+        "pv_solcast": [],
     }
     assert "mqtt-test-pw" not in _config_path().read_text(encoding="utf-8")
     assert "EHAL_MQTT_PASSWORD" in _dotenv_path().read_text(encoding="utf-8")
@@ -255,6 +256,48 @@ def test_mqtt_t1_stored_topic_map_survives_save_and_shows_status(monkeypatch) ->
 
     assert not at.error, [e.value for e in at.error]
     assert _config()["ehal"]["mqtt"]["topic_map"] == topic_map
+
+
+def test_mqtt_t1_stored_pv_solcast_survives_save_and_shows_status(monkeypatch, tmp_path) -> None:
+    monkeypatch.delenv("EHAL_MQTT_PASSWORD", raising=False)
+    monkeypatch.setattr("ui.ehal_mqtt_form.pv_system_options", lambda: ["dach_sued"])
+    store = tmp_path / "solcast.json"
+    store.write_text(
+        json.dumps(
+            {
+                "branches": {
+                    "solcast/system_1": {
+                        "hours": {"2026-11-03 09:00": 0.202, "2026-11-03 14:00": 0.319},
+                        "last_update": "2026-11-02T18:55:26+01:00",
+                        "received_at": "2026-11-02T18:55:27+01:00",
+                    }
+                },
+                "last_plan": {
+                    "at": "2026-11-03T10:00:00+01:00",
+                    "systems": {"dach_sued": {"gap_hours": ["2026-11-03 15:00"]}},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("data.solcast_forecast._store_path", lambda: str(store))
+    pv_solcast = [
+        {"pv_system_id": "dach_sued", "topic": "solcast/system_1"},
+        {"pv_system_id": "carport", "topic": "solcast/system_2"},
+    ]
+    data = _config()
+    data.setdefault("ehal", {})["mqtt"] = {"enabled": False, "host": "", "pv_solcast": pv_solcast}
+    _config_path().write_text(json.dumps(data), encoding="utf-8")
+
+    at = _run("run_form_mqtt.py")
+    status = "\n".join(m.value for m in at.markdown)
+    assert "Stunden 2026-11-03 09:00 bis 2026-11-03 14:00" in status
+    assert "1 Stunde(n) ohne Solcast-Wert" in status
+    assert "PV-Anlage gibt es im Live-Szenario nicht" in status
+    at.button(key="t_mqtt_submit").click().run(timeout=_TIMEOUT_S)
+
+    assert not at.error, [e.value for e in at.error]
+    assert _config()["ehal"]["mqtt"]["pv_solcast"] == pv_solcast
 
 
 def test_mqtt_t3_enabled_without_host_is_rejected(monkeypatch) -> None:

@@ -14,6 +14,8 @@ Topics under ``<prefix>`` (``ehal.mqtt.topic_prefix``, default ``earnie``):
 - ``<prefix>/availability`` (publish, retained): ``online`` / ``offline`` (last will).
 - Mapped foreign topics (``ehal.mqtt.topic_map``, e.g. ioBroker states): plain value,
   recorded under the mapped EHAL ID exactly like ``<prefix>/telemetry/<EHAL-ID>``.
+- Solcast branches (``ehal.mqtt.pv_solcast``, e.g. ``solcast/system_1/+``): hourly PV
+  forecast of the LoxBerry plugin "PV Solcast NG" → :mod:`data.solcast_forecast`.
 
 Earnie cannot see whether a subscriber consumed a retained message, so a publish
 is never counted as a hub fetch; only the hub heartbeat
@@ -181,6 +183,8 @@ class EhalMqttCarrier:
         self._last_sent: dict[str, str] = {}
         # Mapped topics whose last value was no plain number (warned once until one parses).
         self._unparsed_topics: set[str] = set()
+        self._solcast_branches = frozenset(settings.pv_solcast.values())
+        self._solcast: Any = None
 
     # --- broker callbacks (paho callback API v2) -------------------------------------------
 
@@ -204,6 +208,12 @@ class EhalMqttCarrier:
         if self.settings.price_topic:
             subscriptions.append((self.settings.price_topic, 0))
         subscriptions.extend((mapped, 0) for mapped in self.settings.topic_map)
+        subscriptions.extend((topic(branch, "+"), 0) for branch in sorted(self._solcast_branches))
+        if self._solcast_branches:
+            from data.solcast_forecast import SolcastIngest
+
+            # Fresh session: retained values need a same-day last_update again.
+            self._solcast = SolcastIngest(tz=_planning_tz())
         client.subscribe(subscriptions)
         client.publish(topic(prefix, TOPIC_AVAILABILITY), PAYLOAD_ONLINE, qos=1, retain=True)
         with self._lock:
@@ -241,6 +251,15 @@ class EhalMqttCarrier:
             return
         mapped_id = self.settings.topic_map.get(str(msg.topic))
         try:
+            branch, _, name = str(msg.topic).rpartition("/")
+            if branch in self._solcast_branches and self._solcast is not None:
+                self._solcast.on_message(
+                    branch,
+                    name,
+                    bytes(msg.payload or b"").decode("utf-8", errors="replace"),
+                    retained=bool(getattr(msg, "retain", False)),
+                )
+                return
             if mapped_id is not None:
                 self._on_mapped_message(str(msg.topic), mapped_id, bytes(msg.payload or b""))
                 return
@@ -381,6 +400,14 @@ _carrier: EhalMqttCarrier | None = None
 _carrier_lock = threading.Lock()
 
 
+def _planning_tz():
+    from zoneinfo import ZoneInfo
+
+    import config
+
+    return ZoneInfo(config.get_planning_timezone())
+
+
 def settings_from_config() -> MqttSettings:
     import config
 
@@ -394,6 +421,7 @@ def settings_from_config() -> MqttSettings:
         price_topic=str(config.get("EHAL_MQTT_PRICE_TOPIC") or ""),
         price_tariff_id=str(config.get("EHAL_MQTT_PRICE_TARIFF_ID") or ""),
         topic_map=dict(config.get("EHAL_MQTT_TOPIC_MAP") or {}),
+        pv_solcast=dict(config.get("EHAL_MQTT_PV_SOLCAST") or {}),
     )
 
 

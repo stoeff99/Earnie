@@ -48,6 +48,7 @@ Alle Topics von Earnie beginnen mit dem Präfix (hier `earnie`); nur zugeordnete
 | `earnie/setpoint/<EHAL-ID>` | von Earnie (retained) | Je ein Wert aus `status.json`, z. B. `earnie/setpoint/heartbeat_earnie`. Gedacht für Gateways, die ein Topic auf einen Eingang abbilden. |
 | `earnie/availability` | von Earnie (retained) | `online` nach dem Verbinden, `offline` beim Beenden oder Verbindungsabbruch (Last Will). |
 | beliebiges zugeordnetes Topic | an Earnie | Ein Wert für das zugeordnete EHAL-Signal, siehe [Fremde Topics zuordnen](#fremde-topics-zuordnen-z-b-iobroker). |
+| `<Solcast-Zweig>/today_hour_XX_kwh`, `…/tomorrow_hour_XX_kwh`, `…/last_update_iso` | an Earnie | PV-Stundenprognose des LoxBerry-Plugins PV Solcast NG, siehe [PV-Prognose von Solcast](#pv-prognose-von-solcast-loxberry-plugin-pv-solcast-ng). |
 
 Earnie sendet `earnie/status` alle 10 Sekunden. Einzelne `setpoint`-Topics gehen nur bei Änderung raus. Nach jedem (Wieder-)Verbinden sendet Earnie alle Werte erneut.
 
@@ -123,6 +124,32 @@ Earnie kann den Bezugspreis statt aus EPEX aus einer externen Preisreihe über M
 - **Fehlende Viertelstunden** (z. B. der nächste Tag vor der Veröffentlichung) schätzt Earnie aus EPEX: `EKZ ≈ a + b × EPEX`, berechnet aus allen Viertelstunden der letzten 21 Tage, für die beide Preise vorliegen. Dafür braucht es mindestens 24 solcher Viertelstunden, also nach dem ersten Empfang einige Stunden Betrieb. Davor bricht die Berechnung mit einer Meldung ab. Wie viele Viertelstunden geschätzt sind, steht im Log.
 
 Unter **MQTT-Broker (optional)** zeigt Earnie, wie viele Viertelstunden gespeichert sind und bis wann die Preise veröffentlicht sind. Die Werte liegen in `runtime/external_import_prices.json`; der Szenario-Explorer nutzt dieselben gespeicherten Preise.
+
+## PV-Prognose von Solcast (LoxBerry-Plugin PV Solcast NG)
+
+Earnie rechnet die PV-Prognose standardmäßig mit Forecast.Solar. Forecast.Solar kennt keinen Hochnebel und liegt im Winter in Nebellagen oft weit zu hoch. Das LoxBerry-Plugin [PV Solcast NG](https://wiki.loxberry.de/plugins/pv_solcast_ng/start) holt die Prognose von Solcast und schreibt sie auf den Broker. Earnie kann sie je PV-Anlage statt Forecast.Solar verwenden.
+
+**Einrichten:**
+
+1. Im Plugin MQTT einschalten, die **Stundenwerte** (24 + 24 Felder je System) aktivieren und das **Retain-Flag** setzen. Dann hat Earnie auch nach einem Neustart sofort Werte.
+2. Unter **Smarthome-Backend → MQTT-Broker (optional)** in der Tabelle **PV-Prognose von Solcast** eine Zeile je PV-Anlage hinzufügen:
+   - **PV-Anlage:** die PV-Anlage des Live-Szenarios (z. B. `dach_sued`).
+   - **Solcast-Topic:** der Zweig des Plugins, z. B. `solcast/system_1` für das erste System oder `solcast/sum` für die Summe aller Systeme. Ohne `/` am Ende.
+3. Speichern und den Optimierer-Dienst neu starten.
+
+PV-Anlagen ohne Zeile rechnen weiter mit Forecast.Solar. Hat Earnie mehrere PV-Anlagen, braucht jede ihr eigenes Solcast-System; `solcast/sum` passt nur, wenn Earnie eine einzige PV-Anlage hat.
+
+**So verarbeitet Earnie die Werte:**
+
+- `today_hour_XX_kwh` und `tomorrow_hour_XX_kwh` sind die erwartete Energie der Stunde `XX:00` bis `XX+1:00` Ortszeit. Earnie nimmt sie als mittlere Leistung dieser Stunde (kWh in einer Stunde = kW).
+- Die Topics enthalten kein Datum. „Heute“ und „morgen“ bezieht Earnie auf den Tag, an dem die Nachricht ankommt. Retained Nachrichten können noch vom Vortag stammen. Earnie übernimmt sie deshalb erst, wenn `last_update_iso` des Zweigs vom heutigen Tag ist. Sonst wartet Earnie auf die nächste Veröffentlichung des Plugins. Das Plugin veröffentlicht tagsüber alle 15 Minuten.
+- Earnie speichert die Werte mit Datum und Stunde in `runtime/solcast_pv_forecast.json`. Ein Neustart verliert also nichts.
+- **Fehlende Stunden:** Hat eine Stunde keinen Solcast-Wert, nimmt Earnie dort Forecast.Solar.
+  - Liegt die Stunde heute oder morgen, fehlen Daten (z. B. LoxBerry aus oder Plugin ohne Abruf). Earnie schreibt dann eine Warnung ins Log, und unter der Tabelle steht, welche Stunden betroffen waren.
+  - Das Plugin liefert nur heute und morgen. Der Planungshorizont reicht bis zum übernächsten Sonnenaufgang, also manchmal in die Nacht nach morgen. Diese Nachtstunden kommen ohne Warnung von Forecast.Solar.
+- Unter der Tabelle zeigt Earnie je Zuordnung die gespeicherten Stunden, den letzten Solcast-Abruf des Plugins und den letzten Empfang.
+
+> **Hinweis:** Die Ausrichtung der Anlage (kWp, Neigung, Azimut) stellst du bei Solcast bzw. im Plugin ein, nicht in Earnie. Prüfe dort, ob die Angaben zur Anlage im Hausprofil passen.
 
 ## Verbindungsstatus
 

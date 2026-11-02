@@ -1,4 +1,6 @@
 # pv_forecast.py
+import logging
+
 import requests
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -8,6 +10,8 @@ from runtime_store.cycle_duration_stats import (
     record_event as record_cycle_event,
 )
 from runtime_store.planning_clock import planning_now
+
+logger = logging.getLogger(__name__)
 
 # =========================================================================
 # GLOBALE CACHE-VARIABLEN (Für Rate-Limiting & API-Schonung)
@@ -416,21 +420,35 @@ def get_hourly_pv_forecast_by_system_for_hours(
 
     lat = float(config.get("LATITUDE", cast=float))
     lon = float(config.get("LONGITUDE", cast=float))
+    solcast_branches = dict(config.get("EHAL_MQTT_PV_SOLCAST") or {})
     by_system: dict[str, List[float]] = {}
+    solcast_usage: dict[str, dict] = {}
     any_fallback = False
     for system in systems:
         sid = str(system.get("id") or "").strip() or "pv"
-        vector, used_api = _forecast_one_system(
-            lat=lat,
-            lon=lon,
-            tilt=float(system.get("pv_tilt", 0.0) or 0.0),
-            azimuth=float(system.get("pv_azimuth", 0.0) or 0.0),
-            kwp=float(system.get("pv_kwp", 0.0) or 0.0),
-            target_hours=target_hours,
-        )
+
+        def forecast_solar(system=system) -> tuple[list[float], bool]:
+            return _forecast_one_system(
+                lat=lat,
+                lon=lon,
+                tilt=float(system.get("pv_tilt", 0.0) or 0.0),
+                azimuth=float(system.get("pv_azimuth", 0.0) or 0.0),
+                kwp=float(system.get("pv_kwp", 0.0) or 0.0),
+                target_hours=target_hours,
+            )
+
+        branch = solcast_branches.get(sid)
+        if branch:
+            vector, used_api, solcast_usage[sid] = _solcast_with_gaps(
+                sid, branch, target_hours, forecast_solar
+            )
+        else:
+            vector, used_api = forecast_solar()
         by_system[sid] = vector
         if not used_api:
             any_fallback = True
+    if solcast_branches:
+        _record_solcast_usage(solcast_branches, solcast_usage, set(by_system))
 
     _USING_SYNTHETIC_FALLBACK = any_fallback
     if any_fallback:
@@ -440,6 +458,83 @@ def get_hourly_pv_forecast_by_system_for_hours(
             f"Summen-Max: {max(totals):.2f} kW über {len(systems)} Anlage(n)."
         )
     return by_system
+
+
+def _solcast_with_gaps(
+    sid: str,
+    branch: str,
+    target_hours: list,
+    forecast_solar,
+) -> tuple[list[float], bool, dict]:
+    """Solcast kW per slot; hours without a Solcast value come from Forecast.Solar.
+
+    Slots after tomorrow are outside what the plugin publishes (logged at info); a gap
+    inside today/tomorrow means missing data and is logged as a warning.
+    """
+    from zoneinfo import ZoneInfo
+
+    from data import solcast_forecast
+
+    tz = ZoneInfo(config.get_planning_timezone())
+    now = planning_now(tz)
+    series = solcast_forecast.solcast_series(branch, target_hours, tz)
+    missing = [idx for idx, value in enumerate(series.values) if value is None]
+    used_api = True
+    vector = [0.0 if value is None else value for value in series.values]
+    gap_hours: list[str] = []
+    beyond_hours: list[str] = []
+    if missing:
+        fallback, used_api = forecast_solar()
+        for idx in missing:
+            vector[idx] = fallback[idx]
+            key = solcast_forecast.hour_key(target_hours[idx], tz)
+            if solcast_forecast.is_within_plugin_reach(target_hours[idx], tz, now):
+                gap_hours.append(key)
+            else:
+                beyond_hours.append(key)
+    gap_hours = sorted(set(gap_hours))
+    beyond_hours = sorted(set(beyond_hours))
+    if gap_hours:
+        logger.warning(
+            "Solcast %s (%s): no value for %d hour(s) %s … %s — Forecast.Solar used there",
+            branch,
+            sid,
+            len(gap_hours),
+            gap_hours[0],
+            gap_hours[-1],
+        )
+    if beyond_hours:
+        logger.info(
+            "Solcast %s (%s): %d hour(s) after tomorrow from Forecast.Solar (%s … %s)",
+            branch,
+            sid,
+            len(beyond_hours),
+            beyond_hours[0],
+            beyond_hours[-1],
+        )
+    usage = {
+        "branch": branch,
+        "solcast_slots": len(target_hours) - len(missing),
+        "gap_hours": gap_hours,
+        "beyond_hours": len(beyond_hours),
+    }
+    return vector, used_api, usage
+
+
+def _record_solcast_usage(
+    branches: dict[str, str], usage: dict[str, dict], system_ids: set[str]
+) -> None:
+    from data import solcast_forecast
+
+    for sid, branch in branches.items():
+        if sid not in system_ids:
+            logger.warning(
+                "Solcast %s is mapped to PV system %r, which the live scenario does not have",
+                branch,
+                sid,
+            )
+            usage[sid] = {"branch": branch, "unknown_system": True}
+    solcast_forecast.record_plan_usage(usage, planning_now())
 
 
 def sum_pv_forecast_by_system(
