@@ -328,6 +328,9 @@ def battery_params_snapshot(get_attr: Callable[..., Any]) -> dict:
         "limits_from_live": bool(
             get_attr("BATTERY_LIMITS_FROM_LIVE", default=False, cast=bool)
         ),
+        "grid_charge_before_sunrise": bool(
+            get_attr("BATTERY_GRID_CHARGE_BEFORE_SUNRISE", default=False, cast=bool)
+        ),
     }
 
 

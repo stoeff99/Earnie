@@ -79,6 +79,7 @@ def new_battery_template(
         .lower()
         or REGULATES_ON_GRID,
         "limits_from_live": bool(source.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(source.get("grid_charge_before_sunrise", False)),
         "inverter_id": str(source.get("inverter_id") or "").strip()
         or default_inverter_id_for_new_house(),
         # New id/slug — never copy entity-scoped bindings from the source battery.
@@ -156,6 +157,7 @@ def _battery_seed_from_existing(existing: dict) -> dict:
         "role": str(existing.get("role") or "single_use").strip().lower() or "single_use",
         "attached_ids": attached_ids,
         "limits_from_live": bool(existing.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(existing.get("grid_charge_before_sunrise", False)),
         "inverter_id": str(existing.get("inverter_id") or "").strip(),
         "wear_enabled": bool(wear.get("enabled", False)),
         "wear_replacement_cost": float(wear.get("replacement_cost_euro", 1500.0)),
@@ -183,6 +185,7 @@ def _battery_seed_defaults() -> dict:
         "role": "single_use",
         "attached_ids": [],
         "limits_from_live": False,
+        "grid_charge_before_sunrise": False,
         "inverter_id": default_inverter_id_for_new_house(),
         "wear_enabled": False,
         "wear_replacement_cost": 1500.0,
@@ -202,6 +205,7 @@ _BATTERY_DIRECT_WIDGETS = (
     ("planning_battery_threshold", "threshold_percent"),
     ("planning_battery_standby", "standby_power"),
     ("planning_battery_limits_from_live", "limits_from_live"),
+    ("planning_battery_grid_charge_before_sunrise", "grid_charge_before_sunrise"),
     ("planning_battery_wear_enabled", "wear_enabled"),
     ("planning_battery_wear_replacement_cost", "wear_replacement_cost"),
     ("planning_battery_wear_expected_cycles", "wear_expected_cycles"),

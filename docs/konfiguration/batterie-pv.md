@@ -39,6 +39,7 @@ Im **Szenario-Explorer** (Verbrauchsdaten / cons_data) gilt für die PV-Linien:
 | `standby_power_kw` | kW | `components.json` → `batteries[]` | Dauerhafte AC-Eigenleistung der Batterie (in der Optimierung als Verbrauch rund um die Uhr) |
 | `control` | enum | `components.json` → `batteries[]` | Steuerbarkeit der Anlage: `full` (Default) = Zwangsladen/-entladen; `limits_only` = nur Lade-/Entladegrenzen (Automatik/Entladesperre); `read_only` = Eigenverbrauch ohne Sollwerte. Das Feld beschreibt die Installation und gilt deshalb auch für Simulation, Backtesting und Business Case. |
 | `regulates_on` | enum | `components.json` → `batteries[]` (nur `type: house`) | Eigener Geräteregler: `grid` = regelt auf den Netzzähler (Eigenverbrauch / Zero-Export, Normalfall); `none` = folgt nur den Sollwerten. **Pflicht** für Hausbatterien, unabhängig von `control`. Powerstations haben dieses Feld nicht. Optional auch an `inverters[]` (dynamisches Einspeiselimit). |
+| `grid_charge_before_sunrise` | bool | `components.json` → `batteries[]` (nur `type: house`) | Default `false`: Bis zum nächsten Sonnenaufgang (SA₁) lädt die Batterie nur mit PV-Strom, nachts also gar nicht aus dem Netz. Bei `true` entscheidet die Optimierung allein nach Kosten, ob sie nachts aus dem Netz lädt (sinnvoll bei großem Speicher, dynamischem Tarif und wenig Winter-PV). Wirkt nur mit `control: full`. Im Hauskonfigurator: „Netzladung vor Sonnenaufgang erlauben“. Siehe [Netzladung vor Sonnenaufgang](#netzladung-vor-sonnenaufgang). |
 | `timezone_name` | – | `house_profiles.json` | IANA-Zeitzone für die astronomischen Sonnenzeiten. Sie wird aus `land` abgeleitet (`AT`→`Europe/Vienna`, `DE`→`Europe/Berlin`, `CH`→`Europe/Zurich`); siehe `planning_horizon` |
 | `netznutzung` | Objekt | `house_profiles.json` | Arbeitspreis der Netznutzung netto (ohne USt): Netzbereich aus dem Katalog (inkl. Zeitregeln SNAP/WiNAP) oder eigener Wert. Unabhängig vom Lieferantentarif, siehe [Preise](preise.md) |
 
@@ -146,6 +147,16 @@ Details: [EHAL-Spec § Plant topology](../referenz/ehal.md).
 | `read_only` | Eigenverbrauch-Kopplung (kein freier Fahrplan) | Keine ESS-Sollwerte |
 
 Verlangt `control` mehr, als das EHAL-Mapping hergibt (z. B. `full` ohne `set_ess_active_power` und ohne `plant.ha_ess_force`), warnt EHAL-Com. Für Huawei ohne Wirkleistungs-Entity gibt es optional `plant.ha_ess_force` (`driver: huawei_solar`, `device_id`, `duration_min`), siehe [EHAL-Spec](../referenz/ehal.md) und [EHAL-Com](../ui/ehal-com.md).
+
+<a id="netzladung-vor-sonnenaufgang"></a>
+
+## Netzladung vor Sonnenaufgang
+
+Earnie plant (live und in Simulation/Backtesting) bis zum nächsten Sonnenaufgang (SA₁) standardmäßig **keine Netzladung**: Die Batterie lädt in diesem Abschnitt höchstens so viel, wie PV erwartet wird – nachts also nichts. Für kleine Speicher mit viel PV ist das sinnvoll, weil der Tag die Batterie ohnehin füllt.
+
+Bei großem Speicher, dynamischem Tarif und wenig PV (Winter, Hochnebel) verschenkt das Geld: Der Haushalt bezieht tagsüber teuren Netzstrom, obwohl die Batterie nachts günstig hätte laden können. Mit `grid_charge_before_sunrise: true` (Hauskonfigurator → Batterien → „Netzladung vor Sonnenaufgang erlauben“) fällt die Sperre für diese Batterie weg. Die Optimierung lädt nachts nur, wenn der Nachtpreis inklusive Wandlungsverlusten (Roundtrip ≈ η_path²) unter dem späteren Bezugspreis liegt.
+
+Die Einstellung gilt je Batterie und nur mit `control: full`; `limits_only` und `read_only` laden ohnehin nie aus dem Netz.
 
 <a id="einspeisegrenze"></a>
 

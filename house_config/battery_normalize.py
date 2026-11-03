@@ -217,6 +217,7 @@ def normalize_battery(raw: dict, index: int) -> dict:
         "standby_power_kw": standby,
         "control": control,
         "limits_from_live": bool(raw.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(raw.get("grid_charge_before_sunrise", False)),
         # Q8: empty string values are Loxone activation flags — keep the keys
         # (same as components_store). Stripping empties breaks PS writes via
         # _planning_powerstations → _binding_for_ps.

@@ -321,3 +321,73 @@ def test_milp_feasible_with_virtual_asap_and_sunrise_pv_only():
     assert float(powers.get("e_auto") or 0.0) > 1.0
     assert "e_auto" in obs
     assert tsoc != 99.0 or mode != 0 or float(powers.get("e_auto") or 0.0) > 1e-3
+
+
+def _night_matrix() -> list[dict]:
+    """Cheap night slot, expensive pre-sunrise slot, then little PV."""
+    return [
+        {"hour": 0, "expected_p_pv": 0.0, "expected_p_act": 0.5, "k_act": 10.0,
+         "k_push_act": 5.0, "expected_flex_kw": {}},
+        {"hour": 1, "expected_p_pv": 0.0, "expected_p_act": 2.0, "k_act": 30.0,
+         "k_push_act": 5.0, "expected_flex_kw": {}},
+        {"hour": 2, "expected_p_pv": 0.2, "expected_p_act": 2.0, "k_act": 30.0,
+         "k_push_act": 5.0, "expected_flex_kw": {}},
+    ]
+
+
+def test_grid_charge_before_sunrise_lets_cost_decide_night_charge():
+    battery_params = {**_battery_params(), "grid_charge_before_sunrise": True}
+    matrix = _night_matrix()
+    model = _build_milp_model(matrix, 3, battery_params, 10.0, [], 0.0, {}, None)
+    _add_milp_objective(model, matrix, 5.0, {}, wear_cent_per_kwh=0.0)
+    _add_pv_only_charge_through_sunrise(model, matrix, 1)
+    model.prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    assert pulp.LpStatus[model.prob.status] == "Optimal"
+    assert float(model.p_charge[0].varValue or 0.0) > 1.0
+
+
+def test_grid_charge_before_sunrise_is_per_battery():
+    def _bat(ess_id: str, allowed: bool) -> dict:
+        return {**_battery_params(), "id": ess_id, "grid_charge_before_sunrise": allowed}
+
+    matrix = _night_matrix()
+    model = _build_milp_model(
+        matrix, 3, [_bat("haus", True), _bat("garage", False)], 10.0, [], 0.0, {}, None,
+        current_soc_by_id={"haus": 10.0, "garage": 10.0},
+    )
+    _add_milp_objective(model, matrix, 5.0, {}, wear_cent_per_kwh=0.0)
+    _add_pv_only_charge_through_sunrise(model, matrix, 1)
+    model.prob.solve(pulp.PULP_CBC_CMD(msg=False))
+    assert pulp.LpStatus[model.prob.status] == "Optimal"
+    assert float(model.p_charge_by_ess["haus"][0].varValue or 0.0) > 1.0
+    assert float(model.p_charge_by_ess["garage"][0].varValue or 0.0) < 1e-6
+    assert float(model.p_charge_by_ess["garage"][1].varValue or 0.0) < 1e-6
+
+
+def test_grid_charge_before_sunrise_reaches_optimizer_params():
+    from house_config.battery_normalize import normalize_battery
+    from house_config.entity_resolution import (
+        battery_params_from_planning,
+        planning_battery_entry,
+    )
+
+    raw = {
+        "id": "haus",
+        "label": "Haus",
+        "battery_capacity_kwh": 18.0,
+        "battery_max_charge_power_kw": 6.0,
+        "battery_max_discharge_power_kw": 6.0,
+        "battery_efficiency": 0.97,
+        "battery_min_soc": 0.0,
+        "battery_max_soc": 100.0,
+        "threshold_power": 0.05,
+        "regulates_on": "grid",
+        "inverter_id": "wr",
+    }
+
+    def _params(spec: dict) -> dict:
+        entry = planning_battery_entry(normalize_battery(spec, 0))
+        return battery_params_from_planning({**entry, "inverter_efficiency": 0.97})
+
+    assert _params(raw)["grid_charge_before_sunrise"] is False
+    assert _params({**raw, "grid_charge_before_sunrise": True})["grid_charge_before_sunrise"] is True

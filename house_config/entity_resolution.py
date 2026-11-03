@@ -38,6 +38,7 @@ ZERO_BATTERY_FLAT = {
     "battery_control": DEFAULT_BATTERY_CONTROL,
     "battery_ac_connection": DEFAULT_AC_CONNECTION,
     "limits_from_live": False,
+    "grid_charge_before_sunrise": False,
 }
 
 ZERO_PV_FLAT = {
@@ -212,6 +213,7 @@ def planning_battery_entry(bat: dict) -> dict:
         "standby_power_kw": float(bat.get("standby_power_kw", 0.0) or 0.0),
         "control": bat.get("control", DEFAULT_BATTERY_CONTROL),
         "limits_from_live": bool(bat.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(bat.get("grid_charge_before_sunrise", False)),
         "ac_connection": str(
             bat.get("ac_connection") or DEFAULT_AC_CONNECTION
         ).strip().lower()
@@ -281,6 +283,7 @@ def battery_params_from_planning(entry: dict) -> dict:
         "threshold_power": float(entry.get("threshold_power", 0.02) or 0.02),
         "control": str(entry.get("control", DEFAULT_BATTERY_CONTROL) or DEFAULT_BATTERY_CONTROL),
         "limits_from_live": bool(entry.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(entry.get("grid_charge_before_sunrise", False)),
         "ehal_bindings": dict(entry.get("ehal_bindings") or {}),
     }
     inv_id = str(entry.get("inverter_id") or "").strip()
@@ -344,6 +347,7 @@ def _flat_battery_fields(planning: list[dict]) -> dict:
             "ac_connection", DEFAULT_AC_CONNECTION
         ),
         "limits_from_live": bool(first.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(first.get("grid_charge_before_sunrise", False)),
     }
 
 

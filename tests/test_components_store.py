@@ -39,6 +39,7 @@ def test_save_and_load_roundtrip(tmp_path):
                     "battery_max_soc": 100.0,
                     "threshold_power": 0.05,
                     "limits_from_live": True,
+                    "grid_charge_before_sunrise": True,
                     "control": "limits_only",
                     "regulates_on": "grid",
                     "battery_wear": {"enabled": False},
@@ -62,6 +63,7 @@ def test_save_and_load_roundtrip(tmp_path):
     assert bat["battery_max_charge_power_kw"] == 3.0
     assert bat["battery_max_discharge_power_kw"] == 2.5
     assert bat["limits_from_live"] is True
+    assert bat["grid_charge_before_sunrise"] is True
     assert bat["control"] == "limits_only"
     assert bat["inverter_id"] == "wr_main"
     assert "battery_max_power_kw" not in bat
@@ -97,6 +99,7 @@ def test_save_migrates_legacy_max_power_to_split_fields(tmp_path):
     assert bat["battery_max_charge_power_kw"] == 2.5
     assert bat["battery_max_discharge_power_kw"] == 2.5
     assert bat["limits_from_live"] is False
+    assert bat["grid_charge_before_sunrise"] is False
     assert "battery_max_power_kw" not in bat
 
 
