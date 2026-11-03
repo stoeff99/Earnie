@@ -372,6 +372,14 @@ def _render_battery_limit_fields(
     }
     if str(bat_type or "house").strip().lower() == "house":
         out["regulates_on"] = _render_battery_regulates_on(session_scope)
+        out["grid_charge_before_sunrise"] = labeled_checkbox(
+            "Netzladung vor Sonnenaufgang erlauben",
+            help="Aus: Bis zum nächsten Sonnenaufgang lädt die Batterie nur mit "
+            "PV-Strom. Ein: Earnie darf nachts aus dem Netz laden, wenn das "
+            "günstiger ist als späterer Netzbezug (z. B. dynamischer Tarif, wenig "
+            "Winter-PV). Wirkt nur bei Steuerbarkeit „Voll steuerbar“.",
+            key=_scoped_key(session_scope, "planning_battery_grid_charge_before_sunrise"),
+        )
     return out
 
 

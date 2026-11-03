@@ -115,15 +115,36 @@ def _add_pv_only_charge_through_sunrise(
     Hourly MPC otherwise charges before SA₁ for later flex, then re-opts the flex
     away and is forced to export to meet SOC_min (SoC spike at SA₁). Spec assumes
     night grid charge is economically irrelevant for this battery size.
+
+    Batteries with ``grid_charge_before_sunrise`` are exempt (large storage, dynamic
+    tariff, little winter PV): the cost objective alone decides on night charging.
     """
     if model.horizon < 1:
         return
     last = min(sunrise_index, model.horizon - 1)
     if last < 0:
         return
+    blocked = pv_only_charge_vars(model)
+    if not blocked:
+        return
     for t in range(last + 1):
         pv_cap = max(0.0, float(matrix[t].get("expected_p_pv", 0.0) or 0.0))
-        model.prob += model.p_charge[t] <= pv_cap
+        model.prob += pulp.lpSum(charge[t] for charge in blocked) <= pv_cap
+
+
+def grid_charge_before_sunrise(battery_params: dict) -> bool:
+    return bool(battery_params.get("grid_charge_before_sunrise", False))
+
+
+def pv_only_charge_vars(model: MilpHorizonModel) -> list[list]:
+    """Charge variables of the ESS still limited to PV through sunrise."""
+    if not model.ess_ids or not model.p_charge_by_ess or not model.battery_params_by_id:
+        return [model.p_charge]
+    return [
+        model.p_charge_by_ess[eid]
+        for eid in model.ess_ids
+        if not grid_charge_before_sunrise(model.battery_params_by_id[eid])
+    ]
 
 
 def _terminal_soc_energy_kwh(

@@ -369,6 +369,9 @@ def load_full_runtime_params(
         ).strip().lower()
         or "grid_tied",
         "BATTERY_LIMITS_FROM_LIVE": bool(resolved.get("limits_from_live", False)),
+        "BATTERY_GRID_CHARGE_BEFORE_SUNRISE": bool(
+            resolved.get("grid_charge_before_sunrise", False)
+        ),
         "THRESHOLD_POWER": validate_threshold_power(
             lookup_runtime_value(resolved, "threshold_power", config_path)
         ),

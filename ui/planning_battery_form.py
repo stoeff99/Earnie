@@ -171,6 +171,7 @@ def _battery_save_payload(fields: dict) -> dict:
         "standby_power_kw": float(fields["standby_power"] or 0.0),
         "control": fields.get("control") or DEFAULT_BATTERY_CONTROL,
         "limits_from_live": bool(fields.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(fields.get("grid_charge_before_sunrise", False)),
         "ehal_bindings": dict(fields.get("ehal_bindings") or {}),
         "battery_wear": fields["battery_wear"],
     }

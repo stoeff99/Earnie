@@ -234,6 +234,7 @@ def _battery_spec_from_raw(raw_spec: dict, *, entity_id: str, label: str) -> dic
         "threshold_power": float(raw_spec.get("threshold_power", 0.05)),
         "standby_power_kw": float(raw_spec.get("standby_power_kw", 0.0) or 0.0),
         "limits_from_live": bool(raw_spec.get("limits_from_live", False)),
+        "grid_charge_before_sunrise": bool(raw_spec.get("grid_charge_before_sunrise", False)),
     }
     # Virtual PS may omit electrical fields; inheritance fills them before normalize.
     for key, sources in _BATTERY_FLOAT_SOURCES:
@@ -383,6 +384,7 @@ def _battery_save_spec(
         "standby_power_kw": normalized["standby_power_kw"],
         "control": normalized["control"],
         "limits_from_live": normalized["limits_from_live"],
+        "grid_charge_before_sunrise": normalized["grid_charge_before_sunrise"],
         "battery_wear": normalized["battery_wear"]
         if normalized["battery_wear"] is not None
         else {"enabled": False},

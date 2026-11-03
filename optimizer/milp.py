@@ -33,6 +33,7 @@ from .milp_consumers import (
     block_flex_outside_book,
     filter_feasible_consumers,
 )
+from .milp_horizon_extras import grid_charge_before_sunrise
 from .milp_horizon import (
     EMPTY_MILP_PLAN,
     MilpHorizonModel,
@@ -259,9 +260,15 @@ def _add_soc_anchor_constraints(
         else:
             _add_pv_only_charge_through_sunrise(model, matrix, sunrise_soc_min_index)
             if verbose:
+                exempt = [
+                    eid
+                    for eid in (model.ess_ids or [])
+                    if grid_charge_before_sunrise(model.battery_params_by_id[eid])
+                ]
                 logger.info(
-                    "MILP SOC-Anker Sonnenaufgang: Slot %d PV-only charge (no hard SOC_min eq)",
+                    "MILP SOC-Anker Sonnenaufgang: Slot %d PV-only charge (no hard SOC_min eq)%s",
                     sunrise_soc_min_index,
+                    f"; grid charge allowed for {', '.join(exempt)}" if exempt else "",
                 )
     elif e_terminal := _terminal_soc_energy_kwh(battery_params, terminal_soc_percent):
         _add_terminal_soc_constraint(model, e_terminal)
