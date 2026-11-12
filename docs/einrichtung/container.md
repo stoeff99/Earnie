@@ -128,7 +128,7 @@ Ein Release kann auch nur für einen Kanal erscheinen (manueller Start mit `targ
 
 **Vorabversionen (Community-Test):** Ein Tag `vX.Y.Z-alpha.N`, `vX.Y.Z-beta.N` bzw. `vX.Y.Z-rc.N` (ebenfalls passend zu `version.py`) durchläuft denselben Ablauf. Zuerst entsteht der Kandidat `:<version>`, nach `promote` zusätzlich `:next` und ein GitHub **Pre-release**, jedoch **kein** `:latest`.
 
-Zum Testen entweder `:next` verwenden (nach Freigabe) oder den Versions-Tag aus der Alpha-Compose pinnen (aktuell in den Dateien: `2.8.0-dev.11`). Der Pin wird erst mit der nächsten Vorabversion aktualisiert und kann daher älter sein als die letzte offizielle Version. Die produktiven Compose-Dateien (`*_productive.yml`) mit `:latest` bleiben auf der letzten offiziellen Version.
+Zum Testen entweder `:next` verwenden (nach Freigabe) oder den Versions-Tag aus der Alpha-Compose pinnen (aktuell in den Dateien: `2.8.0-dev.13`). Der Pin wird erst mit der nächsten Vorabversion aktualisiert und kann daher älter sein als die letzte offizielle Version. Die produktiven Compose-Dateien (`*_productive.yml`) mit `:latest` bleiben auf der letzten offiziellen Version.
 
 ### Alpha parallel zur Produktion (Port 8511)
 
@@ -137,7 +137,7 @@ Für die Alpha gibt es eigene Compose-Dateien, getrennt von der Prod-YAML: `dock
 - **Container:** `earnie-alpha`, Host-Port **8511**, Volumes unter `./earnie_env_alpha/`.
 - **Daten getrennt von Prod:** Config und Verlauf liegen in `./earnie_env_alpha/config` und `./earnie_env_alpha/runtime` (relativ zum Ordner, aus dem `docker compose --project-directory .` läuft). Fehlt der Eintrag `volumes:` im Service, schreibt Earnie alles ins Container-Dateisystem – dann sind Config und Verlauf nach jedem `pull` / `up -d` weg. Kontrolle: `docker inspect earnie-alpha --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{println}}{{end}}'` muss zwei Zeilen zeigen.
 - **Compose-Projektname:** `earnie-alpha`; er kollidiert nicht mit dem Prod-Projekt `earnie-productive`.
-- **Image-Tag:** in der YAML an die gewünschte Pre-release anpassen (aktuell in den Dateien: `2.8.0-dev.11`).
+- **Image-Tag:** in der YAML an die gewünschte Pre-release anpassen (aktuell in den Dateien: `2.8.0-dev.13`).
 
 ```powershell
 mkdir -p earnie_env_alpha/config earnie_env_alpha/runtime
