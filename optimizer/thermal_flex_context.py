@@ -8,6 +8,7 @@ import pulp
 
 from house_config.generic_schedule import generic_allowed_slot_hours
 from optimizer.charging_context import matrix_slot_datetime
+from optimizer.heatpump_cycle import min_off_slots
 
 if TYPE_CHECKING:
     from data.modeled_climate import ModeledClimateContext
@@ -195,7 +196,26 @@ def resolve_thermal_flex_contexts(
             "slot_energy_kwh": slot_energy,
             "targets_slot_aligned": True,
         }
+    if is_live:
+        _attach_cycle_carry_in(contexts, consumers)
     return contexts
+
+
+def _attach_cycle_carry_in(contexts: dict[str, dict], consumers: list[dict]) -> None:
+    """Live: slot-0 run/pause state of cycling heat pumps (``min_off_quarterhours``)."""
+    from optimizer.heatpump_cycle import carry_in_for, load_state, uses_cycle_pause
+    from optimizer.slot_duration import DEFAULT_DT_H
+    from runtime_store.planning_clock import planning_now
+
+    cycling = [c for c in consumers if uses_cycle_pause(c) and str(c["id"]) in contexts]
+    if not cycling:
+        return
+    state = load_state()
+    now = planning_now()
+    for consumer in cycling:
+        carry = carry_in_for(consumer, now, dt_h=DEFAULT_DT_H, state=state)
+        if carry:
+            contexts[str(consumer["id"])]["cycle_carry_in"] = carry
 
 
 def _live_house_slot_energy_kwh(
@@ -330,6 +350,85 @@ def add_max_on_duration_constraints(
         )
 
 
+def _max_on_slots_cycling(
+    day_slots: int,
+    *,
+    max_hours: int,
+    min_off: int,
+    max_pulses: int,
+    run_left: int = 0,
+    pause_left: int = 0,
+) -> int:
+    """Upper bound on ON slots for a cycling heat pump (greedy: run max, pause min)."""
+    on_slots = 0
+    t = 0
+    if run_left > 0:
+        k = min(run_left, day_slots)
+        on_slots += k
+        t = k + min_off
+    t = max(t, pause_left)
+    starts = 0
+    while t < day_slots and starts < max_pulses:
+        k = min(max_hours, day_slots - t)
+        on_slots += k
+        t += k + min_off
+        starts += 1
+    return on_slots
+
+
+def add_min_off_constraints(
+    prob: pulp.LpProblem,
+    on_vars: list,
+    *,
+    min_off: int,
+    prefix: str,
+    on_before_horizon: bool = False,
+) -> None:
+    """After a stop (ON→OFF) stay OFF for ``min_off`` slots (compressor lock)."""
+    if min_off <= 1 or not on_vars:
+        return
+    horizon = len(on_vars)
+    for t in range(horizon):
+        if t == 0:
+            if not on_before_horizon:
+                continue
+            stop = 1 - on_vars[0]
+        else:
+            stop = on_vars[t - 1] - on_vars[t]
+        for k in range(1, min_off):
+            if t + k < horizon:
+                prob += (on_vars[t + k] + stop <= 1, f"{prefix}_min_off_{t}_{k}")
+
+
+def add_cycle_carry_in_constraints(
+    prob: pulp.LpProblem,
+    on_vars: list,
+    carry: dict,
+    *,
+    min_on: int,
+    max_hours: int,
+    prefix: str,
+) -> set[int]:
+    """Slot-0 state from the live cycle memory; returns slots blocked by a running pause."""
+    horizon = len(on_vars)
+    if carry.get("running"):
+        elapsed = int(carry.get("run_elapsed_slots") or 0)
+        must_run = max(0, min_on - elapsed)
+        for t in range(min(must_run, horizon)):
+            prob += (on_vars[t] == 1, f"{prefix}_carry_min_on_{t}")
+        run_left = max(0, max_hours - elapsed)
+        if run_left + 1 <= horizon:
+            prob += (
+                pulp.lpSum(on_vars[: run_left + 1]) <= run_left,
+                f"{prefix}_carry_max_on",
+            )
+        return set()
+    pause_left = min(int(carry.get("pause_left_slots") or 0), horizon)
+    for t in range(pause_left):
+        prob += (on_vars[t] == 0, f"{prefix}_carry_pause_{t}")
+    return set(range(pause_left))
+
+
 def add_max_pulses_per_day_constraints(
     prob: pulp.LpProblem,
     on_vars: list,
@@ -448,9 +547,39 @@ def _add_one_thermal_flex_consumer(
     on_vars = model.consumer_on[cid]
     max_hours = _max_on_hours(consumer)
     max_pulses = _max_pulses_per_day(consumer)
+    min_off = min_off_slots(consumer)
+    carry = dict(ctx.get("cycle_carry_in") or {})
+    running_before = bool(carry.get("running"))
+    if running_before:
+        continuing = True
+    # The compressor lock wins over a comfort floor: it cannot run in its pause.
+    blocked = set(range(min(int(carry.get("pause_left_slots") or 0), len(on_vars))))
+    forced_indices = [index for index in forced_indices if index not in blocked]
     if not forced_indices:
+        # Structural run/pause limits only without a comfort floor (store overlay),
+        # which may need longer runs than the cycle allows.
         add_max_on_duration_constraints(
             model.prob, on_vars, max_hours=max_hours, prefix=cid
+        )
+        add_min_off_constraints(
+            model.prob,
+            on_vars,
+            min_off=min_off,
+            prefix=cid,
+            on_before_horizon=running_before,
+        )
+        add_cycle_carry_in_constraints(
+            model.prob,
+            on_vars,
+            carry,
+            min_on=int(consumer.get("min_on_quarterhours", 1) or 1),
+            max_hours=max_hours,
+            prefix=cid,
+        )
+    else:
+        add_cycle_carry_in_constraints(
+            model.prob, on_vars, {"pause_left_slots": len(blocked)}, min_on=1,
+            max_hours=max_hours, prefix=cid,
         )
     # Sunrise: schedule_indices are book (SA1→SA2). Spec/plausibility WP is
     # book-window energy — require delivery only on those slots, using the
@@ -468,11 +597,28 @@ def _add_one_thermal_flex_consumer(
             continue
         _, max_kw = power_limits_kw(consumer)
         max_deliverable = _max_deliverable_kwh(
-            consumer, day_indices, dt_h=model.dt_h
+            consumer,
+            [index for index in day_indices if index not in blocked],
+            dt_h=model.dt_h,
         )
         want = _thermal_day_want_kwh(ctx, day, day_indices, daily_targets, live_day_min)
         if forced_indices:
             op_max_kwh = max_deliverable
+        elif min_off > 1:
+            first_day = 0 in day_indices
+            op_slots = _max_on_slots_cycling(
+                len(day_indices),
+                max_hours=max_hours,
+                min_off=min_off,
+                max_pulses=max_pulses,
+                run_left=(
+                    max(0, max_hours - int(carry.get("run_elapsed_slots") or 0))
+                    if first_day and running_before
+                    else 0
+                ),
+                pause_left=len(blocked) if first_day else 0,
+            )
+            op_max_kwh = op_slots * float(max_kw) * float(model.dt_h)
         else:
             op_slots = _max_on_slots_with_limits(
                 len(day_indices), max_hours=max_hours, max_pulses=max_pulses

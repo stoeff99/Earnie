@@ -38,6 +38,9 @@ Der Modus ist wirksam, sobald der Schalter im Hauskonfigurator **oder** das EHAL
 | `daily_target_kwh` | Festes 24-h-Ziel in kWh (bei `daily_target_source: config`) |
 | `daily_target_source` | `config` = fester Wert / `charging_schedule`; `historical` = Profil aus der Vergangenheit; `loxone` = Live-EHAL-Wert in kWh (Config-Enum-Name historisch); `loxone_remaining_hours` = Live-Schulden in Stunden × `nominal_power_kw` (SwimSpa-Filter); `thermal` = RC-Modell (SwimSpa-Heizung) |
 | `min_on_quarterhours` | Mindestlaufzeit pro Einschaltung in 15-Minuten-Slots |
+| `max_on_quarterhours` | Haus Wärme (`thermal_annual`): längster Lauf am Stück in 15-Minuten-Slots (Default 16 = 4 h). Hauskonfigurator: „Maximale Laufzeit am Stück“. |
+| `min_off_quarterhours` | Haus Wärme (`thermal_annual`): Pflichtpause nach jedem Lauf in 15-Minuten-Slots (Default 0 = keine). Siehe [Taktende Wärmepumpe](#taktende-warmepumpe). |
+| `max_pulses_per_day` | Haus Wärme (`thermal_annual`): höchstens so viele Starts je Kalendertag (Default 4). Hauskonfigurator: „Maximale Starts pro Tag“. |
 | `path_historical_log` | Historische Leistungs-CSV (Offline → `cons_data`; typisch ein Loxone-Export). Wird aus dem Hausprofil nur für den Pool-Filter übernommen; der Loxone-Log-Import (`integrations/loxone_log_import.py`) dient nur noch Migration und Tests |
 | `signal_type` | `power` (kW) oder `binary` (Ein/Aus × `nominal_power_kw`) |
 | `log_signal_type` | Optional: abweichendes Format nur für `path_historical_log` |
@@ -67,6 +70,30 @@ Bei `daily_target_source: thermal` leitet das RC-Modell das Tagesenergie-Ziel au
 | `thermal_control.history_logs` | CSV-Pfade für die Kalibrierung; optional `heating_active_csv` / `filter_active_csv` statt einer reinen Leistungsschwelle |
 
 Details: [EHAL-Com](../ui/ehal-com.md), [Loxone-Signale](../referenz/loxone-signals.md) (Loxone-Defaults), [SwimSpa Filter](../dev/done/swimspa-filter.md).
+
+<a id="taktende-warmepumpe"></a>
+
+## Haus Wärme: taktende Wärmepumpe (`min_off_quarterhours`)
+
+Ältere Wärmepumpen ohne Leistungsmodulation laufen nur in Takten: eine Weile Vollleistung, danach eine feste Sperrzeit des Verdichters. Beispiel: 15–45 Minuten Lauf, danach 60 Minuten Pause. Dieses Muster bilden drei Felder ab:
+
+| Feld | Beispiel | Wirkung |
+| ---- | -------- | ------- |
+| `min_on_quarterhours` | 1 | kürzester Lauf (15 min) |
+| `max_on_quarterhours` | 3 | längster Lauf (45 min) |
+| `min_off_quarterhours` | 4 | Pflichtpause nach jedem Lauf (60 min) |
+| `max_pulses_per_day` | 14 | Starts pro Tag; muss für taktende Geräte hoch genug sein |
+
+**In der Planung:** Nach jedem geplanten Lauf hält Earnie die Wärmepumpe mindestens `min_off_quarterhours` Slots aus. Das Tagesziel kappt Earnie auf die Energie, die das Taktmuster liefern kann. Im Beispiel sind das höchstens 3 von 7 Slots, also rund 43 % der Nennleistung.
+
+Mit Wärmespeicher und einer Komfort-Untergrenze, die bestimmte Stunden erzwingt, gelten wie bisher weder `max_on_quarterhours` noch die Pflichtpause innerhalb des Plans. Eine laufende Pause aus dem Taktgedächtnis bleibt aber auch dann gesperrt.
+
+**Im Live-Betrieb (Taktgedächtnis):** Ab `min_off_quarterhours` ≥ 2 liest Earnie in jedem Zyklus, ob die Wärmepumpe läuft. Dafür nutzt es `sens_consumer_active`, falls gemappt, sonst die gemessene Leistung `sens_power_act` (läuft ab halber Nennleistung). Den letzten Wechsel merkt sich Earnie in `runtime/heatpump_cycle_state.json`. Der nächste Plan beginnt dann mit dem echten Zustand:
+
+- **Wärmepumpe läuft:** Die Mindestlaufzeit wird zu Ende geführt, und der Lauf endet spätestens nach `max_on_quarterhours`.
+- **Wärmepumpe steht in der Pause:** Die restlichen Pausen-Slots bleiben aus. Das gilt auch, wenn eine Komfort-Untergrenze dort Heizen verlangen würde, denn der Verdichter kann während der Sperrzeit nicht laufen.
+
+Die Wechsel kennt Earnie nur auf einen Zyklus (15 min) genau. Ist keines der beiden Signale gemappt, warnt das Log in jedem Zyklus. Ist die letzte Beobachtung älter als zwei Zyklen (z. B. nach einem Neustart), plant Earnie den ersten Zyklus ohne Taktgedächtnis. In beiden Fällen gilt die Pause nur innerhalb des Plans.
 
 ## Haus Wärme: optionaler Wärmespeicher (`heat_storage`)
 

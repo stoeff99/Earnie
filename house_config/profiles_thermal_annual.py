@@ -117,7 +117,17 @@ def normalize_thermal_annual_consumer(
         spec["thermal_flex_window"] = dict(window)
     spec["min_on_quarterhours"] = max(1, int(raw.get("min_on_quarterhours", 1) or 1))
     if "max_on_quarterhours" in raw:
-        spec["max_on_quarterhours"] = max(4, int(raw.get("max_on_quarterhours", 16) or 16))
+        spec["max_on_quarterhours"] = max(1, int(raw.get("max_on_quarterhours", 16) or 16))
+    if "min_off_quarterhours" in raw:
+        spec["min_off_quarterhours"] = max(0, int(raw.get("min_off_quarterhours") or 0))
     if "max_pulses_per_day" in raw:
         spec["max_pulses_per_day"] = max(1, int(raw.get("max_pulses_per_day", 4) or 4))
+    if int(spec.get("min_off_quarterhours") or 0) > 1 and int(
+        spec.get("max_on_quarterhours", 16)
+    ) < spec["min_on_quarterhours"]:
+        raise ValueError(
+            f"Wärmepumpe '{raw.get('id')}': max_on_quarterhours "
+            f"({spec['max_on_quarterhours']}) ist kleiner als min_on_quarterhours "
+            f"({spec['min_on_quarterhours']})."
+        )
     copy_loxone_binding(raw, spec)

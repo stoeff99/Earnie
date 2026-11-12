@@ -431,6 +431,7 @@ def planning_thermal_to_milp(consumer: dict) -> dict:
         "min_power_kw": nominal,
         "min_on_quarterhours": min_on,
         "max_on_quarterhours": int(consumer.get("max_on_quarterhours", 16) or 16),
+        "min_off_quarterhours": int(consumer.get("min_off_quarterhours", 0) or 0),
         "max_pulses_per_day": int(consumer.get("max_pulses_per_day", 4) or 4),
         "daily_target_kwh": 0.0,
         "daily_target_source": "thermal_annual",
