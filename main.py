@@ -429,6 +429,12 @@ def _main_cycle(
             house_profile,
             active=True,
         )
+    from optimizer.heatpump_cycle import observe_live_consumers
+
+    try:
+        observe_live_consumers(live_consumers, planning_now())
+    except Exception as exc:  # noqa: BLE001 — never abort live run
+        logger.warning("Wärmepumpen-Takt: Beobachtung fehlgeschlagen: %s", exc)
     live_ids = {str(c.get("id") or "") for c in live_consumers}
     targets = {
         cid: value for cid, value in (targets or {}).items() if cid in live_ids

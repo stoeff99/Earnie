@@ -52,6 +52,7 @@ _PASSTHROUGH_CONSUMER_KEYS = (
     "optimizer_flex",
     "thermal_flex_window",
     "max_on_quarterhours",
+    "min_off_quarterhours",
     "max_pulses_per_day",
     "min_on_quarterhours",
     "heating_power_threshold_kw",

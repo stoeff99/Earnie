@@ -55,6 +55,33 @@ def _render_thermal_annual_building_fields(
             ratios=WIDE_LABEL_RATIOS,
             key=_scoped_key(session_scope, f"hc_ta_min_qh_{index}"),
         ),
+        "max_on_quarterhours": labeled_number_input(
+            "Maximale Laufzeit am Stück (Viertelstunden)",
+            min_value=1,
+            value=int(consumer.get("max_on_quarterhours", 16)),
+            ratios=WIDE_LABEL_RATIOS,
+            help="Längster Lauf, bevor die Wärmepumpe von selbst stoppt (z. B. 3 = 45 min).",
+            key=_scoped_key(session_scope, f"hc_ta_max_qh_{index}"),
+        ),
+        "min_off_quarterhours": labeled_number_input(
+            "Pflichtpause nach jedem Lauf (Viertelstunden)",
+            min_value=0,
+            value=int(consumer.get("min_off_quarterhours", 0) or 0),
+            ratios=WIDE_LABEL_RATIOS,
+            help="Taktsperre des Verdichters (z. B. 4 = 60 min). 0 = keine Pflichtpause. "
+            "Ab 2 plant Earnie die Pause ein und merkt sich im Live-Betrieb, wann die "
+            "Wärmepumpe zuletzt lief (braucht sens_consumer_active oder sens_power_act).",
+            key=_scoped_key(session_scope, f"hc_ta_min_off_qh_{index}"),
+        ),
+        "max_pulses_per_day": labeled_number_input(
+            "Maximale Starts pro Tag",
+            min_value=1,
+            value=int(consumer.get("max_pulses_per_day", 4)),
+            ratios=WIDE_LABEL_RATIOS,
+            help="Obergrenze für Einschaltungen je Kalendertag. Bei taktenden "
+            "Wärmepumpen hoch genug wählen (z. B. 14).",
+            key=_scoped_key(session_scope, f"hc_ta_max_pulses_{index}"),
+        ),
         "living_area_m2": labeled_number_input(
             "Wohnfläche (m²)",
             min_value=0.0,
