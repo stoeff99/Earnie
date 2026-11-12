@@ -36,6 +36,15 @@ _POOL_FILTER_MILP_KEYS = (
 )
 
 
+_THERMAL_ANNUAL_PASSTHROUGH_KEYS = (
+    "max_on_quarterhours",
+    "min_off_quarterhours",
+    "max_pulses_per_day",
+    "optimizer_flex",
+    "thermal_flex_window",
+)
+
+
 def _is_pool_filter_consumer(consumer: dict) -> bool:
     return str(consumer.get("id") or "").strip() == _POOL_FILTER_ID
 
@@ -391,6 +400,13 @@ def _serialize_thermal_annual_fields(consumer: dict, out: dict) -> None:
     thermal.pop("longitude", None)
     out.update(thermal)
     out["min_on_quarterhours"] = consumer.get("min_on_quarterhours", 1)
+    # Keys read by normalize_thermal_annual_consumer; without them a save reverts
+    # the cycle settings (max run, mandatory pause, starts) to their defaults.
+    for key in _THERMAL_ANNUAL_PASSTHROUGH_KEYS:
+        if key not in consumer:
+            continue
+        value = consumer[key]
+        out[key] = dict(value) if isinstance(value, dict) else value
     _copy_loxone_io_fields(consumer, out)
 
 

@@ -218,3 +218,78 @@ def test_observe_records_only_readable_cycling_consumers(state_file, monkeypatch
     assert set(state) == {"waermepumpe"}
     assert state["waermepumpe"]["running"] is True
     assert "Taktgedächtnis inaktiv" in caplog.text
+
+
+def test_house_profile_save_keeps_cycle_fields():
+    """Regression: saving the Hauskonfigurator reverted max_on/min_off/max_pulses."""
+    from house_config.profiles_store import _normalize_consumer, _serialize_consumer
+
+    raw = {
+        "id": "waermepumpe",
+        "label": "Waermepumpe",
+        "type": "thermal_annual",
+        "nominal_power_kw": 3.0,
+        "living_area_m2": 145.0,
+        "building_class": 3,
+        "min_on_quarterhours": 1,
+        "max_on_quarterhours": 3,
+        "min_off_quarterhours": 4,
+        "max_pulses_per_day": 14,
+        "optimizer_flex": True,
+        "thermal_flex_window": {"start_hour": 10, "end_hour": 16},
+    }
+    saved = _serialize_consumer(_normalize_consumer(raw, 0, "house"))
+    again = _serialize_consumer(_normalize_consumer(saved, 0, "house"))
+    for out in (saved, again):
+        assert out["max_on_quarterhours"] == 3
+        assert out["min_off_quarterhours"] == 4
+        assert out["max_pulses_per_day"] == 14
+        assert out["optimizer_flex"] is True
+        assert out["thermal_flex_window"] == {"start_hour": 10, "end_hour": 16}
+
+
+def test_house_profiles_file_roundtrip_keeps_all_four_cycle_fields(tmp_path):
+    import json
+
+    from house_config.profiles_store import (
+        clear_house_profiles_doc_cache,
+        load_house_profiles_document,
+        save_house_profiles_document,
+    )
+
+    fields = {
+        "min_on_quarterhours": 2,
+        "max_on_quarterhours": 3,
+        "min_off_quarterhours": 4,
+        "max_pulses_per_day": 14,
+    }
+    wp = {
+        "id": "waermepumpe",
+        "label": "Waermepumpe",
+        "type": "thermal_annual",
+        "nominal_power_kw": 3.0,
+        "living_area_m2": 145.0,
+        "building_class": 3,
+        **fields,
+    }
+    doc = {
+        "profiles": [
+            {
+                "id": "home",
+                "label": "Home",
+                "annual_kwh": 10000.0,
+                "latitude": 47.4,
+                "longitude": 8.5,
+                "netznutzung": {"area_id": "user_no_grid_fee"},
+                "consumers": [wp],
+            }
+        ],
+        "earnie_data_model": 4,
+    }
+    path = tmp_path / "house_profiles.json"
+    save_house_profiles_document(str(path), doc)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))["profiles"][0]["consumers"][0]
+    clear_house_profiles_doc_cache()
+    loaded = load_house_profiles_document(str(path))["profiles"]["home"]["consumers"][0]
+    for consumer in (on_disk, loaded):
+        assert {key: consumer.get(key) for key in fields} == fields
