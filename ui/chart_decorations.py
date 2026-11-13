@@ -31,6 +31,7 @@ from ui.chart_slot_axis import (
     _zone_slot_left,
     _zone_slot_right,
 )
+from house_config.currency_display import active_units
 
 _DEVIATION_MARKER_SIZE = 11
 
@@ -376,7 +377,7 @@ def _cost_summary_head_lines(
         lines,
         base,
         summary_font,
-        text=f"BL Ziel: {matched_baseline_cost_euro:.2f} €",
+        text=f"BL Ziel: {active_units().amount(matched_baseline_cost_euro)}",
         line_index=line_index,
         color=COLOR_COST_BASELINE,
     )
@@ -384,7 +385,7 @@ def _cost_summary_head_lines(
         lines,
         base,
         summary_font,
-        text=f"Optimiert: {optimized_cost_euro:.2f} €",
+        text=f"Optimiert: {active_units().amount(optimized_cost_euro)}",
         line_index=line_index,
         color=COLOR_COST_OPTIMIZED,
     )
@@ -406,7 +407,7 @@ def _append_cost_summary_savings(
             lines,
             base,
             summary_font,
-            text=f"Ersparnis bisher: {achieved_savings_euro:+.2f} €",
+            text=f"Ersparnis bisher: {active_units().amount(achieved_savings_euro, '+.2f')}",
             line_index=line_index,
             color=_savings_annotation_color(achieved_savings_euro),
         )
@@ -414,7 +415,7 @@ def _append_cost_summary_savings(
             lines,
             base,
             summary_font,
-            text=f"Ersparnis erwartet: {savings_euro:+.2f} €",
+            text=f"Ersparnis erwartet: {active_units().amount(savings_euro, '+.2f')}",
             line_index=line_index,
             color=_savings_annotation_color(savings_euro),
         )
@@ -423,7 +424,7 @@ def _append_cost_summary_savings(
         lines,
         base,
         summary_font,
-        text=f"Ersparnis: {savings_euro:+.2f} €",
+        text=f"Ersparnis: {active_units().amount(savings_euro, '+.2f')}",
         line_index=line_index,
         color=_savings_annotation_color(savings_euro),
     )

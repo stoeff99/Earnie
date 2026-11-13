@@ -1,6 +1,7 @@
 """Plotly-Charts für Optimierungsdarstellung (sunrise→sunrise Live, 24h Historie)."""
 from __future__ import annotations
 
+
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -43,6 +44,7 @@ from ui.chart_legend_mobile import (
     render_collapsible_legend_from_figure,
 )
 from ui.help_hint import render_title_with_help
+from house_config.currency_display import active_units
 
 def add_power_traces(
     fig: go.Figure,
@@ -202,7 +204,7 @@ def _power_soc_layout(
         barmode="overlay",
         yaxis=dict(title="Leistung (kW)", side="left"),
         yaxis2=dict(
-            title="SoC (%) / Preis (Cent/kWh)",
+            title=f"SoC (%) / Preis ({active_units().per_kwh})",
             side="right",
             overlaying="y",
             showgrid=False,

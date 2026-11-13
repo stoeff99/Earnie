@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import pandas as pd
+from house_config.currency_display import active_units
 
 
 def _safe_filename(scenario_id: str) -> str:
@@ -11,7 +12,7 @@ def _safe_filename(scenario_id: str) -> str:
 
 
 def _fmt_eur(value: float) -> str:
-    return f"{float(value):.2f} €"
+    return active_units().amount(float(value))
 
 
 def _fmt_kwh(value: float) -> str:

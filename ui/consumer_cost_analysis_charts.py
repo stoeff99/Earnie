@@ -35,6 +35,7 @@ from ui.consumer_cost_battery_metrics import (
     build_battery_period_metrics,
 )
 from ui.consumption_display.period import TimeWindow, format_window_label
+from house_config.currency_display import active_units
 
 
 def _label(labels: Mapping[str, str], consumer_id: str) -> str:
@@ -128,7 +129,7 @@ def window_usage_vs_price_pv_chart(
         margin=dict(l=40, r=50, t=50, b=40),
         yaxis=dict(title="kWh / kW", side="left"),
         yaxis2=dict(
-            title="Cent/kWh",
+            title=active_units().per_kwh,
             overlaying="y",
             side="right",
             showgrid=False,
@@ -206,7 +207,7 @@ def window_cost_chart(
         title=f"Kosten (nur Netzanteil) — {format_window_label(window)}",
         height=320,
         margin=dict(l=40, r=20, t=50, b=40),
-        yaxis_title="€",
+        yaxis_title=active_units().major,
         showlegend=False,
     )
     return fig
@@ -317,7 +318,7 @@ def _format_coverage(series: CostAnalysisSeries) -> str:
     return (
         f"Datengrundlage Produktiv-Log: {start} – {end} "
         f"({len(series.slots)} Slots). Kosten ≈ Netzanteil × Importpreis "
-        f"(PV/Batterie am Verbrauchsort 0 €; keine Rechnungskorrektur)."
+        f"(PV/Batterie am Verbrauchsort 0 {active_units().major}; keine Rechnungskorrektur)."
     )
 
 
@@ -337,12 +338,12 @@ def render_period_kpis(
     c1, c2 = st.columns(2)
     c1.metric(
         format_window_label(window),
-        f"{selected.cost_euro:.2f} €",
+        active_units().amount(selected.cost_euro),
         help=f"{selected.energy_kwh:.1f} kWh · {selected.slot_count} Slots",
     )
     c2.metric(
         "Letzte 365 Tage",
-        f"{trailing_year.cost_euro:.2f} €",
+        active_units().amount(trailing_year.cost_euro),
         help=(
             f"{trailing_year.energy_kwh:.1f} kWh · {trailing_year.slot_count} Slots "
             "(nur vorhandene Log-Daten)"
@@ -358,7 +359,7 @@ def render_period_kpis(
                 "PV kWh": round(share.pv_kwh, 2),
                 "Batterie kWh": round(share.battery_kwh, 2),
                 "Netz kWh": round(share.grid_kwh, 2),
-                "Kosten €": round(share.cost_euro, 2),
+                f"Kosten {active_units().major}": round(share.cost_euro, 2),
             }
         )
     if rows:

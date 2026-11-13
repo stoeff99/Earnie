@@ -18,6 +18,7 @@ from ui.chart_trace_segments import (
     _add_segmented_hv_line,
     _trace_segments,
 )
+from house_config.currency_display import display_label
 
 def _hourly_cumsum_for_chart(
     hourly_values: list[float],
@@ -193,7 +194,7 @@ def _add_s2_forecast_cost_traces(
         series.length,
         name="Kosten BL Ziel (Prognose)",
         line_kwargs=dict(color=COLOR_COST_BASELINE, width=2.5, shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Kosten BL Ziel (Prognose, kumuliert): "
             "%{y:.3f} €<extra></extra>"
         ),
@@ -208,7 +209,7 @@ def _add_s2_forecast_cost_traces(
         series.length,
         name="Kosten optimiert (Prognose)",
         line_kwargs=dict(color=COLOR_COST_OPTIMIZED, width=2.5, shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Kosten optimiert (Prognose, kumuliert): "
             "%{y:.3f} €<extra></extra>"
         ),
@@ -233,7 +234,7 @@ def _add_s2_forecast_consumption_traces(
         line_kwargs=dict(color=COLOR_COST_BASELINE, width=2.5, dash="dash", shape="hv"),
         yaxis="y2",
         y_format=".2f",
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Verbrauch BL Ziel (Prognose, kumuliert): "
             "%{y:.2f} kWh<extra></extra>"
         ),
@@ -250,7 +251,7 @@ def _add_s2_forecast_consumption_traces(
         line_kwargs=dict(color=COLOR_COST_OPTIMIZED, width=2.5, dash="dash", shape="hv"),
         yaxis="y2",
         y_format=".2f",
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Verbrauch optimiert (Prognose, kumuliert): "
             "%{y:.2f} kWh<extra></extra>"
         ),
@@ -273,7 +274,7 @@ def _add_s2_actual_traces(
         series.split,
         name="Kosten (Ist bisher)",
         line_kwargs=dict(color=COLOR_COST_ACTUAL, width=2.5, shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Kosten (Ist bisher, kumuliert): "
             "%{y:.3f} €<extra></extra>"
         ),
@@ -289,7 +290,7 @@ def _add_s2_actual_traces(
         line_kwargs=dict(color=COLOR_COST_ACTUAL, width=2.5, dash="dash", shape="hv"),
         yaxis="y2",
         y_format=".2f",
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Verbrauch (Ist bisher, kumuliert): "
             "%{y:.2f} kWh<extra></extra>"
         ),
@@ -355,7 +356,7 @@ def add_cumulative_cost_traces(
         segments,
         name="Kosten BL Ziel",
         line_kwargs=dict(color=COLOR_COST_BASELINE, width=2.5, shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Kosten BL Ziel (kumuliert): %{y:.3f} €"
             "<extra></extra>"
         ),
@@ -368,7 +369,7 @@ def add_cumulative_cost_traces(
         segments,
         name="Kosten optimiert",
         line_kwargs=dict(color=COLOR_COST_OPTIMIZED, width=2.5, shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Kosten optimiert (kumuliert): %{y:.3f} €"
             "<extra></extra>"
         ),
@@ -403,7 +404,7 @@ def add_cumulative_consumption_traces(
         yaxis=yaxis,
         y_format=".2f",
         base_opacity=1.0,
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Verbrauch BL Ziel (kumuliert): %{y:.2f} kWh"
             "<extra></extra>"
         ),
@@ -419,7 +420,7 @@ def add_cumulative_consumption_traces(
         yaxis=yaxis,
         y_format=".2f",
         base_opacity=1.0,
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Verbrauch optimiert (kumuliert): %{y:.2f} kWh"
             "<extra></extra>"
         ),
@@ -448,7 +449,7 @@ def add_cumulative_actual_traces(
         segments,
         name="Kosten (Ist)",
         line_kwargs=dict(color=COLOR_COST_OPTIMIZED, width=2.5, shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Kosten (Ist, kumuliert): %{y:.3f} €"
             "<extra></extra>"
         ),
@@ -464,7 +465,7 @@ def add_cumulative_actual_traces(
         yaxis="y2",
         y_format=".2f",
         base_opacity=1.0,
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Verbrauch (Ist, kumuliert): %{y:.2f} kWh"
             "<extra></extra>"
         ),
@@ -493,7 +494,7 @@ def add_projected_savings_trace(
         segments,
         name="Ersparnis prognostiziert",
         line_kwargs=dict(color=COLOR_COST_SAVINGS, width=2.5, dash="dot", shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Ersparnis prognostiziert (kumuliert): %{y:.3f} €"
             "<extra></extra>"
         ),
@@ -525,7 +526,7 @@ def add_achieved_savings_trace(
         segments,
         name="Ersparnis bisher",
         line_kwargs=dict(color=COLOR_COST_SAVINGS, width=2.5, dash="dot", shape="hv"),
-        segment_hover_template=(
+        segment_hover_template=display_label(
             "Uhrzeit: %{customdata}<br>Ersparnis bisher (kumuliert): %{y:.3f} €"
             "<extra></extra>"
         ),

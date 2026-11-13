@@ -11,6 +11,7 @@ from runtime_store.persist_paths import (
     resolve_house_profiles_json_path,
     resolve_tariffs_json_path,
 )
+from house_config.currency_display import display_label
 
 
 def _read_json_document(path: str) -> dict:
@@ -187,7 +188,7 @@ def _missing_live_tariff_items(live_settings: dict, tariffs_path: str) -> list[s
         if not _user_fixed_cent_ok(
             live_settings.get(USER_IMPORT_CENT_KEY), require_positive=True
         ):
-            missing.append("Eigenen Bezugspreis (Cent/kWh) eingeben (Echtzeit-Umgebung)")
+            missing.append(display_label("Eigenen Bezugspreis (Cent/kWh) eingeben (Echtzeit-Umgebung)"))
     elif import_id not in import_map:
         missing.append("Bezugstarif wählen (Echtzeit-Umgebung)")
     if not export_id:
@@ -197,7 +198,7 @@ def _missing_live_tariff_items(live_settings: dict, tariffs_path: str) -> list[s
             live_settings.get(USER_EXPORT_CENT_KEY), require_positive=False
         ):
             missing.append(
-                "Eigene Einspeisevergütung (Cent/kWh) eingeben (Echtzeit-Umgebung)"
+                display_label("Eigene Einspeisevergütung (Cent/kWh) eingeben (Echtzeit-Umgebung)")
             )
     elif export_id not in export_map:
         missing.append("Einspeisetarif wählen (Echtzeit-Umgebung)")

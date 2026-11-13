@@ -218,6 +218,7 @@ def _seed_profile_widget_state(
         netznutzung = normalize_netznutzung_config(existing.get("netznutzung"))
         profile_id = str(existing.get("id") or "").strip()
         absent_mode = bool(existing.get("absent_mode", False))
+        eur_chf_rate = float(existing.get("eur_chf_rate") or 0.0)
     else:
         label = allocate_unique_label("Mein Haushalt", siblings or [])
         annual_kwh = 4500.0
@@ -231,6 +232,7 @@ def _seed_profile_widget_state(
         netznutzung = default_netznutzung_config()
         profile_id = ""
         absent_mode = False
+        eur_chf_rate = 0.0
     st.session_state[_scoped_key(session_scope, "house_profile_label")] = label
     st.session_state[_scoped_key(session_scope, "house_annual_kwh")] = annual_kwh
     st.session_state[_scoped_key(session_scope, "house_profile_land")] = land
@@ -244,6 +246,7 @@ def _seed_profile_widget_state(
         "entwurf" in netznutzung["include_status"]
     )
     st.session_state[_scoped_key(session_scope, "house_absent_mode")] = absent_mode
+    st.session_state[_scoped_key(session_scope, "house_profile_eur_chf_rate")] = eur_chf_rate
 
 def _seed_nne_session(session_scope: str, netznutzung: dict, profile_id: str) -> None:
     """Area select + own price; the profile's own user area shows as *Eigener Arbeitspreis*."""

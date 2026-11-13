@@ -82,6 +82,10 @@ Das noch ältere Feld `netznutzung_arbeitspreis_cent_kwh` stellt derselbe Wizard
 
 Der Hauskonfigurator speichert unter Standort das Feld `land` (`AT`/`DE`/`CH`). Im Szenarienkonfigurator ist der Filter **Land** Pflicht (kein „Alle“); er wird aus dem gewählten Hausprofil vorbelegt.
 
+**Währung in der Anzeige:** Das Land bestimmt auch die Einheiten in Charts, Tabellen, Formularen und SE-Rechnungen. Bei `CH` zeigt Earnie Beträge in **CHF** und Preise in **Rp/kWh**, bei `AT` und `DE` in **€** und **Cent/kWh**. Earnie rechnet dabei nichts um: Alle Preise sind Hundertstel der Landeswährung, die Werte bleiben also gleich. In der Tarif-Vorschau gilt die Währung des Tarifs (`currency`, sonst dessen `land`). Die Seite **Preisprognose** bleibt in Cent/kWh, weil sie EPEX-Börsenpreise in EUR zeigt.
+
+**Wechselkurs EUR → CHF (nur CH):** EPEX-Börsenpreise kommen immer in EUR. Für ein Schweizer Hausprofil gibt es unter Standort das Feld **Wechselkurs EUR → CHF (EPEX)** (`eur_chf_rate`, z. B. `0.9400`; `0` bzw. leer = keine Umrechnung). Earnie rechnet damit **nur die Börsenpreise** um, und nur für Tarife in CHF (`currency: "CHF"`, z. B. ein Schweizer Spot-Tarif), bevor Aufschlag, Netznutzung und MWST dazukommen. Festpreise, Netzentgelte und ein externer Preisfeed (z. B. EKZ per MQTT) sind schon in CHF und bleiben unverändert. Fehlt der Kurs bei einem CHF-Spot-Tarif, rechnet Earnie wie bisher mit den EUR-Werten und warnt einmal im Log. Bei `AT`/`DE` lehnt Earnie das Feld ab.
+
 Optional speichert er daneben die **Region (Feiertage)** als Feld `region`: Bundesland bzw. Kanton für den Feiertagskalender (AT `1` Burgenland … `9` Wien, DE z. B. `BY`, CH z. B. `ZH`). Tarife mit Zeitregeln nach Wochentag oder Feiertag (z. B. Benutzertarife aus Edibert, siehe unten) brauchen sie zum Rechnen. Ohne Region gibt es keinen Feiertagskalender. Eine unbekannte Region lehnt Earnie beim Speichern ab.
 
 ## Bezugspreis (Live)

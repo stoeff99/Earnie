@@ -38,6 +38,7 @@ from ui.chart_trace_segments import (
     _segment_connected_line_xy,
     _trace_segments,
 )
+from house_config.currency_display import active_units
 
 
 
@@ -580,8 +581,8 @@ def add_price_on_soc_axis_trace(
         text=_hourly_price_hover_labels(df, line_x, column=column),
         customdata=customdata,
         hovertemplate=(
-            f"Uhrzeit: %{{text}}<br>{hover_label}: %{{customdata:.2f}} Cent/kWh"
-            "<extra></extra>"
+            f"Uhrzeit: %{{text}}<br>{hover_label}: %{{customdata:.2f}} "
+            f"{active_units().per_kwh}<extra></extra>"
         ),
     ))
 

@@ -17,6 +17,7 @@ from optimizer.slot_duration import DEFAULT_DT_H
 from simulation.booked_consumption import BOOKED_CONSUMPTION_KEY
 from simulation.jahres_verbrauch import jahres_standby_kwh, jahres_verbrauch_kwh
 from ui.consumption_validation_charts import cons_data_monthly_kwh
+from house_config.currency_display import active_units
 
 _DASH = "—"
 _TIMING_SHIFT_NOTE = "Zeitliche Lastverschiebung (Energie ≈ Spec)"
@@ -383,6 +384,7 @@ def build_annual_cost_rows(meta: dict) -> list[dict]:
     live_ref_total = _live_reference_total_eur(meta, totals)
     live_id = _resolve_live_scenario_id(meta)
     live_ref_kwh = _live_reference_kwh(meta)
+    units = active_units()
 
     rows: list[dict] = []
     for scenario_id in _annual_cost_row_order(meta, totals):
@@ -411,8 +413,8 @@ def build_annual_cost_rows(meta: dict) -> list[dict]:
                     "Jahres Verbrauch [kWh]": kwh_cell,
                     "Speicher-Standby [kWh]": standby_cell,
                     "Gesamtverbrauch [kWh]": total_cell,
-                    "Jahres Kosten [€]": f"{total_eur:.2f} €",
-                    "Δ vs Referenz [€]": _DASH,
+                    f"Jahres Kosten [{units.major}]": units.amount(total_eur),
+                    f"Δ vs Referenz [{units.major}]": _DASH,
                     "Hinweis": hinweis,
                 }
             )
@@ -420,15 +422,15 @@ def build_annual_cost_rows(meta: dict) -> list[dict]:
 
         delta_cell = _DASH
         if live_ref_total is not None:
-            delta_cell = f"{total_eur - live_ref_total:+.2f} €"
+            delta_cell = units.amount(total_eur - live_ref_total, "+.2f")
         rows.append(
             {
                 "Szenario": label,
                 "Jahres Verbrauch [kWh]": kwh_cell,
                 "Speicher-Standby [kWh]": standby_cell,
                 "Gesamtverbrauch [kWh]": total_cell,
-                "Jahres Kosten [€]": f"{total_eur:.2f} €",
-                "Δ vs Referenz [€]": delta_cell,
+                f"Jahres Kosten [{units.major}]": units.amount(total_eur),
+                f"Δ vs Referenz [{units.major}]": delta_cell,
                 "Hinweis": hinweis,
             }
         )

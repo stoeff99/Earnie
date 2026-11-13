@@ -30,6 +30,7 @@ from runtime_store.live_display_loader import (
 from ui.chart_colors import COLOR_COST_SAVINGS, COLOR_COST_SAVINGS_NEGATIVE
 from ui.help_hint import render_page_title_with_help
 from ui.runtime_config import invalidate_live_optimization_cache
+from house_config.currency_display import active_units, display_label
 
 _DEVICES_HELP = (
     "Manuelle Geräte: je Gerät entweder **Start-Empfehlung** (Sterne im "
@@ -164,12 +165,12 @@ def _render_star_threshold_settings() -> None:
     with st.expander("Sterne-Schwellen", expanded=False):
         st.caption(
             "5 Sterne wenn kein Slot des Laufs mehr als die absolute Marge "
-            "(fiktiver ct/kWh-Preis) über dem günstigsten Horizont-Preis liegt; "
+            f"(fiktiver {active_units().per_kwh}-Preis) über dem günstigsten Horizont-Preis liegt; "
             "sonst prozentuale Mehrkosten."
         )
         with st.form(key="appliance_star_thresholds_form"):
             margin = st.number_input(
-                "Absolute Marge (Cent/kWh)",
+                display_label("Absolute Marge (Cent/kWh)"),
                 key="devices_star_abs_margin_cent",
                 min_value=0.0,
                 value=float(settings["abs_margin_cent"]),
@@ -556,8 +557,8 @@ def _render_cheapest_caption(rec: ApplianceRecommendation) -> None:
     color = _delta_cell_color(delta)
     st.markdown(
         f"Günstigste Startzeit: **{best.start_datetime:%H:%M} Uhr** · "
-        f"{best.cost_eur:.2f} € · Delta (sofort): "
-        f'<span style="{color}">{delta:+.2f} €</span>',
+        f"{active_units().amount(best.cost_eur)} · Delta (sofort): "
+        f'<span style="{color}">{active_units().amount(delta, "+.2f")}</span>',
         unsafe_allow_html=True,
     )
 
@@ -573,7 +574,7 @@ def _recommendation_dataframe(rec: ApplianceRecommendation) -> pd.DataFrame:
             {
                 "Start": f"{option.start_datetime:%H:%M}",
                 "Güte": _stars_text(option.stars),
-                "Kosten (€)": round(option.cost_eur, 2),
+                display_label("Kosten (€)"): round(option.cost_eur, 2),
                 _DELTA_COLUMN: round(
                     _delta_to_best_eur(option.cost_eur, best_cost), 2
                 ),

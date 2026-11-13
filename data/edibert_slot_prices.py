@@ -68,9 +68,40 @@ def pricing_reference(
         "timezone_name": str(timezone_name),
         "land": str(profile.get("land", "") or "").strip() or None,
         "region": str(profile.get("region", "") or "").strip() or None,
+        "eur_chf_rate": _eur_chf_rate(profile),
         "netznutzung": dict(netznutzung) if isinstance(netznutzung, dict) else None,
         "user_fixed": fixed,
     }
+
+
+def _eur_chf_rate(profile: dict) -> float | None:
+    rate = profile.get("eur_chf_rate")
+    return float(rate) if rate not in (None, "") else None
+
+
+def market_in_tariff_currency(
+    tariff_obj: Any, ref: dict[str, Any], market: dict[datetime, float]
+) -> dict[datetime, float]:
+    """EPEX (EUR) → CHF for a CHF tariff, with the house profile's fixed rate.
+
+    Only the market prices are converted; fixed prices, grid fees and an external feed are
+    already in the tariff's currency. Without a rate a CHF spot tariff keeps EUR market
+    prices as before and Earnie warns once.
+    """
+    if str(getattr(tariff_obj, "currency", "") or "").upper() != "CHF" or not market:
+        return market
+    rate = ref.get("eur_chf_rate")
+    if not rate:
+        key = (tariff_obj.id, "eur_chf_rate")
+        if key not in _LOGGED_WARNINGS:
+            _LOGGED_WARNINGS.add(key)
+            logger.warning(
+                "Edibert-Tarif %s ist in CHF, die EPEX-Preise sind in EUR und werden "
+                "ohne Umrechnung verwendet: Wechselkurs EUR → CHF im Hausprofil setzen.",
+                tariff_obj.id,
+            )
+        return market
+    return {slot: value * float(rate) for slot, value in market.items()}
 
 
 def require_pricing_reference(source: dict | None, *, where: str) -> dict[str, Any]:
@@ -198,6 +229,7 @@ def price_points(
         fee = None  # the external series already contains grid use and levies
     else:
         _fill_partial_hours(tariff_obj, ctx, utc_slots, market, market_for)
+        market = market_in_tariff_currency(tariff_obj, ref, market)
     points: list[Any] = []
     for start, end in _runs(utc_slots):
         series = eb.price_series(
@@ -294,6 +326,8 @@ def single_slot_cent(
         epex = {} if market_cent is None else {slot_utc: market_cent}
         market_cent = _external_market(tariff_obj, [slot_utc], epex, None)[slot_utc]
         fee = None
+    elif market_cent is not None:
+        market_cent = market_in_tariff_currency(tariff_obj, ref, {slot_utc: market_cent})[slot_utc]
     result = eb.evaluate_slot(
         tariff_obj,
         slot_utc,

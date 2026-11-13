@@ -18,6 +18,7 @@ from ui.tariff_filter_helpers import (
     render_shared_land_filter,
     render_tariff_type_filter,
 )
+from house_config.currency_display import active_units, display_label
 
 _TARIFFS_PAGE_URL = "tariffs"
 
@@ -91,14 +92,14 @@ def _render_next_month_rate_entry(
         f"{side_label}tarif „{tariff_label}“ hat keinen Eintrag für "
         f"{year}-{month:02d} (nächster Monat). Bis zur Aktualisierung "
         "wird temporär der Vorjahres- bzw. Vormonatswert verwendet. "
-        "Bitte den aktuellen Cent/kWh-Wert eintragen:"
+        f"Bitte den aktuellen {active_units().per_kwh}-Wert eintragen:"
     )
     cent_key = scoped_widget_key(session_scope, f"next_month_cent_{side}")
     cols = st.columns([1, 1, 2, 1])
     cols[0].markdown(f"**Jahr**  \n{year}")
     cols[1].markdown(f"**Monat**  \n{month}")
     cent = cols[2].number_input(
-        "Cent/kWh",
+        active_units().per_kwh,
         min_value=0.01,
         step=0.01,
         format="%.3f",
@@ -214,7 +215,7 @@ def _render_user_fixed_import_cent(
             float(saved) if saved is not None else 20.0
         )
     container.number_input(
-        "Bezugspreis (Cent/kWh)",
+        display_label("Bezugspreis (Cent/kWh)"),
         min_value=0.01,
         step=0.1,
         format="%.2f",
@@ -244,7 +245,7 @@ def _render_user_fixed_export_cent(
             float(saved) if saved is not None else 0.0
         )
     container.number_input(
-        "Einspeisevergütung (Cent/kWh)",
+        display_label("Einspeisevergütung (Cent/kWh)"),
         min_value=0.0,
         step=0.1,
         format="%.2f",
