@@ -19,6 +19,7 @@ from ui.form_layout import (
     labeled_number_input,
     labeled_selectbox,
 )
+from house_config.currency_display import active_units, display_label
 from ui.house_config_profile_thermal_annual import (  # noqa: F401  (re-exported)
     _live_consumer_for_annual,
     _profile_geo_from_session,
@@ -186,7 +187,7 @@ def _render_nne_area_fields(
     if area_choice == OWN_AREA:
         base_manual = float(
             labeled_number_input(
-                "Netznutzung Arbeitspreis (Cent/kWh)",
+                display_label("Netznutzung Arbeitspreis (Cent/kWh)"),
                 min_value=0.0,
                 step=0.001,
                 help=(
@@ -221,7 +222,7 @@ def _show_nne_spec_caption(config: dict, catalog: dict) -> None:
         for item in fee.skipped
     )
     st.caption(
-        f"Basis-Arbeitspreis: **{fee.base_cent_kwh:.2f} Cent/kWh** netto · "
+        f"Basis-Arbeitspreis: **{fee.base_cent_kwh:.2f} {active_units().per_kwh}** netto · "
         f"aktive Zeitregeln: **{active}**"
         + (f" · übersprungen: {skipped}" if skipped else "")
     )
@@ -257,6 +258,25 @@ def _render_nne_arbeitspreis(*, session_scope: str) -> dict:
     return config
 
 
+def _render_eur_chf_rate(*, session_scope: str, land: str) -> float | None:
+    """Fixed EUR→CHF rate for EPEX prices; only Swiss houses, 0 = none."""
+    if land != "CH":
+        return None
+    rate = labeled_number_input(
+        "Wechselkurs EUR → CHF (EPEX)",
+        min_value=0.0,
+        step=0.0001,
+        format="%.4f",
+        help=(
+            "Fester Kurs, mit dem Earnie die EPEX-Börsenpreise (in EUR) für "
+            "CHF-Tarife umrechnet, z. B. 0.9400. Gilt nur für Börsenpreise, nicht "
+            "für Festpreise oder einen externen Preisfeed. 0 = keine Umrechnung."
+        ),
+        key=_scoped_key(session_scope, "house_profile_eur_chf_rate"),
+    )
+    return float(rate) if rate and float(rate) > 0 else None
+
+
 def _render_location_fields(*, session_scope: str) -> dict:
     st.subheader("Standort")
     land_key = _seed_land_widget_key(session_scope)
@@ -268,6 +288,7 @@ def _render_location_fields(*, session_scope: str) -> dict:
     timezone_name = timezone_for_land(land)
     st.caption(f"Zeitzone (aus Land): **{timezone_name}**")
     region = _render_region_select(session_scope=session_scope, land=land)
+    eur_chf_rate = _render_eur_chf_rate(session_scope=session_scope, land=land)
     default_pv_tilt, default_pv_azimuth = _render_pv_default_row(
         session_scope=session_scope
     )
@@ -275,6 +296,7 @@ def _render_location_fields(*, session_scope: str) -> dict:
     return {
         "land": land,
         "region": region,
+        "eur_chf_rate": eur_chf_rate,
         "latitude": latitude,
         "longitude": longitude,
         "timezone_name": timezone_name,

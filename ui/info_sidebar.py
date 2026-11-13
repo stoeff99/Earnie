@@ -21,6 +21,7 @@ from ui.truth_banner import (
     render_truth_banner,
 )
 from version import __version__
+from house_config.currency_display import active_units
 
 logger = logging.getLogger(__name__)
 
@@ -204,5 +205,5 @@ def render_missing_next_month_tariff_sidebar() -> None:
         f"**Monatstarif fehlt für {year}-{month:02d}** (nächster Monat):\n\n"
         f"{lines}\n\n"
         "Temporär Vorjahres-/Vormonatswert. "
-        "Bitte im **Szenarienkonfigurator** den Cent/kWh-Wert ergänzen."
+        f"Bitte im **Szenarienkonfigurator** den {active_units().per_kwh}-Wert ergänzen."
     )

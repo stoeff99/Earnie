@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import plotly.graph_objects as go
+from house_config.currency_display import active_units
 
 
 def scenario_monthly_cost_chart(
@@ -25,9 +26,9 @@ def scenario_monthly_cost_chart(
         fig.add_bar(name=label, x=months, y=values)
     fig.update_layout(
         barmode="group",
-        title="Monatliche Stromkosten je Szenario (€)",
+        title=f"Monatliche Stromkosten je Szenario ({active_units().major})",
         xaxis_title="Monat",
-        yaxis_title="€",
+        yaxis_title=active_units().major,
         height=420,
         margin=dict(l=40, r=20, t=50, b=90),
         legend=dict(

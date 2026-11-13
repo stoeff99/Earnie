@@ -843,9 +843,14 @@ def _main_cycle(
                 current_soc_by_id=current_soc_by_id or None,
             )
             savings_snapshot = optimizer.build_savings_snapshot(savings_info)
+            from house_config.currency_display import active_units, display_label
+
             logger.info(
-                "Prognostizierte Ersparnis (%d h): %.3f € vs BL Ziel "
-                "(%.3f € optimiert / %.3f € BL Ziel)",
+                display_label(
+                    "Prognostizierte Ersparnis (%d h): %.3f € vs BL Ziel "
+                    "(%.3f € optimiert / %.3f € BL Ziel)",
+                    active_units(),
+                ),
                 len(optimization_matrix),
                 savings_snapshot["savings_matched_euro"],
                 savings_snapshot["optimized_cost_euro"],

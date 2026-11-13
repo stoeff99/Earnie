@@ -1,6 +1,7 @@
 """Gemeinsame Darstellung von Simulationsergebnissen (Live + Historisch)."""
 from __future__ import annotations
 
+
 import logging
 from dataclasses import dataclass
 
@@ -37,6 +38,7 @@ from ui.charts import (
 )
 from ui.simulation_table_view import render_frozen_simulation_table
 from ui.history_navigation import render_s2_nav_buttons, s2_zone_help_text
+from house_config.currency_display import active_units, display_label
 
 logger = logging.getLogger("app")
 
@@ -368,6 +370,8 @@ def _render_simulation_table(
         display_df = display_df.drop(columns=["slot_datetime"])
     display_df = _format_simulation_table_numbers(display_df)
     display_df = display_df[_simulation_table_column_order(list(display_df.columns))]
+    units = active_units()
+    display_df = display_df.rename(columns=lambda col: display_label(str(col), units))
 
     if slot_qualities is not None:
         styler = _style_simulation_table(display_df, slot_qualities)

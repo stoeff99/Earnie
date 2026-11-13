@@ -12,6 +12,7 @@ from simulation.se_invoice_format import (
     _fmt_eur,
     _fmt_kwh,
 )
+from house_config.currency_display import display_label
 
 
 @dataclass(frozen=True)
@@ -133,8 +134,8 @@ def _netznutzung_section_lines(
         "",
         "| Position | Wert |",
         "| --- | ---: |",
-        f"| Arbeitspreis netto (Basis) | {_fmt_cent(ap_net_cent)} Cent/kWh |",
-        f"| Arbeitspreis in k_act (Basis) | {_fmt_cent(ap_gross_cent)} Cent/kWh |",
+        display_label(f"| Arbeitspreis netto (Basis) | {_fmt_cent(ap_net_cent)} Cent/kWh |"),
+        display_label(f"| Arbeitspreis in k_act (Basis) | {_fmt_cent(ap_gross_cent)} Cent/kWh |"),
         f"| Netzbezug | {_fmt_kwh(import_kwh_year)} |",
         f"| Arbeitspreis (Jahr) | {_fmt_eur(netznutzung_ap_eur)} |",
         f"| Grundpreis (Katalog-Stub) | {_fmt_eur(fees.grid_monthly_eur * month_count)} |",
@@ -143,7 +144,7 @@ def _netznutzung_section_lines(
     if len(components) > 1 or any(c.label != "Basis" for c in components):
         lines.extend(
             [
-                "| Arbeitspreis nach Zeitfenster | Netzbezug | Cent/kWh netto | Betrag |",
+                display_label("| Arbeitspreis nach Zeitfenster | Netzbezug | Cent/kWh netto | Betrag |"),
                 "| --- | ---: | ---: | ---: |",
             ]
         )

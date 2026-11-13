@@ -33,6 +33,7 @@ from ui.planning_battery_inverter import (
     render_inverter_select,
 )
 from ui.planning_battery_state import _scoped_key
+from house_config.currency_display import display_label
 
 
 
@@ -391,7 +392,7 @@ def _render_battery_wear_fields(session_scope: str) -> dict:
     if not wear_enabled:
         return {"enabled": False}
     wear_replacement_cost = labeled_number_input(
-        "Ersatzkosten (€)",
+        display_label("Ersatzkosten (€)"),
         min_value=0.01,
         step=50.0,
         key=_scoped_key(session_scope, "planning_battery_wear_replacement_cost"),

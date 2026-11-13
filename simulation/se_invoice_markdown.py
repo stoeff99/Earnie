@@ -21,6 +21,7 @@ from simulation.se_invoice_format import (  # noqa: F401  (re-exported)
     _series_or_nan,
     _series_or_zero,
 )
+from house_config.currency_display import display_label
 from simulation.se_invoice_netznutzung import (  # noqa: F401  (re-exported)
     _NetznutzungComponent,
     InvoiceGridFee,
@@ -97,7 +98,9 @@ def _energy_table_lines(
     lines = [
         f"## {title}",
         "",
-        f"| Monat | {energy_label} | {eur_label} | Ø Tarif Cent/kWh | Ø Ist Cent/kWh |",
+        display_label(
+            f"| Monat | {energy_label} | {eur_label} | Ø Tarif Cent/kWh | Ø Ist Cent/kWh |"
+        ),
         "| --- | ---: | ---: | ---: | ---: |",
     ]
     for month_key in months:
@@ -246,11 +249,15 @@ def _hinweise_lines(*, has_netznutzung_ap: bool) -> list[str]:
         "Bezug/Einspeisung (optimierte Szenarien und ihre Referenzen), wird aber "
         "nicht als Hausverbrauch gezählt.",
         "- Verbrauch und Standby gehen **nicht** direkt in die Rechnungssumme ein.",
-        "- Ø Tarif Cent/kWh: arithmetisches Mittel der stündlichen Tarifpreise "
-        "über alle Stunden des Monats (`Summe(k_act)/N` bzw. `k_push_act`); "
-        "enthält ggf. den Netznutzung-Arbeitspreis.",
-        "- Ø Ist Cent/kWh: `Energiekosten € / Netzenergie kWh × 100` "
-        "(nur Stunden mit Bezug bzw. Einspeisung wirken über die Summen).",
+        display_label(
+            "- Ø Tarif Cent/kWh: arithmetisches Mittel der stündlichen Tarifpreise "
+            "über alle Stunden des Monats (`Summe(k_act)/N` bzw. `k_push_act`); "
+            "enthält ggf. den Netznutzung-Arbeitspreis."
+        ),
+        display_label(
+            "- Ø Ist Cent/kWh: `Energiekosten € / Netzenergie kWh × 100` "
+            "(nur Stunden mit Bezug bzw. Einspeisung wirken über die Summen)."
+        ),
         "- Fixkosten: Lieferant-Grundpreis je `supplier_id` einmal; "
         "Netzentgelt-/Messstellen-/Sonstige Fixkosten einmal je Hausanschluss "
         "(aus Bezugstarif, sonst Einspeisetarif) — Katalog-Stubs.",
@@ -389,7 +396,7 @@ def _invoice_month_table_lines(ctx: _InvoiceYearContext) -> list[str]:
         _energy_table_lines(
             title="Bezug",
             energy_label="Bezug kWh",
-            eur_label="Bezug €",
+            eur_label=display_label("Bezug €"),
             months=ctx.months,
             energy=ctx.import_kwh,
             cost_eur=ctx.import_cost,
@@ -400,7 +407,7 @@ def _invoice_month_table_lines(ctx: _InvoiceYearContext) -> list[str]:
         _energy_table_lines(
             title="Einspeisung",
             energy_label="Einspeisung kWh",
-            eur_label="Einspeisung €",
+            eur_label=display_label("Einspeisung €"),
             months=ctx.months,
             energy=ctx.export_kwh,
             cost_eur=ctx.export_earn,

@@ -136,6 +136,21 @@ def _normalize_region(raw: dict, land: str) -> str:
     return region
 
 
+def _normalize_eur_chf_rate(raw: dict, land: str, profile_id: str) -> float | None:
+    """Fixed EUR→CHF rate for EPEX prices (Swiss houses only); empty = none."""
+    value = raw.get("eur_chf_rate")
+    if value in (None, ""):
+        return None
+    rate = float(value)
+    if rate <= 0.0:
+        raise ValueError(f"profiles '{profile_id}': eur_chf_rate muss > 0 sein, nicht {value!r}.")
+    if land != "CH":
+        raise ValueError(
+            f"profiles '{profile_id}': eur_chf_rate gilt nur für Land CH (Land ist {land})."
+        )
+    return rate
+
+
 def _profile_geo_and_csv_fields(raw: dict) -> dict:
     annual_kwh = float(raw.get("annual_kwh", 0.0) or 0.0)
     total_profile_csv = str(raw.get("total_profile_csv", "") or "").strip()
@@ -161,8 +176,10 @@ def _profile_geo_and_csv_fields(raw: dict) -> dict:
         raw.get("netznutzung"), label=f"profiles '{profile_id}': netznutzung"
     )
     region = _normalize_region(raw, land)
+    eur_chf_rate = _normalize_eur_chf_rate(raw, land, profile_id)
     return {
         "region": region,
+        "eur_chf_rate": eur_chf_rate,
         "annual_kwh": annual_kwh,
         "total_profile_csv": total_profile_csv,
         "pv_profile_csv": pv_profile_csv,
@@ -201,6 +218,7 @@ def _normalize_profile(raw: dict, index: int) -> dict:
         )
     fields = _profile_geo_and_csv_fields(raw)
     region = fields.pop("region")
+    eur_chf_rate = fields.pop("eur_chf_rate")
     consumers = _normalize_profile_consumers(
         consumers_raw,
         profile_id=profile_id,
@@ -236,6 +254,8 @@ def _normalize_profile(raw: dict, index: int) -> dict:
     # Only when set, so profiles without a region keep their exact normalized shape.
     if region:
         spec["region"] = region
+    if eur_chf_rate is not None:
+        spec["eur_chf_rate"] = eur_chf_rate
     return spec
 
 
@@ -427,6 +447,8 @@ def _serialize_profile(profile: dict) -> dict:
     out["land"] = land if land in {"AT", "DE", "CH"} else "AT"
     if profile.get("region"):
         out["region"] = profile["region"]
+    if profile.get("eur_chf_rate") is not None:
+        out["eur_chf_rate"] = float(profile["eur_chf_rate"])
     if profile.get("latitude") is not None:
         out["latitude"] = profile["latitude"]
     if profile.get("longitude") is not None:

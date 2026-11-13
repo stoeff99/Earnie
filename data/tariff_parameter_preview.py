@@ -3,6 +3,13 @@ from __future__ import annotations
 
 from typing import Literal
 
+from house_config.currency_display import (
+    CurrencyUnits,
+    active_units,
+    units_for_code,
+    units_for_land,
+)
+
 # Wording follows the Edibert editor (price kind, then direction).
 _PRICE_KIND_LABELS = {
     "fixed_cent": "Festpreis",
@@ -30,6 +37,15 @@ EXPORT_TYPE_LABELS = _build_type_labels(
 def type_caption(tariff: dict, labels: dict[str, str]) -> str:
     tariff_type = str(tariff.get("type", "")).strip().lower()
     return labels.get(tariff_type, tariff_type or "unbekannt")
+
+
+def _units(tariff: dict) -> CurrencyUnits:
+    """Tariff currency, else tariff country, else the house profile country."""
+    if tariff.get("currency"):
+        return units_for_code(tariff["currency"])
+    if tariff.get("land"):
+        return units_for_land(tariff["land"])
+    return active_units()
 
 
 def _fmt_number(value: float | int, *, suffix: str = "") -> str:
@@ -79,7 +95,7 @@ def _append_monthly_rates_summary(
     rows.append(("Monatsraten", str(len(cents))))
     rows.append(
         (
-            "Monatsraten Min–Max (Cent/kWh)",
+            f"Monatsraten Min–Max ({_units(tariff).per_kwh})",
             f"{min(cents):.3f} – {max(cents):.3f}",
         )
     )
@@ -97,28 +113,28 @@ def _append_common_meta(rows: list[tuple[str, str]], tariff: dict) -> None:
         tariff,
         "monthly_fee_eur",
         "Lieferant-Grundpreis (ca.)",
-        suffix=" €/Monat",
+        suffix=f" {_units(tariff).major}/Monat",
     )
     _append_if_present(
         rows,
         tariff,
         "grid_monthly_fee_eur",
         "Netzentgelt-Grundpreis (ca.)",
-        suffix=" €/Monat",
+        suffix=f" {_units(tariff).major}/Monat",
     )
     _append_if_present(
         rows,
         tariff,
         "metering_monthly_fee_eur",
         "Messstellengebühr (ca.)",
-        suffix=" €/Monat",
+        suffix=f" {_units(tariff).major}/Monat",
     )
     _append_if_present(
         rows,
         tariff,
         "other_monthly_fee_eur",
         "Sonstige Fixkosten (ca.)",
-        suffix=" €/Monat",
+        suffix=f" {_units(tariff).major}/Monat",
     )
     supplier_id = tariff.get("supplier_id")
     if supplier_id:
@@ -130,7 +146,7 @@ def _append_common_meta(rows: list[tuple[str, str]], tariff: dict) -> None:
 
 def _append_fee_vat_fields(rows: list[tuple[str, str]], tariff: dict) -> None:
     _append_if_present(
-        rows, tariff, "settlement_fee_cent_kwh", "Abwicklungsgebühr", suffix=" Cent/kWh"
+        rows, tariff, "settlement_fee_cent_kwh", "Abwicklungsgebühr", suffix=f" {_units(tariff).per_kwh}"
     )
     _append_if_present(rows, tariff, "markup_percent", "Aufschlag", suffix=" %")
     _append_bool_if_present(rows, tariff, "prices_include_vat", "Preise inkl. USt")
@@ -142,7 +158,7 @@ def _append_type_specific_rows(
 ) -> None:
     if tariff_type == "fixed_cent":
         _append_if_present(
-            rows, tariff, "price_cent_kwh", "Arbeitspreis", suffix=" Cent/kWh"
+            rows, tariff, "price_cent_kwh", "Arbeitspreis", suffix=f" {_units(tariff).per_kwh}"
         )
     elif tariff_type == "spot_hourly":
         _append_fee_vat_fields(rows, tariff)
@@ -150,14 +166,14 @@ def _append_type_specific_rows(
             rows, tariff, "feed_in_fee_factor", "Einspeise-Gebührenfaktor"
         )
         _append_if_present(
-            rows, tariff, "feed_in_fix_cent", "Einspeise-Fix", suffix=" Cent/kWh"
+            rows, tariff, "feed_in_fix_cent", "Einspeise-Fix", suffix=f" {_units(tariff).per_kwh}"
         )
     elif tariff_type == "monthly_table":
         _append_fee_vat_fields(rows, tariff)
         _append_monthly_rates_summary(rows, tariff)
     elif tariff_type == "fixed":
         _append_if_present(
-            rows, tariff, "k_push_cent", "Einspeisevergütung", suffix=" Cent/kWh"
+            rows, tariff, "k_push_cent", "Einspeisevergütung", suffix=f" {_units(tariff).per_kwh}"
         )
         _append_fee_vat_fields(rows, tariff)
     else:
