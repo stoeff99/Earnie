@@ -187,3 +187,15 @@ def test_chart_band_series_from_planned_rows():
     boost, lock = heat_control_band_series(df, consumer, start=1)
     assert boost == [1, 0, 0, 1]
     assert lock == [0, 1, 0, 0]
+
+
+def test_write_test_offers_boost_as_eco_comfort_select():
+    from integrations.ehal_write_test_bounds import WriteTestClampError, clamp_probe_value
+    from ui.ehal_write_test import BINARY_SELECT_LABELS
+
+    assert BINARY_SELECT_LABELS["set_heat_boost"] == {0: "0 Eco", 1: "1 Komfort"}
+    field = "heatpump.waermepumpe.set_heat_boost"
+    assert clamp_probe_value(field, 1, max_power_kw=6.0) == 1
+    assert clamp_probe_value(field, 0, max_power_kw=6.0) == 0
+    with pytest.raises(WriteTestClampError):
+        clamp_probe_value(field, 2, max_power_kw=6.0)

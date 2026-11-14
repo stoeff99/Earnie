@@ -26,8 +26,16 @@ from integrations.ehal_write_test import (
 )
 from integrations.ehal_write_test_bounds import (
     FLEX_SET_ENABLE_KIND,
+    HEAT_BOOST_KIND,
     SOURCE_SELECT_FIELD,
 )
+
+# 0/1 write fields: selectbox labels per kind (each also clamped in ehal_write_test_bounds).
+BINARY_SELECT_LABELS: dict[str, dict[int, str]] = {
+    SOURCE_SELECT_FIELD: {0: "0 Netz", 1: "1 Batterie"},
+    FLEX_SET_ENABLE_KIND: {0: "0 Aus", 1: "1 Ein"},
+    HEAT_BOOST_KIND: {0: "0 Eco", 1: "1 Komfort"},
+}
 
 _SESSION_PENDING = "ehal_write_test_pending"
 _SESSION_RESULT = "ehal_write_test_result"
@@ -272,12 +280,8 @@ def _render_row_value(
             disabled=disabled,
             label_visibility="collapsed",
         )
-    if kind in (SOURCE_SELECT_FIELD, FLEX_SET_ENABLE_KIND):
-        labels = (
-            {0: "0 Netz", 1: "1 Batterie"}
-            if kind == SOURCE_SELECT_FIELD
-            else {0: "0 Aus", 1: "1 Ein"}
-        )
+    if kind in BINARY_SELECT_LABELS:
+        labels = BINARY_SELECT_LABELS[kind]
         return container.selectbox(
             "Wert",
             options=[0, 1],
