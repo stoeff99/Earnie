@@ -136,6 +136,34 @@ def raw_pv_kw_by_inverter(
     return out
 
 
+def measured_ac_to_model_pv_by_system(
+    ac_by_system: dict[str, float],
+    *,
+    inverters: list[dict],
+    pv_systems: list[dict],
+) -> dict[str, float]:
+    """Measured PV (already AC) → the DC-side value the inverter model expects.
+
+    ``house_balance_pv_kw`` applies η_inv to PV per system (forecasts are DC-side). A
+    measured value is the inverter's AC output, so it is divided by η_inv once; the
+    model then reproduces the measured AC power. Without inverters it is unchanged.
+    """
+    inv_map = inverters_by_id(inverters)
+    if not inv_map:
+        return dict(ac_by_system)
+    pv_to_inv = _pv_id_to_inverter(pv_systems, inv_map)
+    out: dict[str, float] = {}
+    for pv_id, power in ac_by_system.items():
+        key = str(pv_id).strip()
+        if key not in pv_to_inv:
+            raise ValueError(f"Live-PV: unbekannte PV-id '{key}'.")
+        inv = inv_map[pv_to_inv[key]]
+        inv_type = str(inv.get("type") or INVERTER_TYPE_HYBRID).strip().lower()
+        ac = max(0.0, float(power or 0.0))
+        out[key] = ac if inv_type == INVERTER_TYPE_BATTERY else ac / inverter_efficiency(inv)
+    return out
+
+
 def house_balance_pv_kw(
     matrix_row: dict[str, Any],
     *,

@@ -153,7 +153,14 @@ def apply_live_snapshot_to_matrix(
     if isinstance(by_system, dict) and by_system:
         # The MILP power balance reads PV per system (inverter model): it must carry
         # the measured total too, not the forecast.
-        row["expected_p_pv_by_system"] = live_pv_by_system(by_system, float(snapshot["pv_kw"]))
+        from optimizer.milp_defaults import _default_inverter_params, _default_pv_systems
+        from optimizer.milp_inverter import measured_ac_to_model_pv_by_system
+
+        row["expected_p_pv_by_system"] = measured_ac_to_model_pv_by_system(
+            live_pv_by_system(by_system, float(snapshot["pv_kw"])),
+            inverters=_default_inverter_params(),
+            pv_systems=_default_pv_systems(),
+        )
     row["consumption_mode"] = "live_snapshot"
     return updated
 

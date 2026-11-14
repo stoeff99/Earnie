@@ -35,6 +35,14 @@ _INVERTERS = [
 _PV = [{"id": "dach_sued", "kwp": 12.76, "inverter_id": "haupt_wechselrichter"}]
 
 
+@pytest.fixture(autouse=True)
+def _plant(monkeypatch):
+    from optimizer import milp_defaults
+
+    monkeypatch.setattr(milp_defaults, "_default_inverter_params", lambda: list(_INVERTERS))
+    monkeypatch.setattr(milp_defaults, "_default_pv_systems", lambda: list(_PV))
+
+
 def _matrix(forecast_kw: float) -> list[dict]:
     return [
         {
@@ -54,10 +62,10 @@ def _snapshot(pv_kw: float) -> dict:
 def test_power_balance_uses_measured_pv_in_slot_zero(forecast_kw, live_kw):
     row = apply_live_snapshot_to_matrix(_matrix(forecast_kw), _snapshot(live_kw))[0]
     assert row["expected_p_pv"] == live_kw
-    assert row["expected_p_pv_by_system"] == {"dach_sued": live_kw}
-    # The inverter model applies its efficiency (0.97) to PV per system.
+    # Measured PV is AC: stored DC-side (÷ η 0.97) so the model reproduces it exactly.
+    assert row["expected_p_pv_by_system"]["dach_sued"] == pytest.approx(live_kw / 0.97)
     assert house_balance_pv_kw(row, inverters=_INVERTERS, pv_systems=_PV) == pytest.approx(
-        live_kw * 0.97
+        live_kw
     )
 
 
@@ -66,6 +74,14 @@ def test_forecast_rows_stay_untouched():
     updated = apply_live_snapshot_to_matrix(matrix, _snapshot(8.14))
     assert updated[1]["expected_p_pv_by_system"] == {"dach_sued": 6.0}
     assert matrix[0]["expected_p_pv_by_system"] == {"dach_sued": 3.48}  # input not mutated
+
+
+def test_measured_ac_conversion_without_inverters_and_unknown_system():
+    from optimizer.milp_inverter import measured_ac_to_model_pv_by_system
+
+    assert measured_ac_to_model_pv_by_system({"x": 2.0}, inverters=[], pv_systems=[]) == {"x": 2.0}
+    with pytest.raises(ValueError, match="unbekannte PV-id"):
+        measured_ac_to_model_pv_by_system({"x": 2.0}, inverters=_INVERTERS, pv_systems=_PV)
 
 
 def test_several_systems_split_by_forecast_share():
