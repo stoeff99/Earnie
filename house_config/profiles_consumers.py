@@ -42,6 +42,10 @@ _THERMAL_ANNUAL_PASSTHROUGH_KEYS = (
     "max_pulses_per_day",
     "heat_lock_margin_cent",
     "heat_lock_max_quarterhours",
+    "heat_boost_pv_percent",
+    "heat_boost_mixed_pv_percent",
+    "heat_boost_mixed_margin_cent",
+    "heat_boost_grid_margin_cent",
     "optimizer_flex",
     "thermal_flex_window",
 )

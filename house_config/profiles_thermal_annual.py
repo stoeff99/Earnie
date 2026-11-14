@@ -124,6 +124,14 @@ def normalize_thermal_annual_consumer(
         spec["heat_lock_margin_cent"] = max(0.0, float(raw["heat_lock_margin_cent"]))
     if raw.get("heat_lock_max_quarterhours") is not None:
         spec["heat_lock_max_quarterhours"] = max(0, int(raw["heat_lock_max_quarterhours"]))
+    for key in (
+        "heat_boost_pv_percent",
+        "heat_boost_mixed_pv_percent",
+        "heat_boost_mixed_margin_cent",
+        "heat_boost_grid_margin_cent",
+    ):
+        if raw.get(key) is not None:
+            spec[key] = max(0.0, float(raw[key]))
     if "max_pulses_per_day" in raw:
         spec["max_pulses_per_day"] = max(1, int(raw.get("max_pulses_per_day", 4) or 4))
     if int(spec.get("min_off_quarterhours") or 0) > 1 and int(
