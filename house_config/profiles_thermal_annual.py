@@ -110,7 +110,29 @@ HEAT_CONTROL_KEYS: tuple[str, ...] = (
     "heat_boost_mixed_pv_percent",
     "heat_boost_mixed_margin_cent",
     "heat_boost_grid_margin_cent",
+    "heat_preheat_enabled",
 )
+_BOOST_KEYS = HEAT_CONTROL_KEYS[2:6]
+
+
+def preheat_storage_kwh(consumer: dict) -> float:
+    """Electric kWh the building can take in advance (pre-heating across midnight).
+
+    Heat capacity (Wohnfläche × Bauweise) × comfort band (``house_tolerance_c``) as
+    heat, divided by the heat pump's JAZ. 0 unless ``heat_preheat_enabled``.
+    """
+    from data.heating_need import heat_pump_jaz
+    from optimizer.thermal_house import DEFAULT_HOUSE_TOLERANCE_C, house_capacity_kwh_per_k
+
+    if not bool(consumer.get("heat_preheat_enabled", False)):
+        return 0.0
+    thermal = consumer.get("thermal") if isinstance(consumer.get("thermal"), dict) else consumer
+    capacity = house_capacity_kwh_per_k(
+        float(thermal.get("living_area_m2") or 0.0), thermal.get("building_mass")
+    )
+    tolerance = float(thermal.get("house_tolerance_c") or DEFAULT_HOUSE_TOLERANCE_C)
+    jaz = heat_pump_jaz(str(thermal.get("heat_pump_type") or "luft"))
+    return round(capacity * tolerance / jaz, 3)
 
 
 def normalize_thermal_annual_consumer(
@@ -135,9 +157,11 @@ def normalize_thermal_annual_consumer(
         spec["heat_lock_margin_cent"] = max(0.0, float(raw["heat_lock_margin_cent"]))
     if raw.get("heat_lock_max_quarterhours") is not None:
         spec["heat_lock_max_quarterhours"] = max(0, int(raw["heat_lock_max_quarterhours"]))
-    for key in HEAT_CONTROL_KEYS[2:]:
+    for key in _BOOST_KEYS:
         if raw.get(key) is not None:
             spec[key] = max(0.0, float(raw[key]))
+    if "heat_preheat_enabled" in raw:
+        spec["heat_preheat_enabled"] = bool(raw["heat_preheat_enabled"])
     if "max_pulses_per_day" in raw:
         spec["max_pulses_per_day"] = max(1, int(raw.get("max_pulses_per_day", 4) or 4))
     if int(spec.get("min_off_quarterhours") or 0) > 1 and int(

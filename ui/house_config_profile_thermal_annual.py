@@ -189,6 +189,30 @@ def _render_thermal_annual_building_fields(
         "DIN V 18599-2: wirksame Wärmekapazität C = Wert × Wohnfläche "
         "(für Aufheizen/Auskühlen in Übergangszeiten)."
     )
+    item["heat_preheat_enabled"] = labeled_checkbox(
+        "Gebäude als Wärmespeicher (Vorheizen über Mitternacht)",
+        value=bool(consumer.get("heat_preheat_enabled", False)),
+        help="Earnie darf Wärme für den nächsten Tag schon heute liefern, z. B. mit "
+        "PV-Überschuss am Mittag, höchstens so viel, wie die Gebäudemasse im "
+        "Heizband speichern kann.",
+        key=_scoped_key(session_scope, f"hc_ta_preheat_{index}"),
+    )
+    if item["heat_preheat_enabled"]:
+        from house_config.profiles_thermal_annual import preheat_storage_kwh
+
+        storage_kwh = preheat_storage_kwh(
+            {
+                "heat_preheat_enabled": True,
+                "living_area_m2": item["living_area_m2"],
+                "building_mass": item["building_mass"],
+                "house_tolerance_c": thermal.get("house_tolerance_c"),
+                "heat_pump_type": thermal.get("heat_pump_type"),
+            }
+        )
+        st.caption(
+            f"Speicherbar: ca. **{storage_kwh:.1f} kWh Strom** "
+            "(Wärmekapazität × Heizband-Toleranz ÷ JAZ der Wärmepumpe)."
+        )
     use_exact_hwb = labeled_checkbox(
         "Genaue HWB-Angabe",
         value=bool(float(thermal.get("hwb_kwh_m2", 0.0) or 0.0) > 0),
