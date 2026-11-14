@@ -8,10 +8,7 @@ from house_config.thermal_labels import (
 )
 from house_config.currency_display import display_label
 from optimizer.heat_control import (
-    DEFAULT_BOOST_GRID_MARGIN_CENT,
-    DEFAULT_BOOST_MIXED_MARGIN_CENT,
-    DEFAULT_BOOST_MIXED_PV_PERCENT,
-    DEFAULT_BOOST_PV_PERCENT,
+    BOOST_FIELDS,
     DEFAULT_LOCK_MARGIN_CENT,
     DEFAULT_MAX_LOCK_QUARTERHOURS,
 )
@@ -47,6 +44,84 @@ def _render_building_mass_select(
         }.get(key, key),
         key=_scoped_key(session_scope, f"hc_building_mass_{index}"),
     )
+
+
+# (key, label, step, is_int, help) — heat pump boost / lock (optimizer.heat_control).
+_HEAT_CONTROL_INPUTS: tuple[tuple[str, str, float, bool, str], ...] = (
+    (
+        "heat_lock_margin_cent",
+        "Sperre ab Preisabstand (Cent/kWh)",
+        0.5,
+        False,
+        "Nur mit Pflichtpause ≥ 2: Earnie sperrt die Wärmepumpe (set_enable = 0) in Slots "
+        "ohne geplantes Heizen und ohne Boost, deren Bezugspreis mindestens so viel über "
+        "dem günstigsten geplanten Heiz-Slot liegt.",
+    ),
+    (
+        "heat_lock_max_quarterhours",
+        "Maximale Sperrdauer (Viertelstunden)",
+        1.0,
+        True,
+        "Längste Sperre am Stück (z. B. 8 = 2 h); danach gibt Earnie die Wärmepumpe "
+        "mindestens 1 h frei. 0 = nie sperren (nur Boost).",
+    ),
+    (
+        "heat_boost_pv_percent",
+        "Boost ab PV-Überschuss (% der Nennleistung)",
+        10.0,
+        False,
+        "Komfort-Boost bei jedem Preis, wenn der PV-Überschuss (PV minus Hauslast ohne "
+        "Flex) mindestens so viel Prozent der Nennleistung der Wärmepumpe deckt (z. B. 150).",
+    ),
+    (
+        "heat_boost_mixed_pv_percent",
+        "Boost ab teilweisem PV-Überschuss (% der Nennleistung)",
+        10.0,
+        False,
+        "Zusammen mit dem nächsten Feld: Boost, wenn der PV-Überschuss so viel Prozent "
+        "deckt und der Bezugspreis höchstens den Abstand über dem günstigsten Preis im "
+        "Horizont liegt (z. B. 50).",
+    ),
+    (
+        "heat_boost_mixed_margin_cent",
+        "… und Preis höchstens über günstigstem (Cent/kWh)",
+        0.5,
+        False,
+        "Preisabstand zur Regel mit teilweisem PV-Überschuss (z. B. 5).",
+    ),
+    (
+        "heat_boost_grid_margin_cent",
+        "Boost bei Netzpreis höchstens über günstigstem (Cent/kWh)",
+        0.5,
+        False,
+        "Boost ohne PV, wenn der Bezugspreis höchstens so viel über dem günstigsten "
+        "Preis im Horizont liegt (z. B. 2).",
+    ),
+)
+
+_HEAT_CONTROL_DEFAULTS: dict[str, float] = {
+    "heat_lock_margin_cent": DEFAULT_LOCK_MARGIN_CENT,
+    "heat_lock_max_quarterhours": float(DEFAULT_MAX_LOCK_QUARTERHOURS),
+    **BOOST_FIELDS,
+}
+
+
+def _render_heat_control_fields(consumer: dict, index: int, *, session_scope: str) -> dict:
+    """Lock and boost settings of a cycling heat pump (Hauskonfigurator, Haus Wärme)."""
+    out: dict = {}
+    for key, label, step, is_int, help_text in _HEAT_CONTROL_INPUTS:
+        default = _HEAT_CONTROL_DEFAULTS[key]
+        value = consumer.get(key, default)
+        out[key] = labeled_number_input(
+            display_label(label),
+            min_value=0 if is_int else 0.0,
+            step=int(step) if is_int else step,
+            value=int(value) if is_int else float(value),
+            ratios=WIDE_LABEL_RATIOS,
+            help=help_text,
+            key=_scoped_key(session_scope, f"hc_ta_{key}_{index}"),
+        )
+    return out
 
 
 def _render_thermal_annual_building_fields(
@@ -91,73 +166,7 @@ def _render_thermal_annual_building_fields(
             "Wärmepumpen hoch genug wählen (z. B. 14).",
             key=_scoped_key(session_scope, f"hc_ta_max_pulses_{index}"),
         ),
-        "heat_lock_margin_cent": labeled_number_input(
-            display_label("Sperre ab Preisabstand (Cent/kWh)"),
-            min_value=0.0,
-            step=0.5,
-            value=float(consumer.get("heat_lock_margin_cent", DEFAULT_LOCK_MARGIN_CENT)),
-            ratios=WIDE_LABEL_RATIOS,
-            help="Nur mit Pflichtpause ≥ 2: Earnie sperrt die Wärmepumpe (set_enable = 0) "
-            "in Slots ohne geplantes Heizen, deren Bezugspreis mindestens so viel über "
-            "dem günstigsten geplanten Heiz-Slot liegt.",
-            key=_scoped_key(session_scope, f"hc_ta_lock_margin_{index}"),
-        ),
-        "heat_lock_max_quarterhours": labeled_number_input(
-            "Maximale Sperrdauer (Viertelstunden)",
-            min_value=0,
-            value=int(consumer.get("heat_lock_max_quarterhours", DEFAULT_MAX_LOCK_QUARTERHOURS)),
-            ratios=WIDE_LABEL_RATIOS,
-            help="Längste Sperre am Stück (z. B. 8 = 2 h); danach gibt Earnie die "
-            "Wärmepumpe mindestens 1 h frei. 0 = nie sperren (nur Boost).",
-            key=_scoped_key(session_scope, f"hc_ta_lock_max_{index}"),
-        ),
-        "heat_boost_pv_percent": labeled_number_input(
-            "Boost ab PV-Überschuss (% der Nennleistung)",
-            min_value=0.0,
-            step=10.0,
-            value=float(consumer.get("heat_boost_pv_percent", DEFAULT_BOOST_PV_PERCENT)),
-            ratios=WIDE_LABEL_RATIOS,
-            help="Nur mit Pflichtpause ≥ 2: Komfort-Boost bei jedem Preis, wenn der "
-            "PV-Überschuss (PV minus Hauslast ohne Flex) mindestens so viel Prozent der "
-            "Nennleistung der Wärmepumpe deckt (z. B. 150).",
-            key=_scoped_key(session_scope, f"hc_ta_boost_pv_{index}"),
-        ),
-        "heat_boost_mixed_pv_percent": labeled_number_input(
-            "Boost ab teilweisem PV-Überschuss (% der Nennleistung)",
-            min_value=0.0,
-            step=10.0,
-            value=float(
-                consumer.get("heat_boost_mixed_pv_percent", DEFAULT_BOOST_MIXED_PV_PERCENT)
-            ),
-            ratios=WIDE_LABEL_RATIOS,
-            help="Zusammen mit dem nächsten Feld: Boost, wenn der PV-Überschuss so viel "
-            "Prozent deckt und der Bezugspreis höchstens den Abstand über dem günstigsten "
-            "Preis im Horizont liegt (z. B. 50).",
-            key=_scoped_key(session_scope, f"hc_ta_boost_mixed_pv_{index}"),
-        ),
-        "heat_boost_mixed_margin_cent": labeled_number_input(
-            display_label("… und Preis höchstens über günstigstem (Cent/kWh)"),
-            min_value=0.0,
-            step=0.5,
-            value=float(
-                consumer.get("heat_boost_mixed_margin_cent", DEFAULT_BOOST_MIXED_MARGIN_CENT)
-            ),
-            ratios=WIDE_LABEL_RATIOS,
-            help="Preisabstand zur Regel mit teilweisem PV-Überschuss (z. B. 5).",
-            key=_scoped_key(session_scope, f"hc_ta_boost_mixed_margin_{index}"),
-        ),
-        "heat_boost_grid_margin_cent": labeled_number_input(
-            display_label("Boost bei Netzpreis höchstens über günstigstem (Cent/kWh)"),
-            min_value=0.0,
-            step=0.5,
-            value=float(
-                consumer.get("heat_boost_grid_margin_cent", DEFAULT_BOOST_GRID_MARGIN_CENT)
-            ),
-            ratios=WIDE_LABEL_RATIOS,
-            help="Boost ohne PV, wenn der Bezugspreis höchstens so viel über dem "
-            "günstigsten Preis im Horizont liegt (z. B. 2).",
-            key=_scoped_key(session_scope, f"hc_ta_boost_grid_margin_{index}"),
-        ),
+        **_render_heat_control_fields(consumer, index, session_scope=session_scope),
         "living_area_m2": labeled_number_input(
             "Wohnfläche (m²)",
             min_value=0.0,

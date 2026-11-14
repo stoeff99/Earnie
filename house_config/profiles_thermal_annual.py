@@ -102,6 +102,17 @@ def _build_thermal_block(raw: dict) -> dict:
     return thermal
 
 
+# Heat pump boost / lock settings (optimizer.heat_control); kept on save and in the UI.
+HEAT_CONTROL_KEYS: tuple[str, ...] = (
+    "heat_lock_margin_cent",
+    "heat_lock_max_quarterhours",
+    "heat_boost_pv_percent",
+    "heat_boost_mixed_pv_percent",
+    "heat_boost_mixed_margin_cent",
+    "heat_boost_grid_margin_cent",
+)
+
+
 def normalize_thermal_annual_consumer(
     raw: dict,
     spec: dict,
@@ -124,12 +135,7 @@ def normalize_thermal_annual_consumer(
         spec["heat_lock_margin_cent"] = max(0.0, float(raw["heat_lock_margin_cent"]))
     if raw.get("heat_lock_max_quarterhours") is not None:
         spec["heat_lock_max_quarterhours"] = max(0, int(raw["heat_lock_max_quarterhours"]))
-    for key in (
-        "heat_boost_pv_percent",
-        "heat_boost_mixed_pv_percent",
-        "heat_boost_mixed_margin_cent",
-        "heat_boost_grid_margin_cent",
-    ):
+    for key in HEAT_CONTROL_KEYS[2:]:
         if raw.get(key) is not None:
             spec[key] = max(0.0, float(raw[key]))
     if "max_pulses_per_day" in raw:

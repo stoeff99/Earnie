@@ -1,6 +1,8 @@
 """Session/select/defaults for Hausprofil form."""
 from __future__ import annotations
 
+from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS
+
 import os
 
 import streamlit as st
@@ -54,12 +56,7 @@ _PASSTHROUGH_CONSUMER_KEYS = (
     "max_on_quarterhours",
     "min_off_quarterhours",
     "max_pulses_per_day",
-    "heat_lock_margin_cent",
-    "heat_lock_max_quarterhours",
-    "heat_boost_pv_percent",
-    "heat_boost_mixed_pv_percent",
-    "heat_boost_mixed_margin_cent",
-    "heat_boost_grid_margin_cent",
+    *HEAT_CONTROL_KEYS,
     "min_on_quarterhours",
     "heating_power_threshold_kw",
     "actual_temp_step_c",
