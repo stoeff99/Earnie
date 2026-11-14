@@ -523,6 +523,36 @@ def _thermal_day_want_kwh(
     return max(prorated, live_min)
 
 
+def add_cumulative_heat_targets(
+    prob: pulp.LpProblem,
+    day_deliveries: list[tuple[pulp.LpAffineExpression, float]],
+    *,
+    storage_kwh: float,
+    prefix: str,
+) -> None:
+    """Pre-heating across midnight: the building stores up to ``storage_kwh``.
+
+    Per day: ``delivery + carry_in >= target + carry_out`` with ``0 <= carry <=
+    storage_kwh`` at each midnight (heat may come early, never late). ``carry = 0``
+    is the plain per-day rule, so this never makes a feasible plan infeasible.
+    """
+    carry_in: pulp.LpVariable | float = 0.0
+    for index, (expr, target_kwh) in enumerate(day_deliveries):
+        last = index == len(day_deliveries) - 1
+        carry_out: pulp.LpVariable | float = (
+            0.0
+            if last
+            else pulp.LpVariable(
+                f"{prefix}_carry_{index}", lowBound=0.0, upBound=float(storage_kwh)
+            )
+        )
+        prob += (
+            expr + carry_in >= float(target_kwh) + carry_out,
+            f"{prefix}_day_{index}",
+        )
+        carry_in = carry_out
+
+
 def _add_one_thermal_flex_consumer(
     model: MilpHorizonModel,
     matrix: list,
@@ -588,6 +618,7 @@ def _add_one_thermal_flex_consumer(
         consumer_thermal_eligible_indices(matrix, consumer, schedule_indices)
     )
     _force_thermal_on_slots(model, cid, on_vars, forced_indices, eligible_set)
+    day_targets: list[tuple[date, list[int], float]] = []
     for day in sorted(set(daily_targets) | set(live_day_min)):
         matrix_day_indices = _indices_for_date(matrix, day)
         day_indices = [
@@ -636,6 +667,17 @@ def _add_one_thermal_flex_consumer(
                 prefix=f"{cid}_{day.isoformat()}",
                 continuing=continuing,
             )
+        day_targets.append((day, day_indices, effective))
+    preheat_kwh = float(consumer.get("preheat_storage_kwh") or 0.0)
+    if preheat_kwh > 1e-9 and not forced_indices:
+        add_cumulative_heat_targets(
+            model.prob,
+            [(_delivery_energy_expr(model, consumer, idx), kwh) for _, idx, kwh in day_targets],
+            storage_kwh=preheat_kwh,
+            prefix=f"{cid}_thermal_cum",
+        )
+        return
+    for day, day_indices, effective in day_targets:
         model.prob += (
             _delivery_energy_expr(model, consumer, day_indices) >= effective,
             f"{cid}_thermal_day_{day.isoformat()}",

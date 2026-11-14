@@ -43,6 +43,7 @@ Der Modus ist wirksam, sobald der Schalter im Hauskonfigurator **oder** das EHAL
 | `max_pulses_per_day` | Haus Wärme (`thermal_annual`): höchstens so viele Starts je Kalendertag (Default 4). Hauskonfigurator: „Maximale Starts pro Tag“. |
 | `heat_lock_margin_cent` | Haus Wärme mit Pflichtpause ≥ 2: Sperre ab diesem Preisabstand zum günstigsten geplanten Heiz-Slot (Default 5 Cent bzw. Rp/kWh). Siehe [Komfort-Boost und Sperre](#waermepumpe-boost-sperre). |
 | `heat_lock_max_quarterhours` | Haus Wärme mit Pflichtpause ≥ 2: längste Sperre am Stück in 15-Minuten-Slots (Default 8 = 2 h; `0` = nie sperren). |
+| `heat_preheat_enabled` | Haus Wärme: Gebäude als Wärmespeicher, Wärme des nächsten Tages darf vorgezogen werden (Default aus). Siehe [Vorheizen über Mitternacht](#waermepumpe-vorheizen). |
 | `heat_boost_pv_percent`, `heat_boost_mixed_pv_percent`, `heat_boost_mixed_margin_cent`, `heat_boost_grid_margin_cent` | Haus Wärme mit Pflichtpause ≥ 2: Schwellen für den Komfort-Boost (Default 150 %, 50 %, 5 und 2 Cent bzw. Rp/kWh). Siehe [Komfort-Boost und Sperre](#waermepumpe-boost-sperre). |
 | `path_historical_log` | Historische Leistungs-CSV (Offline → `cons_data`; typisch ein Loxone-Export). Wird aus dem Hausprofil nur für den Pool-Filter übernommen; der Loxone-Log-Import (`integrations/loxone_log_import.py`) dient nur noch Migration und Tests |
 | `signal_type` | `power` (kW) oder `binary` (Ein/Aus × `nominal_power_kw`) |
@@ -97,6 +98,16 @@ Mit Wärmespeicher und einer Komfort-Untergrenze, die bestimmte Stunden erzwingt
 - **Wärmepumpe steht in der Pause:** Die restlichen Pausen-Slots bleiben aus. Das gilt auch, wenn eine Komfort-Untergrenze dort Heizen verlangen würde, denn der Verdichter kann während der Sperrzeit nicht laufen.
 
 Die Wechsel kennt Earnie nur auf einen Zyklus (15 min) genau. Ist keines der beiden Signale gemappt, warnt das Log in jedem Zyklus. Ist die letzte Beobachtung älter als zwei Zyklen (z. B. nach einem Neustart), plant Earnie den ersten Zyklus ohne Taktgedächtnis. In beiden Fällen gilt die Pause nur innerhalb des Plans.
+
+<a id="waermepumpe-vorheizen"></a>
+
+### Gebäude als Wärmespeicher (Vorheizen über Mitternacht)
+
+Die Wärmeziele von Haus Wärme gelten je Kalendertag. Ohne diese Option muss jeder Tag seine eigene Wärme liefern; Wärme vom Mittag zählt nicht für die Nacht nach Mitternacht. Mit **„Gebäude als Wärmespeicher (Vorheizen über Mitternacht)“** (`heat_preheat_enabled`) darf Earnie einen Teil der Wärme des nächsten Tages schon heute liefern, z. B. mit PV-Überschuss am Mittag oder zu einem günstigen Abendpreis.
+
+- **Wie viel:** höchstens die Wärme, die die Gebäudemasse im Heizband speichert, umgerechnet in Strom: Wohnfläche × Bauweise (Wärmekapazität) × Heizband-Toleranz ÷ JAZ der Wärmepumpe. Beispiel: 145 m², Bauweise mittel (90 Wh/m²K), Toleranz 0,5 K, Erdwärme (JAZ 4,3) ergibt rund 1,5 kWh Strom. Der Hauskonfigurator zeigt den Wert unter dem Häkchen an.
+- **Nur früher, nie später:** Bis zum Ende jedes Tages muss die gelieferte Wärme die Ziele bis zu diesem Tag decken. Wärme darf vorgezogen, aber nicht auf später verschoben werden.
+- Ohne Häkchen (Vorgabe) gilt die bisherige Regel je Kalendertag unverändert. Mit Wärmespeicher und Komfort-Untergrenze (erzwungene Stunden) gilt ebenfalls die bisherige Regel.
 
 <a id="waermepumpe-boost-sperre"></a>
 

@@ -419,7 +419,7 @@ def thermal_optimizer_flex_enabled(consumer: dict) -> bool:
 
 def planning_thermal_to_milp(consumer: dict) -> dict:
     """Hausprofil thermal_annual → MILP-binary mit HDD-Tagesziel (Thermals P1a)."""
-    from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS
+    from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS, preheat_storage_kwh
 
     from house_config.thermal_labels import CONSUMER_TYPE_LABELS
 
@@ -436,6 +436,7 @@ def planning_thermal_to_milp(consumer: dict) -> dict:
         "min_off_quarterhours": int(consumer.get("min_off_quarterhours", 0) or 0),
         "max_pulses_per_day": int(consumer.get("max_pulses_per_day", 4) or 4),
         **{key: consumer.get(key) for key in HEAT_CONTROL_KEYS},
+        "preheat_storage_kwh": preheat_storage_kwh(consumer),
         "daily_target_kwh": 0.0,
         "daily_target_source": "thermal_annual",
         "signal_type": "binary",
