@@ -1,7 +1,8 @@
 """Monitor chart: comfort boost and lock bands of heat pumps next to a climate controller.
 
 The bands apply :func:`optimizer.heat_control.control_bands` to the planned slots of the
-chart (from ``history_slot_count`` on), so price and decision can be read together. The
+chart (from ``history_slot_count`` on; PV surplus = PV forecast minus house load without
+flex), so price, PV and decision can be read together. The
 live lock memory (maximum lock time across cycles) is not part of the chart: it starts
 fresh at the first planned slot.
 """
@@ -12,6 +13,7 @@ import plotly.graph_objects as go
 
 from house_config.currency_display import active_units
 from optimizer.heat_control import (
+    boost_rule,
     control_bands,
     lock_margin_cent,
     max_lock_slots,
@@ -20,6 +22,8 @@ from optimizer.heat_control import (
 from ui.chart_slot_axis import ChartSlotAxis
 
 PRICE_COLUMN = "Strompreis (Cent/kWh)"
+PV_COLUMN = "PV-Prognose (kW)"
+LOAD_COLUMN = "Verbrauch-Prognose (kW)"
 BAND_BASE = 100.5
 BAND_HEIGHT = 3.0
 COLOR_BOOST = "#f59e0b"
@@ -31,18 +35,25 @@ def heat_control_band_series(
 ) -> tuple[list[int], list[int]] | None:
     """(boost, lock) per slot from ``start`` on, or None without the needed columns."""
     power_col = f"{consumer['name']} (kW)"
-    if power_col not in df.columns or PRICE_COLUMN not in df.columns or start >= len(df):
+    needed = (power_col, PRICE_COLUMN, PV_COLUMN, LOAD_COLUMN)
+    if any(col not in df.columns for col in needed) or start >= len(df):
         return None
     rows = df.iloc[start:]
     kws = pd.to_numeric(rows[power_col], errors="coerce").fillna(0.0)
     prices = pd.to_numeric(rows[PRICE_COLUMN], errors="coerce").ffill().bfill()
     if prices.isna().any():
         return None
+    surplus = pd.to_numeric(rows[PV_COLUMN], errors="coerce").fillna(0.0) - pd.to_numeric(
+        rows[LOAD_COLUMN], errors="coerce"
+    ).fillna(0.0)
     bands = control_bands(
         [float(kw) > 1e-3 for kw in kws],
         [float(price) for price in prices],
+        [float(kw) for kw in surplus],
+        nominal_kw=float(consumer["nominal_power_kw"]),
         margin_cent=lock_margin_cent(consumer),
         max_lock=max_lock_slots(consumer),
+        rule=boost_rule(consumer),
     )
     return bands.boost, [1 - flag for flag in bands.enable]
 

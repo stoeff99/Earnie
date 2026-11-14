@@ -4,14 +4,18 @@ Loxone (or another controller) stays the comfort master and decides *whether* th
 house needs heat. Earnie adds *when* via two 0/1 signals per cycling heat pump
 (``min_off_quarterhours`` > 1):
 
-* ``set_heat_boost`` = 1 in slots where the plan runs the heat pump (cheap or PV
-  surplus). Loxone switches the rooms from Eco to Comfort, so heat is drawn into the
-  building mass now.
+* ``set_heat_boost`` = 1 in slots that are a good moment to store extra heat, whether
+  or not the plan heats there (see :func:`boost_slot`, thresholds per heat pump in
+  :data:`BOOST_FIELDS`): by default PV surplus covers 150 % of the heat pump, or 50 %
+  with a grid price at most 5 above the cheapest price of the horizon, or the grid price
+  is at most 2 above that cheapest price. Loxone switches the
+  rooms from Eco to Comfort, so heat is drawn into the building mass now. The current
+  slot uses the measured PV and house load.
 * ``set_enable`` = 0 (lock) only in slots where the plan does not heat and the import
   price is at least ``heat_lock_margin_cent`` above the cheapest planned heating slot
   of the horizon. A lock never lasts longer than ``heat_lock_max_quarterhours``; after
   that the heat pump is released for ``RELEASE_SLOTS`` before the next lock may start.
-  ``heat_lock_max_quarterhours`` = 0 never locks.
+  ``heat_lock_max_quarterhours`` = 0 never locks. A boost slot is never locked.
 
 The rule is a pure function over the plan (:func:`control_bands`); the live daemon
 carries the running lock / release count from one quarter-hour slot to the next in a
@@ -35,6 +39,27 @@ STATE_FILENAME = "heat_control_state.json"
 RELEASE_SLOTS = 4
 DEFAULT_LOCK_MARGIN_CENT = 5.0
 DEFAULT_MAX_LOCK_QUARTERHOURS = 8
+# Boost defaults (Haus Wärme fields): PV surplus in % of the heat pump's nominal power,
+# grid margins in Cent (Rp) per kWh above the cheapest import price of the horizon.
+DEFAULT_BOOST_PV_PERCENT = 150.0
+DEFAULT_BOOST_MIXED_PV_PERCENT = 50.0
+DEFAULT_BOOST_MIXED_MARGIN_CENT = 5.0
+DEFAULT_BOOST_GRID_MARGIN_CENT = 2.0
+
+BOOST_FIELDS: dict[str, float] = {
+    "heat_boost_pv_percent": DEFAULT_BOOST_PV_PERCENT,
+    "heat_boost_mixed_pv_percent": DEFAULT_BOOST_MIXED_PV_PERCENT,
+    "heat_boost_mixed_margin_cent": DEFAULT_BOOST_MIXED_MARGIN_CENT,
+    "heat_boost_grid_margin_cent": DEFAULT_BOOST_GRID_MARGIN_CENT,
+}
+
+
+@dataclass(frozen=True)
+class BoostRule:
+    pv_percent: float = DEFAULT_BOOST_PV_PERCENT
+    mixed_pv_percent: float = DEFAULT_BOOST_MIXED_PV_PERCENT
+    mixed_margin_cent: float = DEFAULT_BOOST_MIXED_MARGIN_CENT
+    grid_margin_cent: float = DEFAULT_BOOST_GRID_MARGIN_CENT
 _SLOT = timedelta(minutes=15)
 _lock = threading.Lock()
 
@@ -68,19 +93,69 @@ def max_lock_slots(consumer: dict) -> int:
     return DEFAULT_MAX_LOCK_QUARTERHOURS if value is None else max(0, int(value))
 
 
+def boost_rule(consumer: dict) -> BoostRule:
+    """Boost thresholds of a heat pump (Haus Wärme fields, defaults when unset)."""
+    values = {
+        key: DEFAULT if consumer.get(key) is None else max(0.0, float(consumer[key]))
+        for key, DEFAULT in BOOST_FIELDS.items()
+    }
+    return BoostRule(
+        pv_percent=values["heat_boost_pv_percent"],
+        mixed_pv_percent=values["heat_boost_mixed_pv_percent"],
+        mixed_margin_cent=values["heat_boost_mixed_margin_cent"],
+        grid_margin_cent=values["heat_boost_grid_margin_cent"],
+    )
+
+
+def boost_slot(
+    pv_surplus_kw: float,
+    price: float,
+    *,
+    nominal_kw: float,
+    cheapest_price: float,
+    rule: BoostRule = BoostRule(),
+) -> bool:
+    """Good moment to store extra heat (independent of the plan)."""
+    surplus_percent = 100.0 * float(pv_surplus_kw) / float(nominal_kw) if nominal_kw > 0 else 0.0
+    above_cheapest = float(price) - float(cheapest_price)
+    return (
+        surplus_percent >= rule.pv_percent
+        or (
+            surplus_percent >= rule.mixed_pv_percent
+            and above_cheapest <= rule.mixed_margin_cent
+        )
+        or above_cheapest <= rule.grid_margin_cent
+    )
+
+
 def control_bands(
     on: Sequence[bool],
     prices: Sequence[float],
+    pv_surplus_kw: Sequence[float],
     *,
+    nominal_kw: float,
     margin_cent: float,
     max_lock: int,
     carry: Carry = Carry(),
     release_slots: int = RELEASE_SLOTS,
+    rule: BoostRule = BoostRule(),
 ) -> Bands:
-    """Boost and enable per slot from the planned on/off and the import price."""
-    if len(on) != len(prices):
-        raise ValueError("Wärmepumpen-Steuerung: Plan und Preise müssen gleich lang sein.")
-    boost = [1 if flag else 0 for flag in on]
+    """Boost and enable per slot from the plan, the import price and the PV surplus."""
+    if not len(on) == len(prices) == len(pv_surplus_kw):
+        raise ValueError(
+            "Wärmepumpen-Steuerung: Plan, Preise und PV-Überschuss müssen gleich lang sein."
+        )
+    if not prices:
+        return Bands([], [], Carry())
+    cheapest = min(float(p) for p in prices)
+    boost = [
+        1
+        if boost_slot(
+            surplus, price, nominal_kw=nominal_kw, cheapest_price=cheapest, rule=rule
+        )
+        else 0
+        for surplus, price in zip(pv_surplus_kw, prices)
+    ]
     planned_prices = [float(p) for p, flag in zip(prices, on) if flag]
     if max_lock <= 0 or not planned_prices:
         # Without a planned heating slot there is no price to compare against.
@@ -90,7 +165,7 @@ def control_bands(
     enable: list[int] = []
     after_first = Carry()
     for index, (flag, price) in enumerate(zip(on, prices)):
-        wants_lock = not flag and float(price) >= threshold
+        wants_lock = not flag and not boost[index] and float(price) >= threshold
         if release > 0:
             enable.append(1)
             release -= 1
@@ -150,6 +225,11 @@ def _carry_in(entry: dict[str, Any] | None, slot: datetime) -> Carry:
     return Carry()
 
 
+def pv_surplus_kw(row: dict[str, Any]) -> float:
+    """PV minus house load without flexible consumers (slot 0 = live snapshot)."""
+    return float(row.get("expected_p_pv") or 0.0) - float(row.get("expected_p_act") or 0.0)
+
+
 def _slot_start(row: dict[str, Any]) -> datetime:
     slot = row.get("slot_datetime")
     if not isinstance(slot, datetime):
@@ -175,12 +255,16 @@ def live_heat_controls(
             kws = list(kw_horizon[cid])
             horizon = min(len(kws), len(matrix))
             carry = _carry_in(state.get(cid), slot)
+            rows = matrix[:horizon]
             bands = control_bands(
                 [kw > 1e-3 for kw in kws[:horizon]],
-                [float(row["k_act"]) for row in matrix[:horizon]],
+                [float(row["k_act"]) for row in rows],
+                [pv_surplus_kw(row) for row in rows],
+                nominal_kw=float(consumer["nominal_power_kw"]),
                 margin_cent=lock_margin_cent(consumer),
                 max_lock=max_lock_slots(consumer),
                 carry=carry,
+                rule=boost_rule(consumer),
             )
             out[cid] = {"boost": bands.boost[0], "enable": bands.enable[0]}
             state[cid] = {

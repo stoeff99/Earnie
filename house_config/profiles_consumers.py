@@ -1,6 +1,8 @@
 """Consumer entries of house profiles: normalize + serialize (split from profiles_store)."""
 from __future__ import annotations
 
+from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS
+
 from house_config.earnie_role import (
     DEFAULT_MANUAL_HORIZON_H,
     EARNIE_ROLE_FLEX,
@@ -40,8 +42,7 @@ _THERMAL_ANNUAL_PASSTHROUGH_KEYS = (
     "max_on_quarterhours",
     "min_off_quarterhours",
     "max_pulses_per_day",
-    "heat_lock_margin_cent",
-    "heat_lock_max_quarterhours",
+    *HEAT_CONTROL_KEYS,
     "optimizer_flex",
     "thermal_flex_window",
 )

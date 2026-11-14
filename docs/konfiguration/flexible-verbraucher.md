@@ -43,6 +43,7 @@ Der Modus ist wirksam, sobald der Schalter im Hauskonfigurator **oder** das EHAL
 | `max_pulses_per_day` | Haus Wärme (`thermal_annual`): höchstens so viele Starts je Kalendertag (Default 4). Hauskonfigurator: „Maximale Starts pro Tag“. |
 | `heat_lock_margin_cent` | Haus Wärme mit Pflichtpause ≥ 2: Sperre ab diesem Preisabstand zum günstigsten geplanten Heiz-Slot (Default 5 Cent bzw. Rp/kWh). Siehe [Komfort-Boost und Sperre](#waermepumpe-boost-sperre). |
 | `heat_lock_max_quarterhours` | Haus Wärme mit Pflichtpause ≥ 2: längste Sperre am Stück in 15-Minuten-Slots (Default 8 = 2 h; `0` = nie sperren). |
+| `heat_boost_pv_percent`, `heat_boost_mixed_pv_percent`, `heat_boost_mixed_margin_cent`, `heat_boost_grid_margin_cent` | Haus Wärme mit Pflichtpause ≥ 2: Schwellen für den Komfort-Boost (Default 150 %, 50 %, 5 und 2 Cent bzw. Rp/kWh). Siehe [Komfort-Boost und Sperre](#waermepumpe-boost-sperre). |
 | `path_historical_log` | Historische Leistungs-CSV (Offline → `cons_data`; typisch ein Loxone-Export). Wird aus dem Hausprofil nur für den Pool-Filter übernommen; der Loxone-Log-Import (`integrations/loxone_log_import.py`) dient nur noch Migration und Tests |
 | `signal_type` | `power` (kW) oder `binary` (Ein/Aus × `nominal_power_kw`) |
 | `log_signal_type` | Optional: abweichendes Format nur für `path_historical_log` |
@@ -105,19 +106,29 @@ Regelt ein eigener Regler die Räume (z. B. Loxone Klimaregler mit Intelligenten
 
 | Signal | Wert | Bedeutung |
 | ------ | ---- | --------- |
-| `heatpump.{slug}.set_heat_boost` | `1` | Der Plan heizt in diesem Slot (günstiger Preis oder PV-Überschuss). Loxone schaltet die Räume von Eco auf Komfort, damit die Wärme jetzt in die Gebäudemasse geht. |
-| `heatpump.{slug}.set_enable` | `0` | **Sperre:** Der Plan heizt nicht, und der Bezugspreis liegt mindestens `heat_lock_margin_cent` über dem günstigsten geplanten Heiz-Slot im Horizont. Sonst `1`. |
+| `heatpump.{slug}.set_heat_boost` | `1` | Guter Moment, zusätzlich Wärme einzulagern (Regel unten). Loxone schaltet die Räume von Eco auf Komfort, damit die Wärme jetzt in die Gebäudemasse geht. |
+| `heatpump.{slug}.set_enable` | `0` | **Sperre:** Der Plan heizt nicht, kein Boost, und der Bezugspreis liegt mindestens `heat_lock_margin_cent` über dem günstigsten geplanten Heiz-Slot im Horizont. Sonst `1`. |
+
+Regel für den Boost (unabhängig davon, ob der Plan in diesem Slot heizt). „PV-Überschuss“ ist PV minus Hauslast ohne flexible Verbraucher; „günstigster Preis“ ist der tiefste Bezugspreis im Planungshorizont. Die Schwellen stehen je Wärmepumpe im Hauskonfigurator (Haus Wärme); in Klammern die Vorgabe:
+
+| Boost, wenn … | PV-Überschuss | Bezugspreis |
+| ------------- | ------------- | ----------- |
+| viel Sonne | ≥ `heat_boost_pv_percent` % der Nennleistung (150) | egal |
+| etwas Sonne und günstig | ≥ `heat_boost_mixed_pv_percent` % der Nennleistung (50) | ≤ günstigster Preis + `heat_boost_mixed_margin_cent` (5 Cent bzw. Rp/kWh) |
+| günstiges Netz | egal | ≤ günstigster Preis + `heat_boost_grid_margin_cent` (2 Cent bzw. Rp/kWh) |
+
+Für den laufenden Slot nutzt Earnie die gemessene PV-Leistung und Hauslast, nicht die Prognose. Bei Hochnebel mit 1–2 kW PV gibt es deshalb keinen PV-Boost, auch wenn die Prognose Sonne erwartet hatte. Ein Lauf, den der Klimaregler selbst gestartet hat, löst keinen Boost aus.
 
 Regeln der Sperre:
 
-- Gesperrt wird nur in Slots ohne geplantes Heizen. Plant der Horizont gar kein Heizen, sperrt Earnie nie.
+- Gesperrt wird nur in Slots ohne geplantes Heizen und ohne Boost. Plant der Horizont gar kein Heizen, sperrt Earnie nie.
 - Eine Sperre dauert höchstens `heat_lock_max_quarterhours` Slots am Stück. Danach gibt Earnie die Wärmepumpe mindestens 1 h (4 Slots) frei, bevor eine neue Sperre beginnen darf. Diese Zählung merkt sich Earnie über die Zyklen in `runtime/heat_control_state.json`. Ein zweiter Lauf im selben Slot zählt nicht doppelt; nach einer Lücke (z. B. Neustart) beginnt sie neu.
 - `heat_lock_max_quarterhours` = `0` schaltet die Sperre ab (`set_enable` bleibt `1`, nur Boost).
 - Bei einem Fehler in der Berechnung gibt Earnie die Wärmepumpe frei (`set_enable` = 1, `set_heat_boost` = 0) und schreibt einen Fehler ins Log; die Batteriesteuerung läuft weiter.
 
 `set_heat_boost` schreibt Earnie in jedem Zyklus (wie `set_ess_mode`), damit ein Sticky-Wert in Loxone nie stehen bleibt. Wärmepumpen ohne Pflichtpause behalten das bisherige Verhalten: `set_enable` = 1, solange der Plan die Wärmepumpe laufen lässt; `set_heat_boost` bleibt `0`.
 
-Im **Monitor** zeigt ein schmales Band oberhalb der SoC-/Preisachse die Entscheidungen für die geplanten Slots: orange = Komfort-Boost, grau = Sperre. Das Band rechnet die Regel auf den angezeigten Plan, ohne das Sperr-Gedächtnis aus früheren Zyklen.
+Im **Monitor** zeigt ein schmales Band oberhalb der SoC-/Preisachse die Entscheidungen für die geplanten Slots: orange = Komfort-Boost, grau = Sperre. Das Band rechnet die Regel auf den angezeigten Plan mit der PV-Prognose, ohne das Sperr-Gedächtnis aus früheren Zyklen. Für künftige Slots ist es deshalb nur so gut wie die PV-Prognose; die tatsächliche Entscheidung im laufenden Slot fällt mit den Messwerten.
 
 **Beispiel Loxone:**
 

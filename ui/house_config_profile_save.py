@@ -1,6 +1,8 @@
 """Passthrough merge and save UI for Hausprofil form."""
 from __future__ import annotations
 
+from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS
+
 from ui.house_config_profile_session import (
     _SESSION_CONSUMERS_KEY,
     _SESSION_FILE_STAMP_KEY,
@@ -75,8 +77,7 @@ _PASSTHROUGH_CONSUMER_KEYS = (
     "max_on_quarterhours",
     "min_off_quarterhours",
     "max_pulses_per_day",
-    "heat_lock_margin_cent",
-    "heat_lock_max_quarterhours",
+    *HEAT_CONTROL_KEYS,
     "min_on_quarterhours",
     "heating_power_threshold_kw",
     "actual_temp_step_c",
