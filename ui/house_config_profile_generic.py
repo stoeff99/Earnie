@@ -55,6 +55,8 @@ _PASSTHROUGH_CONSUMER_KEYS = (
     "max_on_quarterhours",
     "min_off_quarterhours",
     "max_pulses_per_day",
+    "heat_lock_margin_cent",
+    "heat_lock_max_quarterhours",
     "min_on_quarterhours",
     "heating_power_threshold_kw",
     "actual_temp_step_c",

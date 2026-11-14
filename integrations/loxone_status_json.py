@@ -10,6 +10,7 @@ from integrations.ehal_debug_mapping import (
 )
 from settings.ehal_marker_resolve import (
     marker_flex_enable,
+    marker_heat_boost,
     marker_set_evcs_max_current,
     marker_set_evcs_mode,
 )
@@ -228,6 +229,9 @@ def _consumer_status_keys(
             value = _sent_enable_value(loxone_sent, enable, enable_key)
             if value is not None:
                 _emit_qualified_peer(payload, as_dict, "set_enable", value)
+        boost = str(marker_heat_boost(as_dict) or "").strip()
+        if boost and boost in loxone_sent:
+            _emit_qualified_peer(payload, as_dict, "set_heat_boost", float(loxone_sent[boost]))
     return payload
 
 

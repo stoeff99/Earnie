@@ -157,6 +157,7 @@ _EXTRA_LABELS: dict[str, str] = {
     "flex.sens_power_act": "Flex Leistung / Zustand",
     "flex.sens_consumer_active": "Gerät läuft (Binär)",
     "flex.set_enable": "Flex Freigabe",
+    "flex.set_heat_boost": "Wärmepumpe Komfort-Boost",
     "get_filter_remaining_hours": "Filter Sollstunden (h)",
     "sens_filter_active": "Filter läuft (Binär)",
     "get_filter_native_start_hour": "Native Filter-Startstunde",
@@ -264,6 +265,8 @@ def fields_for_consumer(consumer: dict) -> tuple[str, ...]:
     if ctype == "thermal_rc":
         return base + THERMAL_RC_EHAL_FIELDS
     if ctype == "thermal_annual":
+        if not cid:
+            base = base + ("flex.set_heat_boost",)
         return base + THERMAL_ANNUAL_EHAL_FIELDS
     return base
 

@@ -141,6 +141,25 @@ def marker_flex_enable(consumer: dict) -> str:
     return ""
 
 
+def marker_heat_boost(consumer: dict) -> str:
+    """Heat pump comfort boost: Merker or qid when a ``*.set_heat_boost`` key is present."""
+    from ehal.flex_fields import KIND_SET_HEAT_BOOST, binding_address
+    from ehal.qualified_ids import field_kind
+
+    cid = str(consumer.get("id") or "").strip()
+    if not cid:
+        return ""
+    bindings = ehal_bindings(consumer)
+    merker = binding_address(bindings, cid, KIND_SET_HEAT_BOOST)
+    if merker:
+        return merker
+    for key, value in bindings.items():
+        if field_kind(str(key)) != KIND_SET_HEAT_BOOST:
+            continue
+        return str(value or "").strip() or _consumer_pilot_id(consumer, KIND_SET_HEAT_BOOST)
+    return ""
+
+
 def marker_sens_consumer_active(consumer: dict) -> str:
     """Digital Gerät-läuft Merker (2.7.p) from entity-scoped bindings."""
     from ehal.flex_fields import (

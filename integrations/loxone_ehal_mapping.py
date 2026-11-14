@@ -159,6 +159,7 @@ _HINTS: dict[str, tuple[str, ...]] = {
     "flex.enable_name": ("freigabe", "enable", "sg ready"),
     "flex.sens_power_act": ("leistung", "power", "verbrauch"),
     "flex.set_enable": ("freigabe", "enable", "sg ready"),
+    "flex.set_heat_boost": ("boost", "komfort", "comfort"),
 }
 
 

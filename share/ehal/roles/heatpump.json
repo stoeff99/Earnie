@@ -17,6 +17,12 @@
       "notes": "entity-scoped Freigabe / SG-Ready."
     },
     {
+      "field": "flex.{hk_id}.set_heat_boost",
+      "required": false,
+      "kind": "stub",
+      "notes": "entity-scoped comfort boost 0/1 (heatpump.{hk_id}.set_heat_boost); cycling heat pumps only, written every cycle."
+    },
+    {
       "field": "sens_temperature_heat_storage",
       "required": false,
       "kind": "stub",

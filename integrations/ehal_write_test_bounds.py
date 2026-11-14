@@ -33,6 +33,7 @@ LIMIT_FIELDS = frozenset(
 EXPORT_LIMIT_FIELD = "set_grid_export_power_limit"
 SOURCE_SELECT_FIELD = "set_ess_source_select"
 FLEX_SET_ENABLE_KIND = "set_enable"
+HEAT_BOOST_KIND = "set_heat_boost"
 LOXONE_KW_WRITE_FIELDS = frozenset(
     {
         "set_ess_active_power",
@@ -136,7 +137,7 @@ def clamp_probe_value(
             )
         return mode
 
-    if kind in (SOURCE_SELECT_FIELD, FLEX_SET_ENABLE_KIND):
+    if kind in (SOURCE_SELECT_FIELD, FLEX_SET_ENABLE_KIND, HEAT_BOOST_KIND):
         return _clamp_binary_select(value, kind)
 
     raise WriteTestClampError(f"Feld nicht als Schreibtest-Probe erlaubt: {kind}")
@@ -220,6 +221,8 @@ def probe_value_bounds(
         return None, None, "0=Netz / 1=Batterie"
     if kind == FLEX_SET_ENABLE_KIND:
         return None, None, "0=Aus / 1=Ein"
+    if kind == HEAT_BOOST_KIND:
+        return None, None, "0=Eco / 1=Komfort"
     if kind == "set_evcs_mode":
         return None, None, "off|pv|now"
     return None, None, ""

@@ -9,6 +9,7 @@ import config
 from integrations.loxone_comm_trace import LoxoneWriteRecord
 from settings.ehal_marker_resolve import (
     marker_flex_enable,
+    marker_heat_boost,
     marker_set_evcs_max_current,
     marker_set_evcs_mode,
 )
@@ -247,8 +248,13 @@ def _enable_output_values(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict],
     enable_name: str,
+    heat_control: dict[str, int] | None = None,
 ) -> dict[str, float]:
-    enabled = flex_consumer_enable_value(consumer, consumer_powers, charging_contexts)
+    if heat_control is not None:
+        # Heat pump next to a climate controller: lock only (optimizer.heat_control).
+        enabled: int | None = int(heat_control["enable"])
+    else:
+        enabled = flex_consumer_enable_value(consumer, consumer_powers, charging_contexts)
     if enabled is None:
         return {}
     power_kw = max(0.0, float(consumer_powers.get(consumer["id"], 0.0) or 0.0))
@@ -267,6 +273,7 @@ def _flexible_consumer_output_values(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict],
     consumer_pv_follow: dict[str, int] | None = None,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, float]:
     """Berechnet Loxone-Merker → Wert für einen flexiblen Verbraucher (ohne HTTP)."""
     if _skip_flexible_consumer_output(consumer, charging_contexts):
@@ -283,11 +290,19 @@ def _flexible_consumer_output_values(
             current_name,
         )
 
-    if not enable_name:
-        return {}
-    return _enable_output_values(
-        consumer, consumer_powers, charging_contexts, enable_name
-    )
+    heat_control = (heat_controls or {}).get(str(consumer.get("id") or ""))
+    values: dict[str, float] = {}
+    if enable_name:
+        values.update(
+            _enable_output_values(
+                consumer, consumer_powers, charging_contexts, enable_name, heat_control
+            )
+        )
+    boost_name = marker_heat_boost(consumer)
+    if boost_name:
+        # Sticky like set_ess_mode: always written, 0 without a heat-control decision.
+        values[str(boost_name)] = float((heat_control or {}).get("boost", 0))
+    return values
 
 
 def _publish_flexible_consumer_outputs(
@@ -311,6 +326,7 @@ def _publish_flexible_consumer_outputs(
     current = marker_set_evcs_max_current(consumer)
     mode = marker_set_evcs_mode(consumer)
     enable = marker_flex_enable(consumer)
+    boost = marker_heat_boost(consumer)
     for io_name, value in values.items():
         name = str(io_name or "").strip()
         if not name:
@@ -321,6 +337,8 @@ def _publish_flexible_consumer_outputs(
             kind = "set_evcs_mode"
         elif enable and name == enable:
             kind = "set_enable"
+        elif boost and name == boost:
+            kind = "set_heat_boost"
         else:
             continue
         if kinds is not None and kind not in kinds:
@@ -341,10 +359,11 @@ def _write_flexible_consumer_output(
     *,
     send: bool,
     publish_kinds: frozenset[str] | None = None,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> list[LoxoneWriteRecord]:
     """Publishes Freigabe/Strom-Sollwert/Modus via status.json and/or snapshot."""
     values = _flexible_consumer_output_values(
-        consumer, consumer_powers, charging_contexts, consumer_pv_follow
+        consumer, consumer_powers, charging_contexts, consumer_pv_follow, heat_controls
     )
     records: list[LoxoneWriteRecord] = []
     if send:
@@ -406,6 +425,7 @@ def build_sent_loxone_snapshot(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     export_cap_kw: float | None | object = _OMIT_EXPORT_CAP,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, float]:
     """Alle an Loxone gesendeten Steuerwerte: Merkername → Zahl."""
     max_charge, max_discharge = _battery_max_powers_kw(config.get_battery_params())
@@ -448,7 +468,13 @@ def build_sent_loxone_snapshot(
 
     for consumer in config.get_flexible_consumers(optimizer_only=True):
         _write_flexible_consumer_output(
-            consumer, consumer_powers, contexts, snapshot, consumer_pv_follow, send=False
+            consumer,
+            consumer_powers,
+            contexts,
+            snapshot,
+            consumer_pv_follow,
+            send=False,
+            heat_controls=heat_controls,
         )
 
     return snapshot
@@ -600,14 +626,22 @@ def send_flexible_consumer_states(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict] | None = None,
     consumer_pv_follow: dict[str, int] | None = None,
+    *,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> list[LoxoneWriteRecord]:
-    """Sendet Freigabe (0/1), set_evcs_max_current (A) und set_evcs_mode an Loxone."""
+    """Sendet Freigabe (0/1), Boost, set_evcs_max_current (A) und set_evcs_mode an Loxone."""
     contexts = charging_contexts or {}
     records: list[LoxoneWriteRecord] = []
     for consumer in config.get_flexible_consumers(optimizer_only=True):
         records.extend(
             _write_flexible_consumer_output(
-                consumer, consumer_powers, contexts, None, consumer_pv_follow, send=True
+                consumer,
+                consumer_powers,
+                contexts,
+                None,
+                consumer_pv_follow,
+                send=True,
+                heat_controls=heat_controls,
             )
         )
     return records
@@ -617,6 +651,8 @@ def send_flexible_consumer_enables(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict] | None = None,
     consumer_pv_follow: dict[str, int] | None = None,
+    *,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> list[LoxoneWriteRecord]:
     """Publish only the flex ``set_enable`` (heat pump, pool, generic consumers).
 
@@ -635,7 +671,8 @@ def send_flexible_consumer_enables(
                 None,
                 consumer_pv_follow,
                 send=True,
-                publish_kinds=frozenset({"set_enable"}),
+                publish_kinds=frozenset({"set_enable", "set_heat_boost"}),
+                heat_controls=heat_controls,
             )
         )
     return records

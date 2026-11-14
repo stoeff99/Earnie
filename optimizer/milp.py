@@ -505,6 +505,7 @@ def milp_optimizer(
     controls = _extract_optimizer_controls_from_model(
         model, matrix, preset_by_slot, current_soc, primary
     )
+    _attach_heat_control_horizon(controls.milp_plan, model)
     urgent_observability = _collect_urgent_rule_observability(
         model, matrix, remaining, schedule_indices, contexts, filters
     )
@@ -516,6 +517,22 @@ def milp_optimizer(
             controls.mode, controls.target_power, controls.target_soc,
         )
     return _optimizer_result_tuple(controls, urgent_observability)
+
+
+def _attach_heat_control_horizon(milp_plan: dict, model: MilpHorizonModel) -> None:
+    """Planned kW per slot of heat-controlled heat pumps (boost / lock bands in main)."""
+    from optimizer.heat_control import uses_heat_control
+    from optimizer.milp_consumer_vars import _consumer_power_at
+
+    horizon: dict[str, list[float]] = {}
+    for consumer in model.planned_consumers:
+        if not uses_heat_control(consumer):
+            continue
+        horizon[str(consumer["id"])] = [
+            round(_consumer_power_at(model, consumer, t), 3) for t in range(model.horizon)
+        ]
+    if horizon:
+        milp_plan["heat_control_kw"] = horizon
 
 
 def _optimizer_result_tuple(controls, urgent_observability: dict[str, dict]) -> tuple:

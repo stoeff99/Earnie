@@ -426,10 +426,10 @@ def _append_standby_source_select_fields(
 def expected_live_write_fields(*, network_backend: bool = False) -> list[str]:
     """Canonical Live-Schreiben ids (plant + batteries + inverters + EV + flex)."""
     from ehal.ess_fields import ess_field
-    from ehal.flex_fields import flex_set_enable
+    from ehal.flex_fields import flex_set_enable, flex_set_heat_boost
     from ehal.inverter_fields import inv_field
     from ehal.qualified_ids import qualified_plant_id
-    from settings.ehal_marker_resolve import marker_flex_enable
+    from settings.ehal_marker_resolve import marker_flex_enable, marker_heat_boost
 
     batteries = _all_live_batteries()
     if network_backend:
@@ -471,6 +471,8 @@ def expected_live_write_fields(*, network_backend: bool = False) -> list[str]:
             continue
         if marker_flex_enable(consumer):
             fields.append(live_write_consumer_field(consumer, flex_set_enable(cid)))
+        if marker_heat_boost(consumer):
+            fields.append(live_write_consumer_field(consumer, flex_set_heat_boost(cid)))
     return fields
 
 
@@ -538,9 +540,10 @@ def _append_battery_write_io(index: dict[str, str]) -> None:
 
 def build_loxone_setpoint_io_index(*, include_write_aliases: bool = True) -> dict[str, str]:
     """Merker IO-Name → EHAL write field (plant + batteries + EV + flex)."""
-    from ehal.flex_fields import flex_set_enable
+    from ehal.flex_fields import flex_set_enable, flex_set_heat_boost
     from settings.ehal_marker_resolve import (
         marker_flex_enable,
+        marker_heat_boost,
         marker_set_evcs_max_current,
         marker_set_evcs_mode,
     )
@@ -574,6 +577,9 @@ def build_loxone_setpoint_io_index(*, include_write_aliases: bool = True) -> dic
         enable = str(marker_flex_enable(consumer) or "").strip()
         if enable:
             index[enable] = live_write_consumer_field(consumer, flex_set_enable(cid))
+        boost = str(marker_heat_boost(consumer) or "").strip()
+        if boost:
+            index[boost] = live_write_consumer_field(consumer, flex_set_heat_boost(cid))
 
     if not include_write_aliases:
         return index

@@ -204,6 +204,32 @@ def _prefetch_for_next_cycle(tick: datetime, start_at: datetime) -> None:
         logger.warning("Prefetch für %s abgebrochen (%s).", tick.strftime("%H:%M"), exc)
 
 
+def _live_heat_controls(
+    live_consumers: list[dict],
+    milp_plan: dict | None,
+    optimization_matrix: list[dict],
+) -> dict[str, dict[str, int]]:
+    """Boost / lock for heat pumps next to a climate controller (optimizer.heat_control).
+
+    On an error the heat pumps go to the safe state (released, no boost), so the climate
+    controller alone decides; the battery control of this cycle continues.
+    """
+    from optimizer.heat_control import live_heat_controls, uses_heat_control
+
+    kw_horizon = (milp_plan or {}).get("heat_control_kw") or {}
+    try:
+        return live_heat_controls(live_consumers, kw_horizon, optimization_matrix)
+    except Exception as exc:  # noqa: BLE001 — never abort the live cycle
+        logger.error(
+            "Wärmepumpen-Steuerung fehlgeschlagen, Wärmepumpe freigegeben ohne Boost: %s", exc
+        )
+        return {
+            str(c["id"]): {"boost": 0, "enable": 1}
+            for c in live_consumers
+            if uses_heat_control(c)
+        }
+
+
 def _read_pv_delta(out_of_band: bool) -> float:
     if out_of_band:
         pv_delta = pv_tuner.get_pv_delta_peek()
@@ -641,6 +667,7 @@ def _main_cycle(
             inbound_export_limit_kw=export_ctx["inbound_export_limit_kw"],
             current_soc_by_id=current_soc_by_id or None,
         )
+    heat_controls = _live_heat_controls(live_consumers, milp_plan, optimization_matrix)
     cycle_duration_stats.mark_ready()
     if early_start:
         with timing.phase("hold"):
@@ -740,7 +767,10 @@ def _main_cycle(
                 # Heat pump / pool / generic enables; the EV current went out above.
                 logger.info("Sende EHAL Flex-Freigaben an %s...", backend)
                 flex_enable_records = ehal_live.write_flex_enables_for_ha(
-                    consumer_powers, charging_contexts, consumer_pv_follow
+                    consumer_powers,
+                    charging_contexts,
+                    consumer_pv_follow,
+                    heat_controls=heat_controls,
                 )
             if err_ess is None and err_evcs is None and err_inv is None:
                 ehal_live.clear_write_error()
@@ -758,7 +788,10 @@ def _main_cycle(
             )
             logger.info("📤 Sende flexible Verbraucher-Sollwerte an Loxone...")
             flex_writes = ehal_live.write_flexible_consumer_states(
-                consumer_powers, charging_contexts, consumer_pv_follow
+                consumer_powers,
+                charging_contexts,
+                consumer_pv_follow,
+                heat_controls=heat_controls,
             )
             logger.info("📤 Sende WR-AC-Limits an Loxone...")
             _err_inv, inv_rows = ehal_live.write_inv_ac_limits_from_plan(
@@ -804,6 +837,7 @@ def _main_cycle(
             charging_contexts,
             consumer_pv_follow,
             export_cap_kw=export_cap,
+            heat_controls=heat_controls,
         )
         loxone_sent.update(
             planned_powerstation_loxone_sent(phys_charge, standby_sources)
@@ -951,6 +985,7 @@ def _main_cycle(
                 "consumer_pv_follow": {
                     k: int(v) for k, v in consumer_pv_follow.items()
                 },
+                "heat_controls": heat_controls,
                 "flex_live_kw": flex_chart_kw,
                 "flex_measured_ids": sorted(live_flex_measured),
                 "delivery_compliance": delivery_compliance,

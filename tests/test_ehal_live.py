@@ -244,7 +244,7 @@ def test_read_generic_value_delegates(fetch_mock):
 def test_write_flexible_consumer_states_delegates(send_mock):
     send_mock.return_value = []
     assert ehal_live.write_flexible_consumer_states({"a": 1.0}, None, None) == []
-    send_mock.assert_called_once_with({"a": 1.0}, None, None)
+    send_mock.assert_called_once_with({"a": 1.0}, None, None, heat_controls=None)
 
 
 @patch("integrations.loxone_writes._publish_setpoint_traced")

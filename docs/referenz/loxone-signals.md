@@ -238,7 +238,7 @@ Analog: Präfix `Earnie_EAuto_`, Entität `id` = `{ev_id}` (z. B. `eauto`, `gara
 
 **Wärmepumpe:**
 
-- Titel: `Earnie_Waermepumpe_Leistung` / `Earnie_Waermepumpe_Freigabe`.
+- Titel: `Earnie_Waermepumpe_Leistung` / `Earnie_Waermepumpe_Freigabe` / `Earnie_Waermepumpe_Boost`.
 - Speichertemperaturen: `Earnie_Waermespeicher_Temp_eq` / `Earnie_Waermespeicher_Temp_low`.
 - Pfade: VO `flex.{hk_id}.sens_power_act`, VI-Check `heatpump.{hk_id}.set_enable` (Standard-`id` `wp_heating`).
 
@@ -318,6 +318,7 @@ python -m scripts.migrate_ehal_bindings --path <house_profiles.json> [--config <
 | `consumer|heatpump|pool.{slug}.sens_power_act` | Lesen | Wärmepumpe: `Earnie_Waermepumpe_Leistung`; generisch: `Earnie_Verbraucher_Leistung`; oder EFM-Last | kW oder 0/1 |
 | `consumer.{slug}.sens_consumer_active` | Lesen | Generisch: `Earnie_Verbraucher_<Slug>_Aktiv` (digital; ODER-Trigger der Reservefreigabe) | `0`/`1` |
 | `consumer|heatpump|pool.{slug}.set_enable` | Schreiben | Wärmepumpe: `Earnie_Waermepumpe_Freigabe`; generisch: `Earnie_Verbraucher_Freigabe` | `0`/`1` |
+| `heatpump.{slug}.set_heat_boost` | Schreiben | `Earnie_Waermepumpe_Boost` (nur taktende Wärmepumpe, siehe [Komfort-Boost und Sperre](../konfiguration/flexible-verbraucher.md#waermepumpe-boost-sperre)) | `0` = Eco / `1` = Komfort; jeden Zyklus |
 
 > **Hinweis:** Speicher- und Wire-Schlüssel sind gleich (`consumer.` / `heatpump.` / `pool.` nach Verbrauchertyp). Legacy-`flex.{slug}.*` wird beim Config-Migrationsschritt umgeschrieben; bis dahin akzeptiert Earnie es noch beim Lesen.
 
