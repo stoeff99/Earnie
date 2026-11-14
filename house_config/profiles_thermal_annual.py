@@ -120,6 +120,10 @@ def normalize_thermal_annual_consumer(
         spec["max_on_quarterhours"] = max(1, int(raw.get("max_on_quarterhours", 16) or 16))
     if "min_off_quarterhours" in raw:
         spec["min_off_quarterhours"] = max(0, int(raw.get("min_off_quarterhours") or 0))
+    if raw.get("heat_lock_margin_cent") is not None:
+        spec["heat_lock_margin_cent"] = max(0.0, float(raw["heat_lock_margin_cent"]))
+    if raw.get("heat_lock_max_quarterhours") is not None:
+        spec["heat_lock_max_quarterhours"] = max(0, int(raw["heat_lock_max_quarterhours"]))
     if "max_pulses_per_day" in raw:
         spec["max_pulses_per_day"] = max(1, int(raw.get("max_pulses_per_day", 4) or 4))
     if int(spec.get("min_off_quarterhours") or 0) > 1 and int(

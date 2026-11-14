@@ -593,6 +593,8 @@ def write_flex_enables_for_ha(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict] | None = None,
     consumer_pv_follow: dict[str, int] | None = None,
+    *,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> list[dict[str, Any]]:
     """Publish the flex ``set_enable`` (heat pump, pool, generic) for the HA backend.
 
@@ -600,7 +602,7 @@ def write_flex_enables_for_ha(
     (``write_evcs_max_current_from_consumers`` writes it).
     """
     records = write_flexible_consumer_enables(
-        consumer_powers, charging_contexts, consumer_pv_follow
+        consumer_powers, charging_contexts, consumer_pv_follow, heat_controls=heat_controls
     )
     return [
         {

@@ -123,11 +123,13 @@ def write_flexible_consumer_states(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict] | None = None,
     consumer_pv_follow: dict[str, int] | None = None,
+    *,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> list[LoxoneWriteRecord]:
     from integrations.loxone_writes import send_flexible_consumer_states
 
     return send_flexible_consumer_states(
-        consumer_powers, charging_contexts, consumer_pv_follow
+        consumer_powers, charging_contexts, consumer_pv_follow, heat_controls=heat_controls
     )
 
 
@@ -135,11 +137,13 @@ def write_flexible_consumer_enables(
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict] | None = None,
     consumer_pv_follow: dict[str, int] | None = None,
+    *,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> list[LoxoneWriteRecord]:
     from integrations.loxone_writes import send_flexible_consumer_enables
 
     return send_flexible_consumer_enables(
-        consumer_powers, charging_contexts, consumer_pv_follow
+        consumer_powers, charging_contexts, consumer_pv_follow, heat_controls=heat_controls
     )
 
 
@@ -166,6 +170,7 @@ def build_sent_loxone_snapshot(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     export_cap_kw: float | None | object = OMIT_EXPORT_CAP,
+    heat_controls: dict[str, dict[str, int]] | None = None,
 ) -> dict[str, float]:
     from integrations.loxone_writes import build_sent_loxone_snapshot as _impl
 
@@ -177,6 +182,7 @@ def build_sent_loxone_snapshot(
         charging_contexts,
         consumer_pv_follow,
         export_cap_kw=export_cap_kw,
+        heat_controls=heat_controls,
     )
 
 

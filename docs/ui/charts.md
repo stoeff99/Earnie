@@ -90,6 +90,7 @@ PV, Last, Netz, Batterieflüsse und **Flex-Verbraucher** zeigen im grauen Bereic
 | SoC BL Ziel | Dieselbe Farbe, gestrichelt ab **Jetzt** (nicht davor) | Referenz-SOC (Baseline) der Primärbatterie; Anker ist der Log-SOC am Jetzt-Marker |
 | Preis (rot) | Strompreis skaliert | Hover: Cent/kWh |
 | Einspeisepreis (orange, gestrichelt) | Einspeisevergütung skaliert | Hover: Cent/kWh |
+| Wärmepumpe: Komfort-Boost / Sperre | Schmales Band oberhalb von 100 % auf der SoC-/Preisachse, nur geplante Slots: orange = Boost, grau = Sperre | Entscheidungen von `set_heat_boost` / `set_enable` für taktende Wärmepumpen; Hover zeigt den Preis. Siehe [Komfort-Boost und Sperre](../konfiguration/flexible-verbraucher.md#waermepumpe-boost-sperre). |
 
 **SoC-Plausibilität (Live-Monitor):** Der Abstand zwischen **SoC BL Ziel** und **SoC** entsteht durch Lastverschiebung (Flex oder E-Auto zeitlich anders platziert) und/oder durch die Batteriestrategie (Netzladen, Entladen, Halten). Umrandete Flex-Balken (**Original-Schedule**, nur Kanten, ohne Füllung) zeigen, wo Flex laut BL-Ziel gelaufen wäre. Die gefüllten Flex-Balken zeigen weiterhin die Optimierung. Solche Ghost-Segmente entfallen, wenn ihr Energie-Äquivalent (`kW × Slotdauer`) unter **1 kWh** liegt.
 

@@ -40,6 +40,8 @@ _THERMAL_ANNUAL_PASSTHROUGH_KEYS = (
     "max_on_quarterhours",
     "min_off_quarterhours",
     "max_pulses_per_day",
+    "heat_lock_margin_cent",
+    "heat_lock_max_quarterhours",
     "optimizer_flex",
     "thermal_flex_window",
 )

@@ -53,7 +53,7 @@ Exchange / display form of every signal on the push/exchange wire and in `status
 | Plant bare | `sens_temperature_outside` | House-wide fields without a device Kennung; plant AC PV is derived from `inv.{id}.*`; optional per-PV-system power uses `pv.{id}.*` |
 | Grid meter | `grid.meter.sens_grid_power_active` | First Kennung `meter`; more `grid.<Kennung>.*` meters may follow. Plant **storage** keeps bare kind keys |
 | Battery | `ess.<Kennung>.sens_ess_soc` | Entity-scoped binding key |
-| Consumer by type | `consumer.<slug>.set_enable`, `heatpump.<slug>.*`, `pool.<slug>.*` (incl. `pool_filter`) | Storage and exchange; legacy `flex.<slug>.*` accepted on parse / dual-read until migrated |
+| Consumer by type | `consumer.<slug>.set_enable`, `heatpump.<slug>.*` (incl. `set_heat_boost`: 0/1 comfort boost, written every cycle for cycling heat pumps), `pool.<slug>.*` (incl. `pool_filter`) | Storage and exchange; legacy `flex.<slug>.*` accepted on parse / dual-read until migrated |
 | EV split | `evcs.<slug>.set_evcs_max_current`, `ev.<slug>.sens_evcs_soc_act` | Same Kennung; namespace chosen by field kind |
 | Inverter | `inv.<Kennung>.*` | Entity-scoped on `inverters[].ehal_bindings` (**2.7.l P4**) |
 | Heartbeat (read) | `heartbeat_smarthome` | Link proof Hub→Earnie; not a field kind |

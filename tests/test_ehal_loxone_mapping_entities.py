@@ -46,6 +46,7 @@ def test_fields_for_consumer_ev_vs_flex():
     assert "sens_energy_total" in FLEX_FIELDS
     assert "sens_energy_export" not in FLEX_FIELDS
     assert fields_for_consumer({"type": "thermal_annual"}) == FLEX_FIELDS + (
+        "flex.set_heat_boost",
         "sens_temperature_heat_storage",
         "sens_temperature_heat_storage_low",
     )
@@ -53,6 +54,7 @@ def test_fields_for_consumer_ev_vs_flex():
         "heatpump.wp.sens_power_act",
         "heatpump.wp.sens_consumer_active",
         "heatpump.wp.set_enable",
+        "heatpump.wp.set_heat_boost",
         "sens_temperature_heat_storage",
         "sens_temperature_heat_storage_low",
     )

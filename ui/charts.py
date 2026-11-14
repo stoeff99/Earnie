@@ -181,6 +181,11 @@ def _add_soc_price_layer(
     add_export_price_on_soc_axis_trace(
         fig, plot_df, axis, extrap_start=extrap_start, extrap_end=extrap_end
     )
+    from ui.chart_heat_control import add_heat_control_bands
+
+    add_heat_control_bands(
+        fig, plot_df, axis, history_slot_count=options.history_slot_count
+    )
 
 
 def _power_soc_layout(

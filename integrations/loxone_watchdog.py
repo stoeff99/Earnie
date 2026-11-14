@@ -10,6 +10,7 @@ from integrations import loxone_client
 from runtime_store import run_state
 from settings.ehal_marker_resolve import (
     marker_flex_enable,
+    marker_heat_boost,
     marker_set_evcs_max_current,
     marker_set_evcs_mode,
 )
@@ -102,8 +103,9 @@ def verify_and_restore_loxone_states(
 
     mismatches: list[LoxoneMismatch] = []
     flex_enable_names = {
-        str(marker_flex_enable(c) or "")
+        str(marker(c) or "")
         for c in config.get_flexible_consumers(optimizer_only=True)
+        for marker in (marker_flex_enable, marker_heat_boost)
     }
     flex_enable_names.discard("")
     flex_setpoint_names = {

@@ -433,6 +433,8 @@ def planning_thermal_to_milp(consumer: dict) -> dict:
         "max_on_quarterhours": int(consumer.get("max_on_quarterhours", 16) or 16),
         "min_off_quarterhours": int(consumer.get("min_off_quarterhours", 0) or 0),
         "max_pulses_per_day": int(consumer.get("max_pulses_per_day", 4) or 4),
+        "heat_lock_margin_cent": consumer.get("heat_lock_margin_cent"),
+        "heat_lock_max_quarterhours": consumer.get("heat_lock_max_quarterhours"),
         "daily_target_kwh": 0.0,
         "daily_target_source": "thermal_annual",
         "signal_type": "binary",

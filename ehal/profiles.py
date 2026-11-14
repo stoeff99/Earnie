@@ -111,6 +111,7 @@ _FIELD_LABELS_DE: dict[str, str] = {
     "flex.sens_power_act": "Flex Leistung / Zustand",
     "flex.sens_consumer_active": "Gerät läuft (Binär)",
     "flex.set_enable": "Flex Freigabe",
+    "flex.set_heat_boost": "Wärmepumpe Komfort-Boost",
     "get_filter_remaining_hours": "Filter Sollstunden (h)",
     "sens_filter_active": "Filter läuft (Binär)",
     "get_filter_native_start_hour": "Native Filter-Startstunde",

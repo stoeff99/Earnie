@@ -13,9 +13,10 @@ import re
 KIND_SENS_POWER_ACT = "sens_power_act"
 KIND_SENS_CONSUMER_ACTIVE = "sens_consumer_active"
 KIND_SET_ENABLE = "set_enable"
+KIND_SET_HEAT_BOOST = "set_heat_boost"
 
 _FLEX_KINDS: frozenset[str] = frozenset(
-    {KIND_SENS_POWER_ACT, KIND_SENS_CONSUMER_ACTIVE, KIND_SET_ENABLE}
+    {KIND_SENS_POWER_ACT, KIND_SENS_CONSUMER_ACTIVE, KIND_SET_ENABLE, KIND_SET_HEAT_BOOST}
 )
 
 _ROLE_TO_KIND: dict[str, str] = {
@@ -24,10 +25,11 @@ _ROLE_TO_KIND: dict[str, str] = {
     "flex.sens_consumer_active": KIND_SENS_CONSUMER_ACTIVE,
     "flex.enable_name": KIND_SET_ENABLE,
     "flex.set_enable": KIND_SET_ENABLE,
+    "flex.set_heat_boost": KIND_SET_HEAT_BOOST,
 }
 
 _ENTITY_SCOPED = re.compile(
-    r"^flex\.(?P<slug>[^.]+)\.(?P<kind>sens_power_act|sens_consumer_active|set_enable)$"
+    r"^flex\.(?P<slug>[^.]+)\.(?P<kind>sens_power_act|sens_consumer_active|set_enable|set_heat_boost)$"
 )
 
 _TYPED_CONSUMER_NS = frozenset({"consumer", "heatpump", "pool", "flex"})
@@ -36,6 +38,7 @@ _KIND_LABELS_DE: dict[str, str] = {
     KIND_SENS_POWER_ACT: "Flex Leistung / Zustand",
     KIND_SENS_CONSUMER_ACTIVE: "Gerät läuft (Binär)",
     KIND_SET_ENABLE: "Flex Freigabe",
+    KIND_SET_HEAT_BOOST: "Wärmepumpe Komfort-Boost",
 }
 
 
@@ -71,6 +74,10 @@ def flex_set_enable(consumer_id: str) -> str:
     return flex_field(consumer_id, KIND_SET_ENABLE)
 
 
+def flex_set_heat_boost(consumer_id: str) -> str:
+    return flex_field(consumer_id, KIND_SET_HEAT_BOOST)
+
+
 def consumer_storage_field(
     consumer_id: str, consumer_type: str, kind: str
 ) -> str:
@@ -86,12 +93,18 @@ def consumer_storage_field(
 def consumer_fields_for_consumer(
     consumer_id: str, consumer_type: str = ""
 ) -> tuple[str, ...]:
-    """HITL / mapping field list for a non-EV flex consumer (typed storage keys)."""
-    return (
+    """HITL / mapping field list for a non-EV flex consumer (typed storage keys).
+
+    Heat pumps (``thermal_annual``) also get ``set_heat_boost``.
+    """
+    fields = (
         consumer_storage_field(consumer_id, consumer_type, KIND_SENS_POWER_ACT),
         consumer_storage_field(consumer_id, consumer_type, KIND_SENS_CONSUMER_ACTIVE),
         consumer_storage_field(consumer_id, consumer_type, KIND_SET_ENABLE),
     )
+    if str(consumer_type or "").strip() == "thermal_annual":
+        fields += (consumer_storage_field(consumer_id, consumer_type, KIND_SET_HEAT_BOOST),)
+    return fields
 
 
 def flex_fields_for_consumer(consumer_id: str) -> tuple[str, ...]:

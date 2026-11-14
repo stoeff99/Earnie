@@ -6,6 +6,8 @@ import streamlit as st
 from house_config.thermal_labels import (
     building_class_option_label,
 )
+from house_config.currency_display import display_label
+from optimizer.heat_control import DEFAULT_LOCK_MARGIN_CENT, DEFAULT_MAX_LOCK_QUARTERHOURS
 from ui.form_layout import (
     WIDE_LABEL_RATIOS,
     labeled_checkbox,
@@ -81,6 +83,26 @@ def _render_thermal_annual_building_fields(
             help="Obergrenze für Einschaltungen je Kalendertag. Bei taktenden "
             "Wärmepumpen hoch genug wählen (z. B. 14).",
             key=_scoped_key(session_scope, f"hc_ta_max_pulses_{index}"),
+        ),
+        "heat_lock_margin_cent": labeled_number_input(
+            display_label("Sperre ab Preisabstand (Cent/kWh)"),
+            min_value=0.0,
+            step=0.5,
+            value=float(consumer.get("heat_lock_margin_cent", DEFAULT_LOCK_MARGIN_CENT)),
+            ratios=WIDE_LABEL_RATIOS,
+            help="Nur mit Pflichtpause ≥ 2: Earnie sperrt die Wärmepumpe (set_enable = 0) "
+            "in Slots ohne geplantes Heizen, deren Bezugspreis mindestens so viel über "
+            "dem günstigsten geplanten Heiz-Slot liegt.",
+            key=_scoped_key(session_scope, f"hc_ta_lock_margin_{index}"),
+        ),
+        "heat_lock_max_quarterhours": labeled_number_input(
+            "Maximale Sperrdauer (Viertelstunden)",
+            min_value=0,
+            value=int(consumer.get("heat_lock_max_quarterhours", DEFAULT_MAX_LOCK_QUARTERHOURS)),
+            ratios=WIDE_LABEL_RATIOS,
+            help="Längste Sperre am Stück (z. B. 8 = 2 h); danach gibt Earnie die "
+            "Wärmepumpe mindestens 1 h frei. 0 = nie sperren (nur Boost).",
+            key=_scoped_key(session_scope, f"hc_ta_lock_max_{index}"),
         ),
         "living_area_m2": labeled_number_input(
             "Wohnfläche (m²)",

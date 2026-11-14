@@ -41,6 +41,8 @@ Der Modus ist wirksam, sobald der Schalter im Hauskonfigurator **oder** das EHAL
 | `max_on_quarterhours` | Haus Wärme (`thermal_annual`): längster Lauf am Stück in 15-Minuten-Slots (Default 16 = 4 h). Hauskonfigurator: „Maximale Laufzeit am Stück“. |
 | `min_off_quarterhours` | Haus Wärme (`thermal_annual`): Pflichtpause nach jedem Lauf in 15-Minuten-Slots (Default 0 = keine). Siehe [Taktende Wärmepumpe](#taktende-warmepumpe). |
 | `max_pulses_per_day` | Haus Wärme (`thermal_annual`): höchstens so viele Starts je Kalendertag (Default 4). Hauskonfigurator: „Maximale Starts pro Tag“. |
+| `heat_lock_margin_cent` | Haus Wärme mit Pflichtpause ≥ 2: Sperre ab diesem Preisabstand zum günstigsten geplanten Heiz-Slot (Default 5 Cent bzw. Rp/kWh). Siehe [Komfort-Boost und Sperre](#waermepumpe-boost-sperre). |
+| `heat_lock_max_quarterhours` | Haus Wärme mit Pflichtpause ≥ 2: längste Sperre am Stück in 15-Minuten-Slots (Default 8 = 2 h; `0` = nie sperren). |
 | `path_historical_log` | Historische Leistungs-CSV (Offline → `cons_data`; typisch ein Loxone-Export). Wird aus dem Hausprofil nur für den Pool-Filter übernommen; der Loxone-Log-Import (`integrations/loxone_log_import.py`) dient nur noch Migration und Tests |
 | `signal_type` | `power` (kW) oder `binary` (Ein/Aus × `nominal_power_kw`) |
 | `log_signal_type` | Optional: abweichendes Format nur für `path_historical_log` |
@@ -94,6 +96,36 @@ Mit Wärmespeicher und einer Komfort-Untergrenze, die bestimmte Stunden erzwingt
 - **Wärmepumpe steht in der Pause:** Die restlichen Pausen-Slots bleiben aus. Das gilt auch, wenn eine Komfort-Untergrenze dort Heizen verlangen würde, denn der Verdichter kann während der Sperrzeit nicht laufen.
 
 Die Wechsel kennt Earnie nur auf einen Zyklus (15 min) genau. Ist keines der beiden Signale gemappt, warnt das Log in jedem Zyklus. Ist die letzte Beobachtung älter als zwei Zyklen (z. B. nach einem Neustart), plant Earnie den ersten Zyklus ohne Taktgedächtnis. In beiden Fällen gilt die Pause nur innerhalb des Plans.
+
+<a id="waermepumpe-boost-sperre"></a>
+
+### Komfort-Boost und Sperre (Wärmepumpe neben einem Raum-/Klimaregler)
+
+Regelt ein eigener Regler die Räume (z. B. Loxone Klimaregler mit Intelligenten Raumreglern), bleibt er für den Komfort zuständig: Er entscheidet, **ob** das Haus Wärme braucht. Earnie ergänzt, **wann** das am günstigsten ist. Das gilt für jede taktende Wärmepumpe (`min_off_quarterhours` ≥ 2) mit zwei 0/1-Signalen:
+
+| Signal | Wert | Bedeutung |
+| ------ | ---- | --------- |
+| `heatpump.{slug}.set_heat_boost` | `1` | Der Plan heizt in diesem Slot (günstiger Preis oder PV-Überschuss). Loxone schaltet die Räume von Eco auf Komfort, damit die Wärme jetzt in die Gebäudemasse geht. |
+| `heatpump.{slug}.set_enable` | `0` | **Sperre:** Der Plan heizt nicht, und der Bezugspreis liegt mindestens `heat_lock_margin_cent` über dem günstigsten geplanten Heiz-Slot im Horizont. Sonst `1`. |
+
+Regeln der Sperre:
+
+- Gesperrt wird nur in Slots ohne geplantes Heizen. Plant der Horizont gar kein Heizen, sperrt Earnie nie.
+- Eine Sperre dauert höchstens `heat_lock_max_quarterhours` Slots am Stück. Danach gibt Earnie die Wärmepumpe mindestens 1 h (4 Slots) frei, bevor eine neue Sperre beginnen darf. Diese Zählung merkt sich Earnie über die Zyklen in `runtime/heat_control_state.json`. Ein zweiter Lauf im selben Slot zählt nicht doppelt; nach einer Lücke (z. B. Neustart) beginnt sie neu.
+- `heat_lock_max_quarterhours` = `0` schaltet die Sperre ab (`set_enable` bleibt `1`, nur Boost).
+- Bei einem Fehler in der Berechnung gibt Earnie die Wärmepumpe frei (`set_enable` = 1, `set_heat_boost` = 0) und schreibt einen Fehler ins Log; die Batteriesteuerung läuft weiter.
+
+`set_heat_boost` schreibt Earnie in jedem Zyklus (wie `set_ess_mode`), damit ein Sticky-Wert in Loxone nie stehen bleibt. Wärmepumpen ohne Pflichtpause behalten das bisherige Verhalten: `set_enable` = 1, solange der Plan die Wärmepumpe laufen lässt; `set_heat_boost` bleibt `0`.
+
+Im **Monitor** zeigt ein schmales Band oberhalb der SoC-/Preisachse die Entscheidungen für die geplanten Slots: orange = Komfort-Boost, grau = Sperre. Das Band rechnet die Regel auf den angezeigten Plan, ohne das Sperr-Gedächtnis aus früheren Zyklen.
+
+**Beispiel Loxone:**
+
+1. Virtual Inputs anlegen und in EHAL-Com mappen: `heatpump.waermepumpe.set_heat_boost` (z. B. `Earnie_Waermepumpe_Boost`) und `heatpump.waermepumpe.set_enable` (`Earnie_Waermepumpe_Freigabe`).
+2. **Boost:** `Earnie_Waermepumpe_Boost` = 1 schaltet die Intelligenten Raumregler von Eco auf Komfort (so wie bisher eine PV-Logik). Bei 0 zurück auf Eco.
+3. **Sperre mit Komfortschutz:** Wärmepumpe EIN = `Wärmeanforderung Klimaregler` UND (`Earnie_Waermepumpe_Freigabe` ODER `Komfortschutz`).
+4. **Komfortschutz** in Loxone, unabhängig von Earnie: z. B. ein Raum mehr als 0,5 K unter seinem Sollwert, oder die Sperre dauert schon länger als 2 h. So kann Earnie das Haus nie auskühlen lassen.
+5. Fällt Earnie aus, greift der Heartbeat-Watchdog in Loxone und gibt die Wärmepumpe frei.
 
 ## Haus Wärme: optionaler Wärmespeicher (`heat_storage`)
 
