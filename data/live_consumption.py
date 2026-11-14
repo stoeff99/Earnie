@@ -149,5 +149,33 @@ def apply_live_snapshot_to_matrix(
         config.get_flexible_consumers(),
     )
     row["expected_p_pv"] = snapshot["pv_kw"]
+    by_system = row.get("expected_p_pv_by_system")
+    if isinstance(by_system, dict) and by_system:
+        # The MILP power balance reads PV per system (inverter model): it must carry
+        # the measured total too, not the forecast.
+        row["expected_p_pv_by_system"] = live_pv_by_system(by_system, float(snapshot["pv_kw"]))
     row["consumption_mode"] = "live_snapshot"
     return updated
+
+
+def live_pv_by_system(forecast_by_system: dict[str, float], live_total_kw: float) -> dict[str, float]:
+    """Split the measured PV total over the PV systems in proportion to their forecast.
+
+    One system gets the whole measured value. Several systems without any forecast
+    power are split evenly (logged), since the live snapshot carries only the total.
+    """
+    total = max(0.0, float(live_total_kw))
+    keys = list(forecast_by_system)
+    if len(keys) == 1:
+        return {keys[0]: total}
+    forecast = {key: max(0.0, float(value or 0.0)) for key, value in forecast_by_system.items()}
+    forecast_sum = sum(forecast.values())
+    if forecast_sum <= 1e-9:
+        if total > 0.0:
+            logger.warning(
+                "Live-PV %.2f kW gleichmässig auf %d PV-Felder verteilt (Prognose 0).",
+                total,
+                len(keys),
+            )
+        return {key: total / len(keys) for key in keys}
+    return {key: total * forecast[key] / forecast_sum for key in keys}
