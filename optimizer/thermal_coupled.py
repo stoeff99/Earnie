@@ -30,11 +30,17 @@ def normalize_heat_storage(raw: dict | None) -> dict | None:
     volume = float(raw.get("volume_liters", 0.0) or 0.0)
     if volume <= 0.0:
         return None
+    from house_config.profile_schema_defaults import heat_storage_default
+
+    loss_default = float(heat_storage_default("heat_loss_kw_per_k"))
+    tol_default = float(heat_storage_default("tolerance_c"))
     return {
         "volume_liters": volume,
-        "heat_loss_kw_per_k": max(0.0, float(raw.get("heat_loss_kw_per_k", 0.02) or 0.02)),
-        "setpoint_c": float(raw.get("setpoint_c", 45.0)),
-        "tolerance_c": max(0.1, float(raw.get("tolerance_c", 5.0) or 5.0)),
+        "heat_loss_kw_per_k": max(
+            0.0, float(raw.get("heat_loss_kw_per_k", loss_default) or loss_default)
+        ),
+        "setpoint_c": float(raw.get("setpoint_c", heat_storage_default("setpoint_c"))),
+        "tolerance_c": max(0.1, float(raw.get("tolerance_c", tol_default) or tol_default)),
     }
 
 
@@ -204,7 +210,8 @@ def coupled_year_result(
     *,
     living_area_m2: float,
     building_class: int,
-    heat_pump_type: str,
+    heat_efficiency: float,
+    heat_electric: bool = True,
     persons: int,
     latitude: float,
     longitude: float,
@@ -224,6 +231,10 @@ def coupled_year_result(
     building_mass: str | None = None,
     house_tolerance_c: float | None = None,
     house_heat_loss_kw_per_k: float | None = None,
+    gross_floor_area_m2: float | None = None,
+    internal_gains: dict | None = None,
+    solar_gains: dict | None = None,
+    hourly_solar_gain_kw: pd.Series | None = None,
     start_house_temp_c: float | None = None,
 ) -> CoupledYearResult:
     """Run coupled store + house RC; return daily electric and hourly temps."""
@@ -236,7 +247,8 @@ def coupled_year_result(
     result = house_year_result(
         living_area_m2=living_area_m2,
         building_class=building_class,
-        heat_pump_type=heat_pump_type,
+        heat_efficiency=heat_efficiency,
+        heat_electric=heat_electric,
         persons=persons,
         latitude=latitude,
         longitude=longitude,
@@ -255,6 +267,10 @@ def coupled_year_result(
         building_mass=building_mass,
         house_tolerance_c=house_tolerance_c,
         house_heat_loss_kw_per_k=house_heat_loss_kw_per_k,
+        gross_floor_area_m2=gross_floor_area_m2,
+        internal_gains=internal_gains,
+        solar_gains=solar_gains,
+        hourly_solar_gain_kw=hourly_solar_gain_kw,
         start_house_temp_c=start_house_temp_c,
         start_store_temp_c=start_temp_c,
     )

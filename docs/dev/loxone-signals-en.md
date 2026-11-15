@@ -298,7 +298,7 @@ Default names. Grid/PV/battery **power** preferably via the EFM meter designatio
 | `get_ess_soc_min`                 | Read      | `Earnie_Batterie_SOC_Min` (optional)             | Discharge cut-off SoC %; MILP when `limits_from_live`                               |
 | `get_ess_soc_max`                 | Read      | `Earnie_Batterie_SOC_Max` (optional)             | Charge cut-off SoC %                                                                |
 | `get_ess_max_charge_power`        | Read      | `Earnie_Batterie_Max_Ladeleistung` (optional)    | Device max charge (Loxone kW → EHAL W)                                              |
-| `get_ess_max_discharge_power`     | Read      | `Earnie_Batterie_Max_Entladeleistung` (optional) | Device max discharge (Loxone kW → EHAL W)                                           |
+| `get_ess_max_discharge_power`     | Read      | `Earnie_Batterie_Max_Entladeleistung` (optional) | Device max discharge (Loxone kW → EHAL W). Static device values only (Huawei 37046/37048), **never** feed back `Earnie_EntladeLeistungs-Limit`: a read-back 0 locks the battery |
 | `sens_power_consumers`            | Read      | (optional)                                        | House load; otherwise derived                                                               |
 | `sens_temperature_outside`        | Read      | `Earnie_Aussentemperatur`                        | Outside temperature °C (house-wide; heat pump/pool)                                        |
 | `sens_absent_mode`                | Read      | `Earnie_Abwesend`                                | House absent / holiday mode 0/1 (OR with HK `absent_mode`)                                 |
@@ -346,6 +346,10 @@ Pool enables: default `Earnie_Pool_Freigabe` / `Earnie_Pool_Filter_Freigabe` in 
 | EHAL field | Meaning | Default Merker |
 | --- | --- | --- |
 | `sens_temperature_heat_storage` | Energy-equivalent `T_eq` (°C) | `Earnie_Waermespeicher_Temp_eq` |
+| `get_temperature_heat_storage_setpoint` / `_tolerance` | Controller's store band (°C / K); both mapped: Live plans with it | `Earnie_Waermespeicher_Soll` / `_Toleranz` |
+| `get_temperature_heat_storage_max`, `sens_temperature_heat_storage_top` | Maximum and top sensor (°C), recorded | `Earnie_Waermespeicher_Temp_max` / `_top` |
+| `sens_operating_mode`, `sens_sg_ready_state`, `sens_heat_power`, `sens_temperature_source` | Generator feedback (enum 0–6, state 1–4, kW, °C), recorded | `Earnie_Waermepumpe_Betriebsart` / `_SG_Ready` / `_Waermeleistung` / `_Temp_Quelle` |
+| `sens_temperature_dhw`, `get_temperature_dhw_min`, `sens_temperature_room`, `get_temperature_room_setpoint` | Hot water and room (°C), recorded | `Earnie_Warmwasser_Temp` / `_min`, `Earnie_Raum_Temp` / `_Soll` |
 | `sens_temperature_heat_storage_low` | Lowest immersion sensor `T_low` (°C) — WP-on hint when bottom is cold | `Earnie_Waermespeicher_Temp_low` |
 
 For stratified tanks `T_eq` must be the energy-equivalent mean (volume-weighted), not the top sensor alone. Guide: [waermespeicher-schichtung-teq.md](../konfiguration/waermespeicher-schichtung-teq.md).

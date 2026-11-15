@@ -42,7 +42,7 @@ SUSI P1 needs a heating rod that charges the heat storage — structurally the s
    - EV + wallbox: not a part (separate entities with an assignment relation, see Multi-EV / Wallboxes).
 5. **Consequences for 2.8:**
    - **SUSI P1:** the rod is `parts[]` entry `heating_rod` of the thermal consumer, no top-level `*_rod` consumer and no new synthetic sibling id. `parts[]` is introduced as an optional field in the 2.8 migration step; only the rod uses it in 2.8.
-   - **SUSI P2:** `internal_gain_factor` sits on the electrical unit (consumer or part) that draws the power; the migration sets baseload / generic 0.8, ev / thermal / heating rod 0. Parts inherit nothing — the field is explicit per part.
+   - **SUSI P2:** `internal_gain_factor` sits on the electrical unit (consumer or part) that draws the power; the migration sets baseload / generic 0.8, ev / thermal / heating rod 0. Parts inherit nothing — the field is explicit per part. *Implemented 2026-11-03 (`dm5.house_gains`, [house-gains.md](house-gains.md)): the Grundlast is not a consumer, so its factor is the profile field `baseload_internal_gain_factor`; `thermal_annual` and the heating rod must stay 0; the pool filter defaults to 0.*
    - **Pool merge** (drop `pool_filter`, its special cases and `migrate_pool_filter`) stays in 2.+1 as the owner item says; it migrates data into the already existing `parts[]` shape.
 6. **Not a blocker:** Binding P6 (Kennung rename cascade) only makes the later rename of the composite Kennung cheaper; D1 does not depend on it.
 
@@ -126,4 +126,4 @@ Status: **decided (2026-10-25).**
 
 - *VAT model* (2.+1): flag name `vat_deductible`, already in the profile since 2.8, link to this memo.
 - *Edibert integration* sub-item *Versioning + Netznutzung split*: the rule above (D3b), with the Edibert text.
-- SUSI P6 / migration step: add `vat_deductible: false`.
+- SUSI P6 / migration step: add `vat_deductible: false`. **Done 2026-11-03:** step `dm5.vat_deductible` (data model 5, after `dm5.heating_power`); loader `house_config.profiles_store.normalize_vat_deductible` (bool, missing = schema default `false`), serializer and house-configurator save pass it through; no UI field.

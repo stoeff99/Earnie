@@ -12,6 +12,7 @@ from ui.house_config_profile_session import (
 
 import streamlit as st
 
+from house_config.profile_schema_defaults import consumer_default, thermal_rc_default
 from house_config.thermal_labels import (
     CONSUMER_TYPE_LABELS,
 )
@@ -25,14 +26,12 @@ from house_config.currency_display import active_units, display_label
 from ui.house_config_profile_thermal_annual import (  # noqa: F401  (re-exported)
     _live_consumer_for_annual,
     _profile_geo_from_session,
-    _render_thermal_annual_building_fields,
     _render_thermal_annual_fields,
-    _render_thermal_annual_wp_preview,
-    _render_thermal_comfort_fields,
     _render_thermal_solar_fields,
     _render_thermal_storage_fields,
     _render_wp_annual_metric,
 )
+from ui.number_format import format_cent_kwh, format_euro
 
 
 _PASSTHROUGH_CONSUMER_KEYS = (
@@ -91,6 +90,29 @@ def _seed_land_widget_key(session_scope: str) -> str:
         st.session_state[land_key] = "AT"
     return land_key
 
+def _autoselect_grid_area(session_scope: str, land: str, region_key: str) -> None:
+    """Region ``on_change``: set the Netzbereich when exactly one catalog area lies in the region.
+
+    Keeps *Eigener Arbeitspreis* and a chosen area that lies in the new region; with zero or
+    several areas in the region the user picks. The caption under the Netzbereich says why.
+    """
+    from house_config.edibert_tariffs import area_in_region, region_grid_area
+    from house_config.own_grid_fee import OWN_AREA
+
+    region = str(st.session_state.get(region_key) or "")
+    area_key = _scoped_key(session_scope, "house_profile_nne_area")
+    current = st.session_state.get(area_key)
+    if not region or current == OWN_AREA:
+        return
+    areas = _load_grid_fee_catalog_for_ui()["areas"]
+    if current in areas and area_in_region(areas[current], land, region):
+        return
+    match = region_grid_area(areas, land, region)
+    if match is None:
+        return
+    st.session_state[area_key] = match
+
+
 def _render_region_select(*, session_scope: str, land: str) -> str:
     from house_config.edibert_tariffs import holiday_regions, region_label
 
@@ -103,8 +125,11 @@ def _render_region_select(*, session_scope: str, land: str) -> str:
         options=options,
         key=key,
         format_func=lambda code: region_label(land, code),
+        on_change=_autoselect_grid_area,
+        args=(session_scope, land, key),
         help=(
-            "Bundesland bzw. Kanton für den Feiertagskalender. Nur nötig für Tarife "
+            "Bundesland bzw. Kanton für den Feiertagskalender und den Netzbereich: "
+            "liegt in der Region genau ein Netzbereich, wird er gesetzt. Nötig für Tarife "
             "mit Zeitregeln nach Wochentag/Feiertag (Benutzertarife aus Edibert)."
         ),
     )
@@ -162,9 +187,10 @@ def _load_grid_fee_catalog_for_ui() -> dict:
 
 
 def _render_nne_area_fields(
-    catalog: dict, *, session_scope: str
+    catalog: dict, *, session_scope: str, land: str, region: str
 ) -> tuple[str | None, float]:
     """Netzbereich select plus own Arbeitspreis (user grid area) when chosen."""
+    from house_config.edibert_tariffs import region_grid_area, region_label
     from house_config.own_grid_fee import OWN_AREA
 
     areas = catalog["areas"]
@@ -186,6 +212,11 @@ def _render_nne_area_fields(
         ratios=WIDE_LABEL_RATIOS,
         key=area_key,
     )
+    if region and area_choice is not None and area_choice == region_grid_area(areas, land, region):
+        st.caption(
+            f"Einziger Netzbereich in Region {region_label(land, region)} — "
+            "wird beim Wählen der Region gesetzt."
+        )
     base_manual = 0.0
     if area_choice == OWN_AREA:
         base_manual = float(
@@ -194,7 +225,7 @@ def _render_nne_area_fields(
                 min_value=0.0,
                 step=0.001,
                 help=(
-                    "Konstanter Netznutzungs-Arbeitspreis netto (ohne USt), ohne Zeitregeln. "
+                    "Netznutzungs-Arbeitspreis netto (ohne USt). "
                     "0 = bewusst kein Netzentgelt."
                 ),
                 ratios=WIDE_LABEL_RATIOS,
@@ -205,40 +236,78 @@ def _render_nne_area_fields(
     return area_choice, base_manual
 
 
-def _show_nne_spec_caption(config: dict, catalog: dict) -> None:
-    """Resolved base price and active time rules of the chosen Netzbereich (via Edibert)."""
+def _resolved_grid_fee(config: dict):
+    """Grid fee of the form's ``netznutzung`` through Edibert; shows the error and returns ``None``."""
     from house_config.edibert_tariffs import cached_grid_fees, profile_grid_fee
     from runtime_store.persist_paths import resolve_grid_fees_json_path
 
-    _ = catalog  # the selection list; Edibert resolves from the same files
     try:
-        fee = profile_grid_fee(
+        return profile_grid_fee(
             "Formular", {"netznutzung": config}, cached_grid_fees(resolve_grid_fees_json_path())
         )
     except ValueError as exc:
         st.error(str(exc))
-        return
+        return None
+
+
+def _grid_rules_text(fee) -> str:
     active = ", ".join(rule.id for rule in fee.rules) or "keine"
     skipped = ", ".join(
         f"{item.rule_id} (status={item.detail})" if item.reason == "status"
         else f"{item.rule_id} ({item.reason})"
         for item in fee.skipped
     )
+    return f"aktive Zeitregeln: **{active}**" + (f" · übersprungen: {skipped}" if skipped else "")
+
+
+def _grid_parts_text(fee) -> str:
+    """Per-kWh parts and fixed amounts of a grid fee; empty without any."""
+    parts = []
+    if fee.components:
+        cent = sum(part.value for part in fee.components)
+        parts.append(f"Netzverlust und Abgaben: **{format_cent_kwh(cent, 3)}** netto")
+    if fee.fixed:
+        parts.append(f"feste Beträge: **{format_euro(fee.fixed_eur_year)}/Jahr** netto")
+    return " · ".join(parts)
+
+
+def _show_nne_spec_caption(config: dict) -> None:
+    """Resolved prices of the chosen Netzbereich (via Edibert)."""
+    fee = _resolved_grid_fee(config)
+    if fee is None:
+        return
+    parts = _grid_parts_text(fee)
     st.caption(
-        f"Basis-Arbeitspreis: **{fee.base_cent_kwh:.2f} {active_units().per_kwh}** netto · "
-        f"aktive Zeitregeln: **{active}**"
-        + (f" · übersprungen: {skipped}" if skipped else "")
+        f"Basis-Arbeitspreis: **{format_cent_kwh(fee.base_cent_kwh)}** netto · "
+        + _grid_rules_text(fee)
+        + (f" · {parts}" if parts else "")
     )
 
 
-def _render_nne_arbeitspreis(*, session_scope: str) -> dict:
+def _show_own_area_caption(config: dict, catalog: dict, session_scope: str) -> None:
+    """What the stored own area holds besides the work price; saving the form keeps it."""
+    own_id = st.session_state.get(_scoped_key(session_scope, "house_profile_nne_own_id"))
+    if not own_id or own_id not in catalog["areas"]:
+        return
+    fee = _resolved_grid_fee({**config, "area_id": own_id})
+    if fee is None or not (fee.rules or fee.skipped or fee.components or fee.fixed):
+        return
+    parts = _grid_parts_text(fee)
+    st.caption(
+        "Im eigenen Netzbereich gespeichert, bleibt erhalten: "
+        + _grid_rules_text(fee)
+        + (f" · {parts}" if parts else "")
+    )
+
+
+def _render_nne_arbeitspreis(*, session_scope: str, land: str, region: str) -> dict:
     """Netznutzung: Netzbereich aus Katalog oder eigener Arbeitspreis; Zeitregeln."""
     from house_config.netznutzung import METERING_UNMETERED
     from house_config.own_grid_fee import OWN_AREA, OWN_BASE_KEY
 
     catalog = _load_grid_fee_catalog_for_ui()
     area_choice, base_manual = _render_nne_area_fields(
-        catalog, session_scope=session_scope
+        catalog, session_scope=session_scope, land=land, region=region
     )
     include_draft = bool(
         labeled_checkbox(
@@ -253,9 +322,10 @@ def _render_nne_arbeitspreis(*, session_scope: str) -> dict:
         "include_status": ["verordnet", "entwurf"] if include_draft else ["verordnet"],
     }
     if area_choice == OWN_AREA:
+        _show_own_area_caption(config, catalog, session_scope)
         config[OWN_BASE_KEY] = base_manual
     elif area_choice is not None:
-        _show_nne_spec_caption(config, catalog)
+        _show_nne_spec_caption(config)
     else:
         st.warning("Netzbereich wählen — ohne Netzbereich wird das Profil nicht gespeichert.")
     return config
@@ -295,7 +365,9 @@ def _render_location_fields(*, session_scope: str) -> dict:
     default_pv_tilt, default_pv_azimuth = _render_pv_default_row(
         session_scope=session_scope
     )
-    netznutzung = _render_nne_arbeitspreis(session_scope=session_scope)
+    netznutzung = _render_nne_arbeitspreis(
+        session_scope=session_scope, land=land, region=region
+    )
     return {
         "land": land,
         "region": region,
@@ -319,7 +391,12 @@ def _render_thermal_rc_fields(
         "min_on_quarterhours": labeled_number_input(
             "Mindestlaufzeit (Viertelstunden)",
             min_value=1,
-            value=int(consumer.get("min_on_quarterhours", 8)),
+            value=int(
+                consumer.get(
+                    "min_on_quarterhours",
+                    consumer_default("min_on_quarterhours", consumer_type="thermal_rc"),
+                )
+            ),
             ratios=WIDE_LABEL_RATIOS,
             key=_scoped_key(session_scope, f"hc_rc_min_qh_{index}"),
         ),
@@ -327,28 +404,36 @@ def _render_thermal_rc_fields(
             "water_volume_liters": labeled_number_input(
                 "Thermisches Volumen (Liter)",
                 min_value=1.0,
-                value=float(rc.get("water_volume_liters", 6000.0) or 6000.0),
+                value=float(
+                    rc.get("water_volume_liters")
+                    or thermal_rc_default("water_volume_liters")
+                ),
                 step=100.0,
                 ratios=WIDE_LABEL_RATIOS,
                 key=_scoped_key(session_scope, f"hc_rc_vol_{index}"),
             ),
             "setpoint_c": labeled_number_input(
                 "Solltemperatur (°C)",
-                value=float(rc.get("setpoint_c", 36.5)),
+                value=float(rc.get("setpoint_c", thermal_rc_default("setpoint_c"))),
                 step=0.5,
                 key=_scoped_key(session_scope, f"hc_rc_set_{index}"),
             ),
             "tolerance_c": labeled_number_input(
                 "Toleranz (± °C)",
                 min_value=0.0,
-                value=float(rc.get("tolerance_c", 1.0) or 1.0),
+                value=float(
+                    rc.get("tolerance_c") or thermal_rc_default("tolerance_c")
+                ),
                 step=0.1,
                 key=_scoped_key(session_scope, f"hc_rc_tol_{index}"),
             ),
             "heat_loss_kw_per_k": labeled_number_input(
                 "Wärmeverlust U (kW/K)",
                 min_value=0.0,
-                value=float(rc.get("heat_loss_kw_per_k", 0.1) or 0.1),
+                value=float(
+                    rc.get("heat_loss_kw_per_k")
+                    or thermal_rc_default("heat_loss_kw_per_k")
+                ),
                 format="%.4f",
                 step=0.001,
                 key=_scoped_key(session_scope, f"hc_rc_u_{index}"),
@@ -357,7 +442,10 @@ def _render_thermal_rc_fields(
                 "Heizwirkungsgrad",
                 min_value=0.01,
                 max_value=1.0,
-                value=float(rc.get("heating_efficiency", 0.95) or 0.95),
+                value=float(
+                    rc.get("heating_efficiency")
+                    or thermal_rc_default("heating_efficiency")
+                ),
                 step=0.01,
                 key=_scoped_key(session_scope, f"hc_rc_eff_{index}"),
             ),

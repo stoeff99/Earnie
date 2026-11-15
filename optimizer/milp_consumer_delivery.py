@@ -28,7 +28,7 @@ from .milp_consumer_vars import (
     _min_on_hours,
     _planned_consumer_kwh_in_slots,
 )
-from .thermal_flex_context import is_thermal_flex_consumer
+from .thermal_flex_context import is_heating_rod_consumer, is_thermal_flex_consumer
 from .slot_duration import DEFAULT_DT_H
 
 if TYPE_CHECKING:
@@ -44,6 +44,45 @@ def _max_deliverable_kwh(
 ) -> float:
     _, max_kw = power_limits_kw(consumer)
     return len(eligible_indices) * max_kw * float(dt_h)
+
+
+def generic_block_slots(eligible_indices: list[int], min_on_slots: int) -> list[int]:
+    """Slots of ``eligible_indices`` that lie in a contiguous run of at least ``min_on_slots``.
+
+    A generic flex consumer runs in whole blocks of ``min_on_quarterhours`` slots. Eligible
+    slots in a run shorter than one block cannot deliver anything, so they are no capacity:
+    a cycle that would start there has to end outside the eligible window (for example the
+    one hour of a 2.5 h run that is still inside a book ending at 08:00).
+    """
+    min_slots = max(1, int(min_on_slots))
+    ordered = sorted(set(int(index) for index in eligible_indices))
+    blocks: list[int] = []
+    run: list[int] = []
+    for index in ordered:
+        if run and index != run[-1] + 1:
+            if len(run) >= min_slots:
+                blocks.extend(run)
+            run = []
+        run.append(index)
+    if len(run) >= min_slots:
+        blocks.extend(run)
+    return blocks
+
+
+def deliverable_indices(
+    consumer: dict,
+    eligible_indices: list[int],
+    book_indices: list[int] | None = None,
+) -> list[int]:
+    """Eligible slots that can really deliver: inside the book, and for a generic flex
+    consumer only those in a run of at least one ``min_on`` block (``generic_block_slots``)."""
+    indices = list(eligible_indices)
+    if book_indices is not None:
+        book = set(book_indices)
+        indices = [index for index in indices if index in book]
+    if generic_flex_window(consumer):
+        return generic_block_slots(indices, _min_on_hours(consumer))
+    return indices
 
 
 def _eligible_slot_labels(matrix: list, eligible_indices: list[int]) -> list[str]:
@@ -91,13 +130,15 @@ def _diagnostics_planned_entry(
         )
         eligible = [index for index in eligible if index in generic_eligible]
     _, max_kw = power_limits_kw(consumer)
+    deliverable = deliverable_indices(consumer, eligible)
     max_deliverable = _max_deliverable_kwh(
-        consumer, eligible, dt_h=DEFAULT_DT_H
+        consumer, deliverable, dt_h=DEFAULT_DT_H
     )
     effective_target = min(target, max_deliverable)
     entry.update(
         {
             "eligible_count": len(eligible),
+            "deliverable_count": len(deliverable),
             "eligible_slots": _eligible_slot_labels(matrix, eligible),
             "max_kw": round(float(max_kw), 3),
             "max_deliverable_kwh": round(max_deliverable, 3),
@@ -236,7 +277,7 @@ def filter_feasible_consumers(
         )
         capacity_indices = eligible if eligible else consumer_indices
         max_deliverable = _max_deliverable_kwh(
-            consumer, capacity_indices, dt_h=dt_h
+            consumer, deliverable_indices(consumer, capacity_indices), dt_h=dt_h
         )
         if target > max_deliverable + 1e-6 and verbose:
             from .thermal_flex_context import is_thermal_flex_consumer
@@ -298,6 +339,41 @@ def _add_urgent_min_asap_constraint(
     model.prob += _delivery_energy_expr(model, consumer, asap) >= effective_urgent
 
 
+def consumer_delivery_eligible_indices(
+    matrix: list[dict[str, Any]],
+    horizon: int,
+    consumer: dict,
+    schedule_indices: list[int],
+    ctx: dict | None,
+    filter_ctx: dict | None,
+) -> tuple[list[int], list[int]]:
+    """``(candidate, eligible)`` slots of one consumer's delivery in the horizon.
+
+    Charging window minus native filter slots, intersected with the generic flex window.
+    Also the window source of the SE reference ladder (same windows as the MILP).
+    """
+    consumer_indices = schedule_indices_for_consumer(
+        matrix, horizon, schedule_indices, consumer, ctx
+    )
+    eligible = consumer_flex_eligible_indices(
+        matrix[:horizon],
+        consumer,
+        consumer_indices,
+        ctx,
+        filter_ctx,
+    )
+    if generic_flex_window(consumer):
+        generic_eligible = set(
+            consumer_generic_eligible_indices(
+                matrix[:horizon],
+                consumer,
+                consumer_indices,
+            )
+        )
+        eligible = [index for index in eligible if index in generic_eligible]
+    return consumer_indices, eligible
+
+
 def _resolve_delivery_eligible_indices(
     model: MilpHorizonModel,
     matrix: list[dict[str, Any]],
@@ -306,26 +382,9 @@ def _resolve_delivery_eligible_indices(
     ctx: dict | None,
     filters: dict[str, dict],
 ) -> list[int]:
-    cid = consumer["id"]
-    consumer_indices = schedule_indices_for_consumer(
-        matrix, model.horizon, schedule_indices, consumer, ctx
+    consumer_indices, eligible = consumer_delivery_eligible_indices(
+        matrix, model.horizon, consumer, schedule_indices, ctx, filters.get(consumer["id"])
     )
-    eligible = consumer_flex_eligible_indices(
-        matrix[: model.horizon],
-        consumer,
-        consumer_indices,
-        ctx,
-        filters.get(cid),
-    )
-    if generic_flex_window(consumer):
-        generic_eligible = set(
-            consumer_generic_eligible_indices(
-                matrix[: model.horizon],
-                consumer,
-                consumer_indices,
-            )
-        )
-        eligible = [index for index in eligible if index in generic_eligible]
     return apply_slot_availability_constraints(
         model.prob,
         model.consumer_on,
@@ -346,6 +405,7 @@ def _add_one_consumer_delivery_constraints(
     charging_contexts: dict[str, dict],
     filters: dict[str, dict],
     verbose: bool,
+    book_indices: list[int] | None = None,
 ) -> None:
     cid = consumer["id"]
     target = remaining.get(cid, 0.0)
@@ -363,9 +423,25 @@ def _add_one_consumer_delivery_constraints(
             )
         return
     _, max_kw = power_limits_kw(consumer)
+    # Only slots inside the book count (``block_flex_outside_book`` forces the rest to 0),
+    # and a generic flex consumer needs room for a whole block. Otherwise the constraint
+    # would be infeasible and the whole step would fall back to the automatic mode; the
+    # undelivered energy stays in the remaining target of the next step.
+    deliverable = deliverable_indices(consumer, eligible, book_indices)
     max_deliverable = _max_deliverable_kwh(
-        consumer, eligible, dt_h=model.dt_h
+        consumer, deliverable, dt_h=model.dt_h
     )
+    if max_deliverable <= 1e-9:
+        if verbose:
+            logger.warning(
+                "%s: Ziel (%.2f kWh) in diesem Schritt nicht lieferbar (%s zulässige Slots, "
+                "kein ganzer Block von %s Slots im Buch) – bleibt im Restziel.",
+                consumer["name"],
+                target,
+                len(eligible),
+                _min_on_hours(consumer),
+            )
+        return
     effective_target = min(target, max_deliverable)
     model.prob += _delivery_energy_expr(model, consumer, eligible) >= effective_target
     _add_urgent_min_asap_constraint(
@@ -410,10 +486,12 @@ def _add_consumer_delivery_constraints(
     verbose: bool,
     *,
     filter_contexts: dict[str, dict] | None = None,
+    book_indices: list[int] | None = None,
 ) -> None:
     filters = filter_contexts or {}
     for consumer in model.planned_consumers:
-        if is_thermal_flex_consumer(consumer):
+        # Thermal day targets and the heating rod's caps live in thermal_flex_context.
+        if is_thermal_flex_consumer(consumer) or is_heating_rod_consumer(consumer):
             continue
         _add_one_consumer_delivery_constraints(
             model,
@@ -424,6 +502,7 @@ def _add_consumer_delivery_constraints(
             charging_contexts,
             filters,
             verbose,
+            book_indices,
         )
 
 

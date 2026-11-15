@@ -27,12 +27,12 @@ Einige Seiten hängen nicht von `EARNIE_UI_MODES` ab:
 - **Hauskonfigurator** und **Szenarienkonfigurator:** Sie werden je nach Fortschritt der Einrichtung freigeschaltet (`ui/setup_readiness.py`).
 - **Analyse Verbrauch & Kosten:** Die Seite erscheint nur mit `live_environment` und nur im Abschnitt Live-Cockpit. Ohne Live-Verbindung zur Smarthome-Steuerung zeigt sie einen Hinweis statt der Analyse. Die Analyse nutzt rollierende **7-/28-Tage**-Charts (keine Kalenderwochen) und eine Kennzahl über die letzten **365 Tage** vorhandener Log-Daten.
 
-Die Sidebar enthält oben Setup-Hinweise und **„Konfiguration speichern / laden“**. Diese Funktion exportiert und importiert die Config-Sidecars und `uploads/` als ZIP (siehe [Speichern / Laden](../konfiguration/speichern-laden.md)).
+Die Sidebar enthält oben Setup-Hinweise und **„Sichern & Übertragen“**. Dort liegen der Export und Import der Config-Sidecars und `uploads/` als ZIP (siehe [Speichern / Laden](../konfiguration/speichern-laden.md)) und das Support-Paket (siehe [Betrieb → Support-Paket](../einrichtung/betrieb.md#support-paket-debug-dump)).
 
 Unten in der Sidebar liegt der Abschnitt **Info / About** mit folgenden Inhalten:
 
 - Banner der Wahrheit und Version.
-- Kontakt über ein **GitHub-Issue** mit Art, Thema und Beschreibung; optional eine lokale Kontakt-ZIP.
+- Kontakt über ein **GitHub-Issue** mit Art, Thema und Beschreibung; ein lokales ZIP für den Support erstellt **Sichern & Übertragen → Support-Paket**.
 - Privater Ausnahmekanal `support@earnie-hems.com` für Registry-Anfragen und vertrauliche Inhalte.
 
 ### Navigationsabschnitte (nach vollständiger Einrichtung)
@@ -58,6 +58,15 @@ Chart- und Panel-Details: [Charts & Panels](charts.md).
 - **Darstellung:** Am Desktop zeigt die Seite ein Fenster SA₀→SA₂, mobil zwei benachbarte Segmente von Sonnenaufgang zu Sonnenaufgang.
 
 **Abwesenheitsmodus:** Ist der wirksame Live-Abwesenheitsmodus aktiv, zeigt die Seite unter dem Titel den Hinweis „Abwesenheitsmodus aktiv“, optional mit der Quelle Earnie, Smarthome oder beide. Auslöser ist der Schalter im Hausprofil **oder** das Anlagen-Feld `sens_absent_mode` am aktiven Backend (Loxone-Merker, HA-Entity oder OpenEMS `component/Channel`). Konfiguration: [Flexible Verbraucher](../konfiguration/flexible-verbraucher.md#abwesenheitsmodus-live).
+
+**Leistungspreis:** Hat das Live-Szenario eine **Bezugsgrenze** oder der Netzbereich im laufenden Monat einen **Leistungspreis**, zeigt die Seite unter dem Titel den Abschnitt „Leistungspreis“:
+
+- **Monatsspitze** (höchste gemessene Viertelstunde des Netzbezugs), **Abgerechnet** (Spitze, mindestens die Mindestleistung des Netzbereichs), **Bisher (brutto)** (Betrag des Monats mit der USt des Bezugstarifs) und **Nächstes kW** (was ein kW mehr Spitze diesen Monat kostet). Darunter stehen Messbeginn, Zeitpunkt der Spitze und fehlende Viertelstunden. Ist im Monat noch keine Viertelstunde gemessen, steht „unbekannt“ statt 0 und beim Betrag der Mindestbetrag. Earnie misst selbst; maßgeblich ist die Abrechnung des Netzbetreibers.
+- Mit Bezugsgrenze: Grenze, Reserve und bis wohin geplant wird. Liegt die Spitze schon darüber, plant Earnie bis zur Spitze.
+- **Warnung**, wenn der letzte Plan die Grenze in Viertelstunden nicht halten kann: Anzahl, erste Viertelstunde und häufigste Ursache (Grundlast, Batterie oder Wechselrichter an der Leistungsgrenze, Batterie leer oder Reserve, Verbraucher muss sein Ziel erreichen, keine Ursache erkannt). Gemessene Viertelstunden über der Grenze nennt eine Zeile darunter, mit „Lastprognose“, wenn der Plan die Grenze hielt. Einzelheiten stehen im aufklappbaren Bereich „Details zur Bezugsgrenze“.
+- **Hinweise:** Grenze unter der Mindestleistung des Netzbereichs (Earnie plant trotzdem mit der eingegebenen Grenze), Grenze inaktiv bis zum Beginn des Leistungspreises, oder der letzte Zyklus hat die Grenze nicht eingeplant (Automatikbetrieb oder Fenster ohne Optimierung).
+- **Beobachtungsmodus** (Bezugsgrenze mit „Im Live-Betrieb: Beobachten“): Ein Hinweis sagt, dass Earnie ohne die Grenze plant und steuert. Die Zahlen oben bleiben die gemessenen. Eine zweite Zeile vergleicht die Viertelstunden seit Beginn der Beobachtung: **Spitze ohne Earnie** (höchste gemessene Viertelstunde in dieser Zeit), **Spitze mit Earnie** (geschätzte Spitze derselben Viertelstunden, wenn Earnie die Grenze eingehalten hätte), **Ersparnis (geschätzt)** (Leistungspreis bei der Spitze ohne Earnie minus Leistungspreis bei der Spitze mit Earnie) und **Mehrkosten Energie** (was das Einhalten der Grenze im aktuellen Plan über den Planungshorizont an Strom mehr kostet, keine Monatssumme). Geschätzt wird je Viertelstunde: gemessener Bezug plus die Änderung, die ein zweiter Plan mit Grenze vorgesehen hätte. Dieser Vergleichsplan startet jedes Mal vom tatsächlichen Zustand von Batterie und Verbrauchern, die Werte sind also eine Schätzung. Darunter stehen der Beginn der Beobachtung und die Viertelstunden ohne Vergleich (Automatik, Modus gerade umgestellt); sie zählen in keiner der beiden Spitzen. Ist die Lastprognose einer Viertelstunde weit daneben, ist es auch die Schätzung. Die Warnung bezieht sich auf den Vergleichsplan, und die Zeile über der Grenze nennt die geschätzten Viertelstunden. Unter „Details zur Bezugsgrenze“ zeigt die Tabelle **Wo Earnie eingegriffen hätte** je Viertelstunde den gemessenen und den geschätzten Bezug, die Batterie ohne und mit Grenze und geänderte Verbraucher.
+- Lässt sich der Abschnitt nicht berechnen, etwa weil dem Netzbereich für den Monat ein Leistungspreis fehlt oder dem Live-Szenario mit Bezugsgrenze die Wahl „Im Live-Betrieb“ fehlt, zeigt er den Fehler; der Rest der Seite bleibt bedienbar.
 
 Eine **Nachrechnung** beliebiger Kalendertage bietet der Monitor nicht.
 
@@ -120,7 +129,7 @@ Details: [Charts & Panels](charts.md).
 
 ### Kennzahlen-Horizont
 
-**Chart 2** zeigt die Kosten-Annotationen **BL Ziel**, **Optimiert** und **Ersparnis** **pro SA-Tag**. Mobil gilt das nur für den sichtbaren Tag, am Desktop für SA₀→SA₂ in zwei Spalten. Am laufenden Tag erscheinen **Ersparnis bisher** (SA bis jetzt) und **Ersparnis erwartet** (ganzer Tag). Im grauen Bereich zeigt das Chart zusätzlich die Kurve **Ersparnis bisher**.
+**Chart 2** ist eine Kontoansicht: Kontostand mit und ohne Earnie seit Fensterstart, links von Jetzt gebucht aus dem Ersparnis-Buch, rechts der Plan. Ein Umschalter wählt **Ist bei Jetzt** oder **Gemeinsamer Start**; der Abstand zwischen den Linien ist die Ersparnis (**Bisher**, **Erwartet**, **Gesamt**). Abgeschlossene Tage zeigen ihr **Ergebnis** aus dem Buch. Details: [Charts](charts.md#chart-2-kontostand-mit-und-ohne-earnie).
 
 Der **Energievergleich** und das MILP-Matching beziehen sich weiterhin auf **Jetzt → SA₂**, also den vollen Planungshorizont. Die Chart-Fenster dienen nur der Darstellung: Kumulierte Kurven darin sind Ausschnitte und bilden keine eigene Matching-Periode.
 
@@ -139,15 +148,46 @@ Die Seite hat **keine Cockpit-Parameter**. In der Hauptansicht werden nur Szenar
 
 Der Szenario-Explorer hat keine Sonnenaufgang-Navigation wie der Monitor und führt das Produktiv-Log nicht mit ein. Für den täglichen Produktivbetrieb ist er nicht gedacht.
 
-> **Hinweis zur Neuoptimierung:** Der Szenario-Explorer steuert die MILP-Commit-Weite über `commit_hours` in `backtesting_scenarios.json`. Der Standard **24** entspricht ungefähr einer Planung ohne Rückkopplung (open-loop), **1** bedeutet stündliche Neuoptimierung. Das ist nicht dasselbe wie die periodische Neuoptimierung im Live-Betrieb; eine 1:1-Übereinstimmung mit der Live-Optimierung (MPC) ist nicht nachgewiesen.
+> **Hinweis zur Neuoptimierung:** Der Szenario-Explorer steuert die MILP-Commit-Weite über `commit_hours` in `backtesting_scenarios.json`. Der Standard **24** entspricht ungefähr einer Planung ohne Rückkopplung (open-loop), **1** bedeutet stündliche Neuoptimierung. Das ist nicht dasselbe wie die periodische Neuoptimierung im Live-Betrieb; eine 1:1-Übereinstimmung mit der Live-Optimierung (MPC) ist nicht nachgewiesen. `commit_hours: 1` unterstützt nur **eine** Hausbatterie; mit mehreren Hausbatterien bricht der Lauf mit einer Fehlermeldung ab, dann `commit_hours` größer als 1 verwenden.
 >
 > Standard-Horizont ist `sunrise_window`: Das MILP rechnet SA₀→SA₂, gebucht wird jeweils **[SA₁, SA₂)**. SA₂ ist der Sonnenaufgang am `ready_by`-Tag, SA₁ der des Vortags. Die Buchungsfenster schließen damit lückenlos und ohne Doppelbuchung aneinander, auch wenn die Sonne erst nach `ready_by` aufgeht. `ready_by` ist nur die Lade-Deadline des E-Autos; die Ladenacht davor liegt im selben Buchungsfenster. Alle flexiblen Verbraucher laufen nur innerhalb des Buchungsfensters. Der SoC wird an den Sonnenaufgang-Übergängen verkettet. `fixed_24h` bleibt als Vergleichsmodus erhalten (an `ready_by` ausgerichtete 24-h-Fenster).
 
+### Ersparnis gegen Standard-Regeln
+
+Ganz oben in den Ergebnissen steht je Szenario, was Earnie über Batterie und freie Regeln hinaus bringt: die Kosten mit **Standard-Regeln** minus die Kosten mit Earnie. Darunter steht der **Anteil der Regeln**: (Ohne Steuerung − Standard-Regeln) / (Ohne Steuerung − Earnie). Er sagt, wie viel der gesamten Ersparnis man auch ohne Earnie erreicht. Spart Earnie gegen „Ohne Steuerung“ nichts, steht dort „keine Gesamtersparnis“.
+
+Der Bereich **Alle Stufen** zeigt die ganze Leiter. Jede Stufe ergänzt genau eine Sache:
+
+| Stufe | Batterie | Flexible Verbraucher | Vorbild |
+|---|---|---|---|
+| **Ohne Steuerung** | keine | zu ihren üblichen Zeiten | die frühere Referenz ohne Optimierung |
+| **Wechselrichter-Eigenverbrauch** | Eigenverbrauchsmodus des Wechselrichters | zu ihren üblichen Zeiten | was der Wechselrichter von sich aus tut |
+| **Standard-Regeln** | Eigenverbrauchsmodus des Wechselrichters | lokale Regeln | E-Auto: PV-Überschussladen wie evcc, mit Zielladung. Heizung und Pool: SG-Ready-Sperre bei hohen Preisen und Anhebung bei Überschuss. Geräte mit Startfenster: „günstigste Stunden“ wie in Home Assistant. Bei negativem Einspeisepreis wird nicht eingespeist, überschüssige PV-Leistung wird abgeregelt |
+| **Earnie** | MILP-Plan | MILP-Plan | der optimierte Lauf des Szenarios |
+
+Die Regeln sind großzügig angesetzt: Sie sehen den Überschuss am Zähler und die veröffentlichten Day-Ahead-Preise, wissen aber nichts von anderen Verbrauchern und vom Ladestand der Batterie. Alle Stufen liefern dieselbe Energie, buchen dieselben Preise und halten dieselben Ladefenster ein.
+
+**Warum die Ersparnis kleiner ist als früher:** Bisher verglich der Szenario-Explorer nur mit einer Anlage ohne Batterie und ohne jede Regel. Die Ersparnis schrieb Earnie damit auch das zu, was der Wechselrichter und kostenlose Regeln ohnehin leisten. Die neue Zahl ist kleiner, weil die Methode strenger ist. Die Optimierung rechnet nicht schlechter, und die frühere Vergleichszeile bleibt als „Ohne Steuerung“ erhalten.
+
+**Grenzen:** Earnie plant im Szenario-Explorer mit bekannten PV-, Last- und Preisverläufen, die Ersparnis ist also eine Obergrenze. Läufe von vor dieser Auswertung zeigen einen Hinweis, bis sie neu berechnet sind.
+
 ### Gesamtkosten und -Verbrauch
 
-Die Tabelle **Gesamtkosten und -Verbrauch** hat die Spalten `Szenario`, `Jahres Verbrauch [kWh]`, `Speicher-Standby [kWh]`, `Gesamtverbrauch [kWh]` (= Jahres Verbrauch + Speicher-Standby), `Jahres Kosten [€]`, `Δ vs Referenz [€]` und `Hinweis`. Das Delta bezieht sich immer auf die Zeile der Live-Referenz.
+Die Tabelle **Gesamtkosten und -Verbrauch** hat die Spalten `Szenario`, `Jahres Verbrauch [kWh]`, `Speicher-Standby [kWh]`, `Gesamtverbrauch [kWh]` (= Jahres Verbrauch + Speicher-Standby), `CO2 [kg]`, `Jahres Kosten [€]`, `Ersparnis vs. Standard-Regeln [€]`, `Δ vs Referenz [€]` und `Hinweis`. Das Delta bezieht sich immer auf die Zeile der Live-Referenz.
 
-Der volumetrische **Netznutzung Arbeitspreis** (je Netzgebiet aus `grid_fees.json`) fließt in die Kosten des Szenario-Explorers ein. Ein **Leistungspreis** wird noch nicht berücksichtigt. Nachrechnen: [Tarife und Preise nachrechnen](../referenz/tarife-quellen.md).
+Je Szenario kommen zwei Referenzzeilen dazu. **Wechselrichter-Eigenverbrauch** rechnet die Batterie im Eigenverbrauchsmodus des Wechselrichters, die flexiblen Verbraucher laufen zu ihren üblichen Zeiten. **Standard-Regeln** ergänzt freie Regeln: PV-Überschussladen, SG-Ready-Sperre bei hohen Preisen und „günstigste Stunden“ für Geräte mit Startfenster sowie einen Heizstab neben einer Brennstoffheizung, der mit seiner Nennleistung läuft, sobald nach Verbrauchern und Batterie so viel eingespeist würde und der Wärmebedarf des Tages es zulässt. Die Wärme des Heizstabs spart Brennstoff. Beide Zeilen liefern je Fenster und Verbraucher dieselbe Energie wie die Optimierung. Ein Heizstab hat kein Energieziel: In **Wechselrichter-Eigenverbrauch** läuft er nicht. Szenarien mit gleichem Haus, Speicher, Tarif und gleichen Verbrauchern teilen sich diese Zeilen.
+
+`Ersparnis vs. Standard-Regeln [€]` ist die Zeile **Standard-Regeln** des Szenarios minus seine optimierten Kosten, also das, was Earnie über freie Regeln hinaus bringt. Der Betrag steht ohne Vorzeichen, mit „gespart“ oder „mehr ausgegeben“ dabei; so auch die Kennzahl oben und die Spalte „Ersparnis zur Stufe davor“ in „Alle Stufen“. `Δ vs Referenz [€]` und der Ladestand am Periodenende behalten ihr Vorzeichen, weil sie Unterschiede sind. Dieser Wert ist kleiner als die Ersparnis gegen die Referenz ohne Optimierung. Das ist Absicht und kein Rückschritt: Die Batterie und einfache Regeln hätte man auch ohne Earnie. Earnie plant im Szenario-Explorer mit bekannten PV-, Last- und Preisverläufen, der Wert ist deshalb eine Obergrenze.
+
+Die Spalte bewertet auch den Ladestand der Batterie am Periodenende. Endet Earnie voller als die Standard-Regeln, wird die zusätzlich gespeicherte Energie gutgeschrieben, endet es leerer, wird sie abgezogen. Bewertet wird sie wie im Ersparnis-Buch: Energie × Wirkungsgrad × mittlerer Bezugspreis des letzten Tages. Die Spalte `Hinweis` nennt den Betrag und beide Ladestände. Bei kurzen Zeiträumen kann das viel ausmachen, bei einem Jahr kaum. `Jahres Kosten [€]` bleibt der gebuchte Betrag ohne diese Bewertung.
+
+In der **Abweichungsliste** vergleichen die Charts eines Fensters ebenfalls mit den Standard-Regeln. Chart 2 zeigt als Kontoansicht den Kontostand beider Läufe seit Fensterstart (gebuchte Kosten je Slot, beide beginnen bei 0 €); der Abstand am Fensterende ist die Ersparnis des Fensters (**Plan**) und passt zur Tabelle (ohne die Bewertung des Ladestands). Chart 1 zeigt weiter den Plan dieses Fensters, dazu Ladestand und flexible Verbraucher der Standard-Regeln. Den Abschnitt SA₀→SA₁ hat das Vorfenster gebucht, dort können Chart 1 und Chart 2 voneinander abweichen. Slots außerhalb des Zeitraums zählen nicht mit, der Text unter den Charts nennt sie. Ältere Läufe ohne Standard-Regeln zeigen wie bisher **BL Ziel**.
+
+Enden die Börsenpreise vor dem Tag nach dem Zeitraum (zum Beispiel bei einem Lauf bis heute vor der Preisveröffentlichung), rechnet die Preissperre am letzten Nachmittag mit den vorhandenen Preisen. Die Spalte `Hinweis` nennt dann die betroffenen Stunden.
+
+Heizt ein Hausprofil mit einem Brennstoff (Öl, Gas, Pellets, Fernwärme, Stückholz, siehe [Wärmequelle](../konfiguration/flexible-verbraucher.md#haus-wärme-wärmequelle-heat_source)), kommen die Spalten `Brennstoff [kWh]` und `Brennstoffkosten [€]` dazu. `Jahres Kosten [€]` enthält dann Strom **und** Brennstoff. Den Brennstoff rechnet Earnie aus der Jahressimulation über die gebuchten Tage; die Wärme eines Heizstabs zieht er davon ab. `CO2 [kg]` = Netzbezug × 226 g/kWh plus Brennstoff × Faktor des Energieträgers. Das gilt für alle Stufen der Leiter: `Ersparnis vs. Standard-Regeln [€]` vergleicht also Strom und Brennstoff, und ein Heizstab zählt mit seinem Mehrstrom und dem gesparten Brennstoff. Dieselben Zahlen liefert der Studienexport `scripts.run_reference_ladder` als CSV, dort je Stufe auch Bezug, Einspeisung, Brennstoff, Heizstab und Batterie-Durchsatz in kWh.
+
+Der volumetrische **Netznutzung Arbeitspreis** (je Netzgebiet aus `grid_fees.json`) fließt in die Kosten des Szenario-Explorers ein. Trägt der Netzbereich einen **Leistungspreis**, weist die Seite ihn in einer eigenen Tabelle aus und rechnet ihn in die Kosten ein. Die Planung kennt den Preis selbst nicht, die SE-Optimierung plant aber unter einer eingetragenen **Bezugsgrenze**. Die Tabelle zeigt dann die Grenze, die gebuchten Viertelstunden darüber, die Tage mit mindestens einer solchen Viertelstunde und die **Hauptursachen** mit der Zahl ihrer Viertelstunden. Die Ursache kommt aus dem Plan des Fensters, wie in der Warnung auf der Monitor-Seite (Grundlast, Batterie oder Wechselrichter an der Leistungsgrenze, Batterie leer oder Reserve, Verbraucher muss sein Ziel erreichen, keine Ursache erkannt, Grenze nicht eingeplant). Dazu kommen zwei Ursachen nur im Szenario-Explorer: „Monatsspitze schon höher, Grenze angehoben“, wenn der Plan seine Grenze hielt, diese aber nach einer früheren Spitze des Monats über der eingetragenen lag, und „Gebucht über dem Plan“, wenn die gebuchte Viertelstunde über dem lag, was der Plan erlaubte. Die Vergleichsstufen L0 bis L2 planen ohne Grenze. Eine einmal überschrittene Grenze steigt für den Rest des Monats auf die neue Spitze, deshalb kann ein einziger Ausreißer viele Viertelstunden über der Grenze nach sich ziehen. Nachrechnen: [Tarife und Preise nachrechnen](../referenz/tarife-quellen.md).
 
 **Datenquelle für `Jahres Verbrauch [kWh]` und `Speicher-Standby [kWh]`:** Alle Zeilen (Historisch, Szenario-Referenzen `ref:…`, optimierte Szenarien) lesen dieselbe Quelle `booked_consumption[<id>]` in `backtesting_log.json`. Das ist die Summe der gebuchten Stundenreihe aus `backtesting.csv`, also der Reihe, die auch Kosten, Bezug und Einspeisung trägt.
 
@@ -171,7 +211,7 @@ Die Spalte **Hinweis** zeigt:
 - **Doppelt gebuchte Zeitslots:** Die Reihe enthält Slots mehrfach; im Jahres Verbrauch zählen sie einmal, in den Kosten mehrfach.
 - **Zeitslots ohne Buchung:** Zwischen erstem und letztem Slot fehlen Stunden. Verbrauch und Kosten dieser Stunden fehlen in der Zeile.
 - **Andere Zeitslots als die Referenz:** Die gebuchten Slot-Mengen von Szenario und Referenz weichen ab (z. B. durch Fenster, die nur die Optimierung bucht). Kosten und Verbrauch beider Zeilen stehen dann nicht ganz auf derselben Basis.
-- **Abweichung > 5 % zur Live-Referenz** (`CONSUMPTION_TOLERANCE_REL`): Warnung mit Verweis auf **Info / About**, Bereich Kontakt. Dort ein öffentliches Issue ohne Secrets anlegen; die vollständige Config-ZIP nur privat an `support@earnie-hems.com` senden. Die Zeilen Historisch und Live-Referenz bleiben ohne diese Warnung.
+- **Abweichung > 5 % zur Live-Referenz** (`CONSUMPTION_TOLERANCE_REL`): Warnung mit Verweis auf **Info / About**, Bereich Kontakt. Dort ein öffentliches Issue ohne Secrets anlegen; die vollständige Config-ZIP nur privat an `support@earnie-hems.com` senden. Die Zeilen Historisch und Live-Referenz bleiben ohne diese Warnung. Szenarien mit einem anderen Heizsystem als die Live-Referenz (`heating_system_ids`, z. B. Gas statt Wärmepumpe) prüft Earnie nicht, weil sich ihr Stromverbrauch gewollt ändert. Den Strom eines Heizstabs zieht Earnie vor dem Vergleich ab (Block `heat_fuel` im Lauf-Log: `heating_systems`, `rod_kwh`).
 
 Ältere Läufe ohne `booked_consumption` zeigen „—“ und den Hinweis, den Szenario-Explorer neu zu berechnen.
 

@@ -1,6 +1,13 @@
 # pv_forecast.py
-import logging
+"""PV forecast per PV system: forecast.solar, else Open-Meteo tilted irradiance.
 
+Order per system: forecast.solar (API, in-memory cache, disk cache across restarts,
+Shadow: Prod feed) → Open-Meteo ``global_tilted_irradiance`` for the system's tilt and
+azimuth → :class:`PvForecastUnavailableError` (the cycle aborts; no invented curve).
+"""
+import json
+import logging
+import os
 import requests
 from datetime import datetime, timedelta
 from typing import List, Optional
@@ -9,18 +16,36 @@ from runtime_store.cycle_duration_stats import (
     EVENT_PV_FORECAST_FETCH,
     record_event as record_cycle_event,
 )
+from runtime_store.persist_paths import runtime_path
 from runtime_store.planning_clock import planning_now
 
 logger = logging.getLogger(__name__)
 
+SOURCE_FORECAST_SOLAR = "forecast_solar"
+SOURCE_OPEN_METEO = "open_meteo"
+SOURCE_NONE = "none"
+SOURCE_SOLCAST = "solcast"
+
+# Prod records the forecast.solar feed only on a real API call (15-min guard, longer under
+# a rate limit); the Shadow default of 120 s would discard it between two calls.
+SHADOW_FEED_MAX_AGE_SEC = 3 * 3600
+DISK_CACHE_FILENAME = "pv_forecast_cache.json"
+DISK_CACHE_MAX_AGE = timedelta(hours=6)
+
 # =========================================================================
 # GLOBALE CACHE-VARIABLEN (Für Rate-Limiting & API-Schonung)
 # =========================================================================
-_LAST_API_CALL: Optional[datetime] = None
+# Per URL (one per PV system): a shared stamp let the first fetched system starve the others.
+_LAST_API_CALL_BY_URL: dict[str, datetime] = {}
 _CACHED_HOURLY_WATTS_BY_URL: dict[str, dict] = {}
+_DISK_CACHE_CHECKED_URLS: set[str] = set()
 _RATE_LIMIT_RETRY_AT: Optional[datetime] = None
 _LAST_FETCH_SOURCE: str = "api"
-_USING_SYNTHETIC_FALLBACK: bool = False
+_SOURCE_BY_SYSTEM: dict[str, str] = {}
+
+
+class PvForecastUnavailableError(RuntimeError):
+    """Neither forecast.solar nor Open-Meteo delivered a forecast for a PV system."""
 
 
 def _as_naive_local(value: datetime) -> datetime:
@@ -64,8 +89,71 @@ def get_api_status() -> dict:
         "retry_at": retry_at.isoformat() if retry_at else None,
         "source": _LAST_FETCH_SOURCE,
         "cache_available": bool(_CACHED_HOURLY_WATTS_BY_URL),
-        "using_synthetic_fallback": _USING_SYNTHETIC_FALLBACK,
+        "source_by_system": dict(_SOURCE_BY_SYSTEM),
+        "open_meteo_systems": sorted(
+            sid for sid, src in _SOURCE_BY_SYSTEM.items() if src == SOURCE_OPEN_METEO
+        ),
     }
+
+
+def _disk_cache_path() -> str:
+    return runtime_path(DISK_CACHE_FILENAME)
+
+
+def _read_disk_cache_file() -> dict:
+    path = _disk_cache_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError) as exc:
+        print(f"[WARN] PV-Prognose-Cache {path} nicht lesbar ({exc}) — wird ignoriert.")
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_disk_cache(url: str, hourly_watts: dict, fetched_at: datetime) -> None:
+    """Persist the last successful forecast.solar answer per URL (survives restarts)."""
+    data = _read_disk_cache_file()
+    data[url] = {"fetched_at": fetched_at.isoformat(), "watts": hourly_watts}
+    path = _disk_cache_path()
+    tmp = f"{path}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as handle:
+            json.dump(data, handle)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[WARN] PV-Prognose-Cache {path} nicht schreibbar ({exc}).")
+
+
+def _load_disk_cache(url: str, now_time: datetime) -> Optional[dict]:
+    """Disk entry for *url* if at most ``DISK_CACHE_MAX_AGE`` old; seeds the API guard."""
+    entry = _read_disk_cache_file().get(url)
+    if not isinstance(entry, dict):
+        return None
+    watts = entry.get("watts")
+    try:
+        fetched_at = datetime.fromisoformat(str(entry.get("fetched_at")))
+    except ValueError:
+        return None
+    if not isinstance(watts, dict) or not watts:
+        return None
+    age = _as_naive_local(now_time) - _as_naive_local(fetched_at)
+    if age > DISK_CACHE_MAX_AGE:
+        print(
+            f"[info] PV-Prognose-Cache auf der Festplatte zu alt "
+            f"({age.total_seconds() / 3600:.1f} h) — wird nicht genutzt."
+        )
+        return None
+    _CACHED_HOURLY_WATTS_BY_URL[url] = watts
+    _LAST_API_CALL_BY_URL[url] = _as_naive_local(fetched_at)
+    print(
+        f"[cache] forecast.solar-Cache von der Festplatte geladen "
+        f"(Abruf {fetched_at.isoformat()}, {len(watts)} Zeitstempel)."
+    )
+    return watts
 
 
 def _set_fetch_source(source: str) -> None:
@@ -93,10 +181,11 @@ def _return_cached_or_none(
 
 
 def _pre_fetch_cached_or_none(
+    url: str,
     now_time: datetime,
     cached: Optional[dict],
 ) -> tuple[bool, Optional[dict]]:
-    """Rate-limit / 15-min cooldown. Returns (should_return, value)."""
+    """Rate-limit (per IP) / 15-min cooldown (per URL). Returns (should_return, value)."""
     global _RATE_LIMIT_RETRY_AT
 
     now_cmp = _as_naive_local(now_time)
@@ -116,9 +205,8 @@ def _pre_fetch_cached_or_none(
     if retry_at and now_cmp >= retry_at:
         _RATE_LIMIT_RETRY_AT = None
 
-    if _LAST_API_CALL and (now_cmp - _as_naive_local(_LAST_API_CALL)) < timedelta(
-        minutes=15
-    ):
+    last_call = _LAST_API_CALL_BY_URL.get(url)
+    if last_call and (now_cmp - _as_naive_local(last_call)) < timedelta(minutes=15):
         if cached is not None:
             _set_fetch_source("cache")
             print(
@@ -136,7 +224,7 @@ def _store_hourly_watts_from_response(
     now_time: datetime,
 ) -> Optional[dict]:
     """Parse API response, update URL cache on success, else fall back to cache."""
-    global _LAST_API_CALL, _RATE_LIMIT_RETRY_AT
+    global _RATE_LIMIT_RETRY_AT
 
     feed_key = f"ext:pv_forecast:{_shadow_url_hash(url)}"
     if response.status_code == 429:
@@ -180,9 +268,10 @@ def _store_hourly_watts_from_response(
         print("[FEHLER] forecast.solar: leeres watts-Ergebnis.")
         return _return_cached_or_none(cached, reason="leeres watts")
     _CACHED_HOURLY_WATTS_BY_URL[url] = hourly_watts
-    _LAST_API_CALL = now_time
+    _LAST_API_CALL_BY_URL[url] = now_time
     _RATE_LIMIT_RETRY_AT = None
     _set_fetch_source("api")
+    _save_disk_cache(url, hourly_watts, now_time)
     return hourly_watts
 
 
@@ -207,17 +296,22 @@ def _record_fetch_failure_and_cache(
 def _check_and_fetch_api_data(url: str, kwp: float) -> Optional[dict]:
     """Prüft Cache-Gültigkeit und holt ggf. neue API-Daten (Cache pro URL)."""
     now_time = datetime.now()
-    cached = _CACHED_HOURLY_WATTS_BY_URL.get(url)
 
     from runtime_store.shadow.mode import is_shadow_mode
-    from runtime_store.shadow.replay import replay_ext_payload
+    from runtime_store.shadow.hooks import replay_ext_payload
     from runtime_store.shadow.transport import ext_get
+
+    cached = _CACHED_HOURLY_WATTS_BY_URL.get(url)
+    # Prod only: Shadow reads the Prod feed and must not seed Prod's API guard.
+    if cached is None and not is_shadow_mode() and url not in _DISK_CACHE_CHECKED_URLS:
+        _DISK_CACHE_CHECKED_URLS.add(url)
+        cached = _load_disk_cache(url, now_time)
 
     feed_key = f"ext:pv_forecast:{_shadow_url_hash(url)}"
 
     def _replay() -> dict | None:
         # Never call forecast.solar from Shadow (shared IP rate limit with Prod).
-        data = replay_ext_payload(feed_key)
+        data = replay_ext_payload(feed_key, max_age_s=SHADOW_FEED_MAX_AGE_SEC)
         if isinstance(data, dict):
             hourly_watts = data.get("result", {}).get("watts", {})
             if hourly_watts:
@@ -225,7 +319,7 @@ def _check_and_fetch_api_data(url: str, kwp: float) -> Optional[dict]:
         return None
 
     def _live() -> Optional[dict]:
-        should_return, early = _pre_fetch_cached_or_none(now_time, cached)
+        should_return, early = _pre_fetch_cached_or_none(url, now_time, cached)
         if should_return:
             return early
         record_cycle_event(EVENT_PV_FORECAST_FETCH)
@@ -300,22 +394,57 @@ def _shadow_ext_record(
     safe_record(key, ok=ok, payload=payload, status=status, error=error)
 
 
-def _map_hourly_data_to_vector(hourly_watts: dict, target_hours: list) -> tuple[list, bool]:
-    """Map API hourly watts onto target slots (QH inherits parent clock hour)."""
-    from optimizer.slot_duration import floor_to_hour_slot
+def _forecast_solar_curve(hourly_watts: dict) -> list[tuple[datetime, float]]:
+    """forecast.solar ``watts`` as (local time, W) points, sorted by time."""
+    return sorted(
+        (datetime.strptime(key, "%Y-%m-%d %H:%M:%S"), float(watts))
+        for key, watts in hourly_watts.items()
+    )
 
-    pv_vector = [0.0] * len(target_hours)
+
+def _curve_mean_kw(
+    curve: list[tuple[datetime, float]], start: datetime, end: datetime
+) -> float:
+    """Mean kW over [start, end) of the piecewise linear curve (0 outside its points)."""
+    area_wh = 0.0
+    for (t0, w0), (t1, w1) in zip(curve, curve[1:]):
+        lo, hi = max(t0, start), min(t1, end)
+        if hi <= lo:
+            continue
+        span_s = (t1 - t0).total_seconds()
+        w_lo = w0 + (w1 - w0) * (lo - t0).total_seconds() / span_s
+        w_hi = w0 + (w1 - w0) * (hi - t0).total_seconds() / span_s
+        area_wh += (w_lo + w_hi) / 2.0 * (hi - lo).total_seconds() / 3600.0
+    return area_wh / ((end - start).total_seconds() / 3600.0) / 1000.0
+
+
+def _map_hourly_data_to_vector(hourly_watts: dict, target_hours: list) -> tuple[list, bool]:
+    """Mean kW per target slot from forecast.solar ``watts``.
+
+    ``watts`` is the power **at** each timestamp (hours plus sunrise / sunset points);
+    forecast.solar's ``watt_hours_period`` is the trapezoid of these points. A slot gets
+    the trapezoid mean over its own interval, so hourly slots match the period energy
+    and QH slots follow the curve. Slots outside the points (night, beyond the data) get 0.
+    """
+    from optimizer.slot_duration import slot_step
+
+    curve = _forecast_solar_curve(hourly_watts)
+    first, last = curve[0][0], curve[-1][0]
+    starts = [dt.replace(tzinfo=None) for dt in target_hours]
+    pv_vector = [0.0] * len(starts)
     success_count = 0
 
-    for idx, target_dt in enumerate(target_hours):
-        key_str = target_dt.strftime("%Y-%m-%d %H:%M:%S")
-        if key_str not in hourly_watts:
-            parent = floor_to_hour_slot(target_dt)
-            key_str = parent.strftime("%Y-%m-%d %H:%M:%S")
-        if key_str in hourly_watts:
-            watts = hourly_watts[key_str]
-            pv_vector[idx] = round(watts / 1000.0, 3)
-            success_count += 1
+    for idx, start in enumerate(starts):
+        if idx + 1 < len(starts):
+            end = starts[idx + 1]
+        elif idx > 0:
+            end = start + (start - starts[idx - 1])
+        else:
+            end = start + slot_step()
+        if end <= first or start >= last:
+            continue
+        pv_vector[idx] = round(_curve_mean_kw(curve, start, end), 3)
+        success_count += 1
 
     if success_count > 0:
         print(
@@ -327,26 +456,42 @@ def _map_hourly_data_to_vector(hourly_watts: dict, target_hours: list) -> tuple[
     return pv_vector, False
 
 
-def _generate_seasonal_fallback(target_hours: list, kwp: float) -> list:
-    """Generiert eine saisonale Fallback-Prognose."""
-    pv_vector = [0.0] * len(target_hours)
-    current_month = planning_now().month
+def _open_meteo_pv_vector(
+    *,
+    lat: float,
+    lon: float,
+    tilt: float,
+    azimuth: float,
+    kwp: float,
+    target_hours: list,
+) -> list[float]:
+    """PV kW per target slot from Open-Meteo ``global_tilted_irradiance`` (forecast).
 
-    if current_month in [11, 12, 1]:
-        max_peak = kwp * 0.15
-    elif current_month in [2, 3, 10]:
-        max_peak = kwp * 0.40
-    else:
-        max_peak = kwp * 0.65
+    Same orientation convention as forecast.solar (azimuth 0° = south, -90° = east).
+    Hourly GTI is the mean of the preceding hour, so slot hour ``h`` takes the value
+    stamped ``h + 1`` (as ``scripts/pv_forecast_compare.py``). kW = GTI / 1000 × kWp
+    (``irradiance_wm2_to_pv_kw``, same conversion as the Open-Meteo archive path).
+    """
+    from data.open_meteo_solar_archive import irradiance_wm2_to_pv_kw
+    from data.outdoor_forecast import get_hourly_tilted_irradiance_forecast_wm2
+    from optimizer.slot_duration import floor_to_hour_slot
 
-    for idx, target_dt in enumerate(target_hours):
-        hour = target_dt.hour
-        if 6 <= hour <= 18:
-            normalized_time = (hour - 12) / 6
-            simulated_kw = max_peak * (1 - (normalized_time ** 2))
-            pv_vector[idx] = round(max(0.0, simulated_kw), 3)
-
-    return pv_vector
+    start = floor_to_hour_slot(min(target_hours))
+    end = floor_to_hour_slot(max(target_hours))
+    wall_hours = int((end - start).total_seconds() // 3600) + 1
+    wm2 = get_hourly_tilted_irradiance_forecast_wm2(
+        horizon=wall_hours + 1,
+        tilt_deg=tilt,
+        azimuth_deg=azimuth,
+        latitude=lat,
+        longitude=lon,
+        start=start,
+    )
+    kw_by_hour = {
+        start + timedelta(hours=i): irradiance_wm2_to_pv_kw(wm2[i + 1], kwp)
+        for i in range(wall_hours)
+    }
+    return [kw_by_hour[floor_to_hour_slot(dt)] for dt in target_hours]
 
 
 def _forecast_one_system(
@@ -357,22 +502,43 @@ def _forecast_one_system(
     azimuth: float,
     kwp: float,
     target_hours: list,
-) -> tuple[list[float], bool]:
-    """Returns (vector, used_api). used_api False means seasonal fallback."""
+) -> tuple[list[float], str]:
+    """Returns (vector, source); raises :class:`PvForecastUnavailableError`."""
     if kwp <= 0.0:
-        return [0.0] * len(target_hours), True
+        return [0.0] * len(target_hours), SOURCE_NONE
 
     url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{tilt}/{azimuth}/{kwp}"
     hourly_watts = _check_and_fetch_api_data(url, kwp)
     if hourly_watts:
         pv_vector, success = _map_hourly_data_to_vector(hourly_watts, target_hours)
         if success:
-            return pv_vector, True
-        print(
-            "[WARN] API-/Cache-Daten empfangen, aber keine passenden Zeitstempel für "
-            f"die {len(target_hours)} Zielstunden gefunden. Nutze Fallback."
+            return pv_vector, SOURCE_FORECAST_SOLAR
+        reason = (
+            f"Daten ohne passende Zeitstempel für {len(target_hours)} Zielstunden "
+            f"(Quelle {_LAST_FETCH_SOURCE})"
         )
-    return _generate_seasonal_fallback(target_hours, kwp), False
+    else:
+        reason = f"keine Daten (Quelle {_LAST_FETCH_SOURCE})"
+
+    print(
+        f"[WARN] forecast.solar: {reason} — PV-Prognose für Neigung {tilt}°, "
+        f"Azimut {azimuth}° aus Open-Meteo-Einstrahlung."
+    )
+    try:
+        vector = _open_meteo_pv_vector(
+            lat=lat,
+            lon=lon,
+            tilt=tilt,
+            azimuth=azimuth,
+            kwp=kwp,
+            target_hours=target_hours,
+        )
+    except Exception as exc:
+        raise PvForecastUnavailableError(
+            f"Keine PV-Prognose für Anlage (Neigung {tilt}°, Azimut {azimuth}°, "
+            f"{kwp} kWp): forecast.solar {reason}; Open-Meteo: {exc}"
+        ) from exc
+    return vector, SOURCE_OPEN_METEO
 
 
 def _sum_vectors(vectors: list[list[float]], length: int) -> list[float]:
@@ -404,8 +570,13 @@ def _planning_pv_systems_for_forecast() -> list[dict]:
 def get_hourly_pv_forecast_by_system_for_hours(
     target_hours: list,
 ) -> dict[str, List[float]]:
-    """Per-PV-system forecast (kW) keyed by system id (Inverter P3 pass-through)."""
-    global _USING_SYNTHETIC_FALLBACK
+    """Per-PV-system forecast (kW) keyed by system id (Inverter P3 pass-through).
+
+    Raises :class:`PvForecastUnavailableError` when a system has neither
+    forecast.solar nor Open-Meteo data; the source per system is in
+    :func:`get_api_status` (``source_by_system``).
+    """
+    global _SOURCE_BY_SYSTEM
 
     if not target_hours:
         raise ValueError(
@@ -413,21 +584,21 @@ def get_hourly_pv_forecast_by_system_for_hours(
             "mindestens eine Zielstunde."
         )
 
+    _SOURCE_BY_SYSTEM = {}
     systems = _planning_pv_systems_for_forecast()
     if not systems:
-        _USING_SYNTHETIC_FALLBACK = False
         return {}
 
     lat = float(config.get("LATITUDE", cast=float))
     lon = float(config.get("LONGITUDE", cast=float))
     solcast_branches = dict(config.get("EHAL_MQTT_PV_SOLCAST") or {})
     by_system: dict[str, List[float]] = {}
+    sources: dict[str, str] = {}
     solcast_usage: dict[str, dict] = {}
-    any_fallback = False
     for system in systems:
         sid = str(system.get("id") or "").strip() or "pv"
 
-        def forecast_solar(system=system) -> tuple[list[float], bool]:
+        def forecast_solar(system=system) -> tuple[list[float], str]:
             return _forecast_one_system(
                 lat=lat,
                 lon=lon,
@@ -439,23 +610,22 @@ def get_hourly_pv_forecast_by_system_for_hours(
 
         branch = solcast_branches.get(sid)
         if branch:
-            vector, used_api, solcast_usage[sid] = _solcast_with_gaps(
+            vector, source, solcast_usage[sid] = _solcast_with_gaps(
                 sid, branch, target_hours, forecast_solar
             )
         else:
-            vector, used_api = forecast_solar()
+            vector, source = forecast_solar()
         by_system[sid] = vector
-        if not used_api:
-            any_fallback = True
+        sources[sid] = source
     if solcast_branches:
         _record_solcast_usage(solcast_branches, solcast_usage, set(by_system))
 
-    _USING_SYNTHETIC_FALLBACK = any_fallback
-    if any_fallback:
-        totals = _sum_vectors(list(by_system.values()), len(target_hours))
+    _SOURCE_BY_SYSTEM = sources
+    substituted = sorted(sid for sid, src in sources.items() if src == SOURCE_OPEN_METEO)
+    if substituted:
         print(
-            f"[info] Synthetischer PV-Fallback (teilweise/gesamt) — "
-            f"Summen-Max: {max(totals):.2f} kW über {len(systems)} Anlage(n)."
+            f"[WARN] PV-Prognose aus Open-Meteo statt forecast.solar für "
+            f"{', '.join(substituted)} ({len(substituted)}/{len(systems)} Anlage(n))."
         )
     return by_system
 
@@ -465,8 +635,11 @@ def _solcast_with_gaps(
     branch: str,
     target_hours: list,
     forecast_solar,
-) -> tuple[list[float], bool, dict]:
+) -> tuple[list[float], str, dict]:
     """Solcast kW per slot; hours without a Solcast value come from Forecast.Solar.
+
+    Returns ``(vector, source, usage)``; ``source`` is :data:`SOURCE_SOLCAST` when Solcast
+    covers every slot, else the source of the gap filler (forecast.solar / Open-Meteo).
 
     Slots after tomorrow are outside what the plugin publishes (logged at info); a gap
     inside today/tomorrow means missing data and is logged as a warning.
@@ -479,12 +652,12 @@ def _solcast_with_gaps(
     now = planning_now(tz)
     series = solcast_forecast.solcast_series(branch, target_hours, tz)
     missing = [idx for idx, value in enumerate(series.values) if value is None]
-    used_api = True
+    source = SOURCE_SOLCAST
     vector = [0.0 if value is None else value for value in series.values]
     gap_hours: list[str] = []
     beyond_hours: list[str] = []
     if missing:
-        fallback, used_api = forecast_solar()
+        fallback, source = forecast_solar()
         for idx in missing:
             vector[idx] = fallback[idx]
             key = solcast_forecast.hour_key(target_hours[idx], tz)
@@ -518,7 +691,7 @@ def _solcast_with_gaps(
         "gap_hours": gap_hours,
         "beyond_hours": len(beyond_hours),
     }
-    return vector, used_api, usage
+    return vector, source, usage
 
 
 def _record_solcast_usage(

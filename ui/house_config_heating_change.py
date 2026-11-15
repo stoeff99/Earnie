@@ -1,0 +1,224 @@
+"""Hauskonfigurator: warning before a reference-system change is saved.
+
+Design ``docs/dev/heating-system-variants.md`` § Decision (changing the reference system). A
+change of ``heat_source.type`` of the referenced catalog entry, compared with the saved house
+file, holds the auto-save while the house has consumption data from the old system:
+
+- measured CSV data: remove the CSV data or keep the heating system;
+- only ``annual_kwh``: adjust the annual consumption (confirm the value in the form) or keep
+  the heating system.
+
+There is no third option. Heat-pump type, efficiency, power, storage and rod are calibration
+and save without a warning; a change reverted before saving is no change.
+"""
+from __future__ import annotations
+
+import streamlit as st
+
+from ui.house_config_historical_csv import session_keys
+from ui.house_config_profile_session import _SESSION_CONSUMERS_KEY, _scoped_key
+
+_ACCEPT_PREFIX = "house_heating_change_ok::"
+# Per-run container under the heat-source select box; the gate renders its warning there.
+_SLOT_PREFIX = "house_heating_change_slot::"
+# Heat-source widgets of the „Heizsystem“ section (ui/house_config_profile_thermal_annual.py).
+_HEAT_SOURCE_WIDGETS = (
+    "hc_heat_source_{index}",
+    "hc_wp_{index}",
+    "hc_heat_eff_use_{index}",
+    "hc_heat_eff_{index}",
+    "hc_fuel_price_use_{index}",
+    "hc_fuel_price_{index}",
+)
+
+
+def _type_label(source_type: str) -> str:
+    from ui.house_config_profile_thermal_annual import _HEAT_SOURCE_LABELS
+
+    return _HEAT_SOURCE_LABELS.get(source_type, source_type)
+
+
+def _kwh(value: float) -> str:
+    return f"{value:,.0f}".replace(",", ".")
+
+
+def _token(change: dict) -> str:
+    return f"{change['consumer_id']}:{change['old_heat_source'].get('type')}->{change['new_type']}"
+
+
+def _pending_change(
+    *, is_new: bool, profile_id: str, resolved: list[dict]
+) -> dict | None:
+    if is_new:
+        return None
+    from house_config.heating_systems import (
+        load_heating_systems_for_house,
+        read_raw_json,
+        reference_heat_source_changes,
+    )
+    from runtime_store.persist_paths import resolve_house_profiles_json_path
+
+    path = resolve_house_profiles_json_path()
+    changes = reference_heat_source_changes(
+        resolved,
+        saved_house_doc=read_raw_json(path),
+        heating_systems=load_heating_systems_for_house(path),
+        profile_id=profile_id,
+    )
+    return changes[0] if changes else None
+
+
+def reserve_gate_slot(session_scope: str, index: int) -> None:
+    """Reserve the place for the warning right under the heat-source select box.
+
+    The gate runs after the whole form (it needs the resolved consumers); without this slot
+    the warning would appear far below the changed field and be overlooked.
+    """
+    st.session_state[f"{_SLOT_PREFIX}{session_scope}::{index}"] = st.container()
+
+
+def _take_slots(session_scope: str) -> dict[int, object]:
+    """This run's slots by consumer index; removed so no stale slot survives the run."""
+    prefix = f"{_SLOT_PREFIX}{session_scope}::"
+    keys = [key for key in st.session_state if str(key).startswith(prefix)]
+    return {int(str(key)[len(prefix):]): st.session_state.pop(key) for key in keys}
+
+
+def _accept(accept_key: str, token: str) -> None:
+    st.session_state[accept_key] = token
+
+
+def _remove_csv_data(
+    accept_key: str, token: str, preview_id: str, index: int, use_key: str
+) -> None:
+    """Drop the measured data of the old system: house load CSVs and the consumer's meter."""
+    from ui.house_config_historical_modes import _component_upload_keys
+
+    keys = session_keys(preview_id)
+    for name in ("verbrauch", "battery", "grid"):
+        st.session_state[keys[name]] = ""
+        # The path inputs re-sync from their pending key before they render.
+        st.session_state[_component_upload_keys(keys[name])["pending"]] = ""
+    consumers = st.session_state.get(_SESSION_CONSUMERS_KEY) or []
+    if index < len(consumers):
+        consumers[index]["use_profile_csv"] = False
+    # The checkbox re-seeds from the consumer.
+    st.session_state.pop(use_key, None)
+    _accept(accept_key, token)
+
+
+def _keep_heating_system(session_scope: str, index: int, old_heat_source: dict) -> None:
+    """Restore the saved heat source in the form.
+
+    The widget values are set, not popped: a popped key makes the widget fall back to its
+    start index in Python, while the browser keeps showing the value it had (heat-source
+    select box on the new type, fields of the old one).
+    """
+    consumers = st.session_state.get(_SESSION_CONSUMERS_KEY) or []
+    if index < len(consumers):
+        consumer = consumers[index]
+        consumer["heat_source"] = dict(old_heat_source)
+        if isinstance(consumer.get("thermal"), dict):
+            consumer["thermal"]["heat_source"] = dict(old_heat_source)
+    from ui.house_config_profile_thermal_annual import _heat_source_select_start
+
+    source_type, hp_type = _heat_source_select_start(old_heat_source)
+    efficiency = old_heat_source.get("efficiency")
+    fuel_price = old_heat_source.get("fuel_price")
+    values = {
+        "hc_heat_source_{index}": source_type,
+        "hc_wp_{index}": hp_type,
+        "hc_heat_eff_use_{index}": efficiency not in (None, ""),
+        "hc_heat_eff_{index}": None if efficiency in (None, "") else float(efficiency),
+        "hc_fuel_price_use_{index}": fuel_price not in (None, ""),
+        "hc_fuel_price_{index}": None if fuel_price in (None, "") else float(fuel_price),
+    }
+    for pattern in _HEAT_SOURCE_WIDGETS:
+        key = _scoped_key(session_scope, pattern.format(index=index))
+        value = values[pattern]
+        if value is None:
+            st.session_state.pop(key, None)
+        else:
+            st.session_state[key] = value
+
+
+def render_reference_change_gate(
+    *,
+    session_scope: str,
+    is_new: bool,
+    profile_id: str,
+    annual_kwh: float,
+    resolved: list[dict],
+    hist: dict,
+    preview_id: str,
+) -> bool:
+    """Warning with the two choices; True while the change holds the auto-save."""
+    from house_config.heating_systems import consumption_data_kind
+
+    accept_key = _ACCEPT_PREFIX + session_scope
+    slots = _take_slots(session_scope)
+    change = _pending_change(is_new=is_new, profile_id=profile_id, resolved=resolved)
+    if change is None:
+        st.session_state.pop(accept_key, None)
+        return False
+    token = _token(change)
+    if st.session_state.get(accept_key) == token:
+        return False
+    kind = consumption_data_kind(
+        {"annual_kwh": annual_kwh, "consumers": resolved, **hist}, change["consumer_id"]
+    )
+    if kind is None:
+        return False
+    old_label = _type_label(str(change["old_heat_source"].get("type")))
+    new_label = _type_label(change["new_type"])
+    index = int(change["index"])
+    # The heat-source section of the changed consumer always renders before the gate.
+    if index not in slots:
+        raise RuntimeError(
+            f"Heizsystem-Warnung: kein Platz unter der Wärmequelle von Verbraucher {index} "
+            "reserviert (reserve_gate_slot)."
+        )
+    box = slots[index]
+    if kind == "csv":
+        box.warning(
+            f"Heizsystem geändert ({old_label} → {new_label}), noch nicht gespeichert: Die "
+            f"CSV-Messdaten des Hauses stammen vom bisherigen Heizsystem ({old_label}) und "
+            f"passen nicht zum neuen. Messdaten entfernen und zu {new_label} wechseln, oder bei "
+            f"{old_label} bleiben."
+        )
+        keep_col, change_col = box.columns(2)
+        change_col.button(
+            f"Messdaten entfernen und zu {new_label} wechseln",
+            key=_scoped_key(session_scope, "house_heating_change_remove_csv"),
+            on_click=_remove_csv_data,
+            args=(
+                accept_key,
+                token,
+                preview_id,
+                index,
+                _scoped_key(session_scope, f"hc_use_profile_csv_{index}"),
+            ),
+        )
+    else:
+        box.warning(
+            f"Heizsystem geändert ({old_label} → {new_label}), noch nicht gespeichert: Der "
+            f"Jahresverbrauch ({_kwh(annual_kwh)} kWh/a) gilt für das bisherige Heizsystem "
+            f"({old_label}). Jahresverbrauch oben an das neue Heizsystem anpassen und zu "
+            f"{new_label} wechseln, oder bei {old_label} bleiben. Ist der Wert schon eine "
+            "Schätzung für das neue Heizsystem (z. B. Neubau), ihn unverändert lassen; der "
+            "Wechsel übernimmt den Jahresverbrauch, wie er oben steht."
+        )
+        keep_col, change_col = box.columns(2)
+        change_col.button(
+            f"Zu {new_label} wechseln",
+            key=_scoped_key(session_scope, "house_heating_change_accept_annual"),
+            on_click=_accept,
+            args=(accept_key, token),
+        )
+    keep_col.button(
+        f"Bei {old_label} bleiben",
+        key=_scoped_key(session_scope, "house_heating_change_keep"),
+        on_click=_keep_heating_system,
+        args=(session_scope, index, change["old_heat_source"]),
+    )
+    return True

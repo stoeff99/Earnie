@@ -10,12 +10,12 @@
         "hint": {
             "label": "Hinweis",
             "symbol": "triangle-up",
-            "color": "#f1c40f"
+            "color": "#27ae60"
         },
         "warning": {
             "label": "Warnung",
             "symbol": "diamond",
-            "color": "#e67e22"
+            "color": "#f1c40f"
         },
         "error": {
             "label": "Fehler",
@@ -85,9 +85,27 @@
             "scope": "battery",
             "when": [
                 "mode_is_forced_charge",
-                "battery_power_below_tolerance"
+                "battery_charge_energy_below_ratio"
             ],
-            "message": "Zwangs-Laden nicht ausgeführt"
+            "message": "Zwangs-Laden: Zielenergie deutlich verfehlt ({ratio_pct:.0f} %, Soll {soll_kwh:.2f} kWh, Ist {ist_kwh:.2f} kWh)",
+            "params": {
+                "max_ratio": 0.6
+            }
+        },
+        {
+            "id": "battery_forced_charge_target_missed",
+            "enabled": true,
+            "category": "warning",
+            "priority": 78,
+            "scope": "battery",
+            "when": [
+                "mode_is_forced_charge",
+                "battery_charge_energy_below_ratio"
+            ],
+            "message": "Zwangs-Laden: Zielenergie nicht erreicht ({ratio_pct:.0f} %, Soll {soll_kwh:.2f} kWh, Ist {ist_kwh:.2f} kWh)",
+            "params": {
+                "max_ratio": 0.8
+            }
         },
         {
             "id": "waermepumpe_enable_no_start",

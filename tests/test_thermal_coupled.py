@@ -153,7 +153,7 @@ def test_no_storage_uses_house_rc_not_legacy_open_loop():
         {
             "living_area_m2": 120.0,
             "building_class": 3,
-            "heat_pump_type": "luft",
+            "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
             "persons": 2,
             "latitude": 48.2,
             "longitude": 11.0,
@@ -174,7 +174,7 @@ def test_coupled_solar_reduces_summer_wp_vs_no_solar():
     base = {
         "living_area_m2": 120.0,
         "building_class": 3,
-        "heat_pump_type": "luft",
+        "heat_efficiency": 3.5,
         "persons": 2,
         "latitude": 48.2,
         "longitude": 11.0,
@@ -206,7 +206,7 @@ def test_coupled_winter_demand_needs_wp():
     daily = daily_electric_kwh(
         living_area_m2=120.0,
         building_class=3,
-        heat_pump_type="luft",
+        heat_efficiency=3.5,
         persons=2,
         latitude=48.2,
         longitude=11.0,
@@ -228,7 +228,7 @@ def test_coupled_hourly_climate_path():
     daily = daily_electric_kwh(
         living_area_m2=100.0,
         building_class=3,
-        heat_pump_type="luft",
+        heat_efficiency=3.5,
         persons=2,
         latitude=48.2,
         longitude=11.0,
@@ -252,7 +252,7 @@ def test_coupled_hourly_store_temps_match_day_count():
     kwargs = dict(
         living_area_m2=100.0,
         building_class=3,
-        heat_pump_type="luft",
+        heat_efficiency=3.5,
         persons=2,
         latitude=48.2,
         longitude=11.0,
@@ -287,7 +287,7 @@ def test_coupled_hourly_solar_can_raise_store_above_setpoint():
     result = coupled_year_result(
         living_area_m2=100.0,
         building_class=3,
-        heat_pump_type="luft",
+        heat_efficiency=3.5,
         persons=2,
         latitude=48.2,
         longitude=11.0,
@@ -307,14 +307,31 @@ def test_coupled_hourly_solar_can_raise_store_above_setpoint():
 def test_profiles_normalize_heat_storage():
     from house_config.profiles_thermal_annual import normalize_thermal_annual_consumer
 
-    spec: dict = {}
-    normalize_thermal_annual_consumer(
+    from house_config.heating_systems import heating_systems_by_id
+
+    catalog = heating_systems_by_id(
         {
-            "living_area_m2": 100.0,
-            "building_class": 2,
-            "heat_storage": _storage(volume_liters=1000.0),
-        },
+            "heating_systems": [
+                {
+                    "id": "hs",
+                    "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
+                    "heating_power_kw": 10.5,
+                    "heat_storage": _storage(volume_liters=1000.0),
+                }
+            ]
+        }
+    )
+    spec: dict = {}
+    from house_config.house_thermal import normalize_house_thermal
+
+    normalize_thermal_annual_consumer(
+        {"heating_system_id": "hs"},
         spec,
         copy_loxone_binding=lambda _r, _s: None,
+        heating_systems=catalog,
+        house_thermal=normalize_house_thermal(
+            {"living_area_m2": 100.0, "building_class": 2}, label="p"
+        ),
+        persons=2,
     )
     assert spec["thermal"]["heat_storage"]["volume_liters"] == 1000.0

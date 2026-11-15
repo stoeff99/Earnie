@@ -1,6 +1,8 @@
 """Scenario editor tab sections (identity, entities, persist)."""
 from __future__ import annotations
 
+from datetime import date
+
 import streamlit as st
 
 from ui.flash import flash
@@ -279,7 +281,15 @@ def _render_scenario_entity_picks(ctx: dict) -> dict:
         container=pv_col,
     )
     _render_imported_pv_option(session_scope, selected_profile)
+    from ui.scenario_heating_picks import render_heating_picks
+
+    heating_picks = render_heating_picks(
+        session_scope,
+        selected_profile,
+        is_live=bool(ctx["live_id"]) and ctx["stable_scenario_id"] == ctx["live_id"],
+    )
     return {
+        "heating_system_ids": heating_picks,
         "prof_pick": prof_pick,
         "battery_pick": battery_picks,
         "battery_picks": battery_picks,
@@ -289,6 +299,85 @@ def _render_scenario_entity_picks(ctx: dict) -> dict:
         "profile_land": profile_land,
         "land_key": land_key,
     }
+
+
+def _import_cap_grid_fee(picks: dict):
+    """Edibert grid fee of the picked house profile; ``None`` without profile or area."""
+    from house_config import edibert_tariffs as eb
+    from runtime_store.persist_paths import resolve_grid_fees_json_path
+
+    profile = picks.get("selected_profile") or {}
+    if not profile.get("netznutzung"):
+        return None
+    catalog = eb.cached_grid_fees(resolve_grid_fees_json_path())
+    return eb.profile_grid_fee(str(picks.get("selected_profile_id") or ""), profile, catalog)
+
+
+def _render_scenario_import_cap(ctx: dict, picks: dict) -> tuple[str, ...]:
+    """Cap and margin for the capacity charge; returns the errors that stop saving."""
+    from house_config.edibert_tariffs import EdibertLoadError
+    from house_config.import_cap import (
+        IMPORT_CAP_KEY,
+        IMPORT_CAP_MARGIN_KEY,
+        IMPORT_CAP_MODE_LABELS_DE,
+        IMPORT_CAP_MODES,
+        check_import_cap,
+        parse_import_cap,
+    )
+
+    session_scope = ctx["session_scope"]
+    cap_col, margin_col = st.columns(2)
+    cap_kw = cap_col.number_input(
+        "Bezugsgrenze [kW]",
+        min_value=0.1,
+        step=0.1,
+        format="%.2f",
+        value=None,
+        placeholder="∞ (keine Grenze)",
+        key=scoped_widget_key(session_scope, "scenario_import_cap"),
+        help=(
+            "Für den Leistungspreis: Der Plan hält den Netzbezug je Viertelstunde unter dieser "
+            "Grenze. Leer = keine Grenze. Wirkt nur in Monaten mit Leistungspreis im Netzbereich. "
+            "Eine enge Grenze kann mehr kosten, als sie spart. "
+            "Änderungen machen vorhandene SE-Ergebnisse ungültig."
+        ),
+    )
+    margin_kw = margin_col.number_input(
+        "Sicherheitsmarge [kW]",
+        min_value=0.0,
+        step=0.1,
+        format="%.2f",
+        key=scoped_widget_key(session_scope, "scenario_import_cap_margin"),
+        disabled=cap_kw is None,
+        help="Der Plan zielt auf die Bezugsgrenze minus diese Marge, wegen Prognose- und Messfehlern.",
+    )
+    st.radio(
+        "Im Live-Betrieb",
+        options=list(IMPORT_CAP_MODES),
+        format_func=IMPORT_CAP_MODE_LABELS_DE.__getitem__,
+        horizontal=True,
+        key=scoped_widget_key(session_scope, "scenario_import_cap_mode"),
+        disabled=cap_kw is None,
+        help=(
+            "Beobachten: Earnie plant und steuert wie ohne Grenze und zeigt auf dem Monitor, wo und "
+            "wie er eingegriffen hätte und was das gespart hätte. Danach planen: Earnie hält die "
+            "Grenze ein. Gilt nur, wenn dieses Szenario das Live-Szenario ist; die Szenario-"
+            "Simulation plant immer mit der Grenze."
+        ),
+    )
+    if cap_kw is None:
+        return ()
+    try:
+        cap = parse_import_cap({IMPORT_CAP_KEY: cap_kw, IMPORT_CAP_MARGIN_KEY: margin_kw})
+        check = check_import_cap(cap, _import_cap_grid_fee(picks), date.today())
+    except (ValueError, EdibertLoadError) as exc:
+        st.error(str(exc))
+        return (str(exc),)
+    for error in check.errors:
+        st.error(error)
+    for note in check.notes:
+        st.info(note)
+    return check.errors
 
 
 def _scenario_persist_payload(
@@ -339,6 +428,14 @@ def _scenario_persist_payload(
         ),
         user_import_cent_kwh=user_import_cent,
         user_export_cent_kwh=user_export_cent,
+        heating_system_ids=picks.get("heating_system_ids"),
+        import_cap_kw=st.session_state.get(scoped_widget_key(session_scope, "scenario_import_cap")),
+        import_cap_margin_kw=st.session_state.get(
+            scoped_widget_key(session_scope, "scenario_import_cap_margin")
+        ),
+        import_cap_mode=st.session_state.get(
+            scoped_widget_key(session_scope, "scenario_import_cap_mode")
+        ),
     )
     payload = {
         "id": save_id,
@@ -412,7 +509,8 @@ def _persist_or_delete_scenario(
     label: str,
     picks: dict,
     tariffs: dict,
+    import_cap_errors: tuple[str, ...] = (),
 ) -> None:
     save_id, ready, payload = _scenario_persist_payload(ctx, label, picks, tariffs)
-    _auto_persist_scenario(ctx, save_id, payload, ready)
+    _auto_persist_scenario(ctx, save_id, payload, ready and not import_cap_errors)
     _render_scenario_delete_button(ctx)

@@ -39,6 +39,12 @@ from simulation.backtesting_snapshots import (
 )
 from simulation.engine import _scenario_to_battery_params, flex_consumers_from_snapshot
 from simulation.horizon_mode import BACKTESTING_STEP_HOURS, FIXED_24H, SUNRISE_WINDOW
+from ui.backtesting_standard_rules import (
+    STANDARD_RULES_LABEL,
+    StandardRulesSeries,
+    apply_standard_rules,
+    standard_rules_series,
+)
 from ui.chart_context import LiveChartContext
 from ui.history_navigation import s2_zone_help_text
 from ui.simulation_results import (
@@ -130,16 +136,24 @@ def _backtesting_baseline_rows(
     *,
     initial_soc: float,
     battery_params: dict | list[dict],
+    consumers: list[dict],
 ) -> dict[str, list[dict]]:
-    """Baseline-, Matched-Baseline- und Same-Flex-Zeilen; `prep` wie prepare_optimization_matrix."""
+    """Baseline-, Matched-Baseline- und Same-Flex-Zeilen; `prep` wie prepare_optimization_matrix.
+
+    ``consumers`` are the window's own (snapshot): a scenario on another house profile has
+    consumers the Live profile does not know.
+    """
     matrix_prep, charging_contexts, targets = prep
     baseline_rows = simulate_baseline_horizon(
         matrix_prep,
         initial_soc,
         charging_contexts=charging_contexts,
         battery_params=battery_params,
+        consumers=consumers,
     )
-    horizon_targets = resolve_horizon_consumer_targets_kwh(matrix_prep, targets)
+    horizon_targets = resolve_horizon_consumer_targets_kwh(
+        matrix_prep, targets, flexible_consumers=consumers
+    )
     horizon_targets = apply_horizon_charging_limits(horizon_targets, charging_contexts)
     matched_baseline_rows = simulate_matched_baseline_horizon(
         matrix_prep,
@@ -147,12 +161,14 @@ def _backtesting_baseline_rows(
         horizon_targets,
         charging_contexts,
         battery_params=battery_params,
+        consumers=consumers,
     )
     baseline_same_flex_rows = simulate_baseline_with_optimized_flex(
         matrix_prep,
         optimized_rows,
         initial_soc,
         battery_params=battery_params,
+        consumers=consumers,
     )
     return {
         "baseline_rows": baseline_rows,
@@ -219,19 +235,22 @@ def _build_backtesting_savings_info(
     consumer_daily_targets_kwh: dict[str, float] | None,
     sunrise_soc_min_index: int | None,
     battery_params: dict | list[dict],
+    consumers: list[dict],
 ) -> dict:
     """Savings-Dict für Charts aus persistierten Backtesting-Zeilen (ohne Legacy-Profile)."""
     matrix_prep, charging_contexts, targets = prepare_optimization_matrix(
         matrix,
         consumer_daily_targets_kwh,
+        consumers=consumers,
     )
-    resolve_filter_contexts(matrix_prep)
+    resolve_filter_contexts(matrix_prep, consumers)
     optimized_rows = chart_rows
     rows = _backtesting_baseline_rows(
         (matrix_prep, charging_contexts, targets),
         optimized_rows,
         initial_soc=initial_soc,
         battery_params=battery_params,
+        consumers=consumers,
     )
     return {
         **_backtesting_cost_fields(rows, optimized_rows),
@@ -273,6 +292,7 @@ def build_backtesting_display_bundle(
     *,
     view_mode: str = VIEW_MODE_24H,
     segment_index: int = 0,
+    standard_rules: StandardRulesSeries | None = None,
 ) -> OptimizationDisplayBundle:
     geo = _geo_from_snapshot(snapshot)
     _, _, tz_name = geo
@@ -288,6 +308,7 @@ def build_backtesting_display_bundle(
         sunrise_soc_min_index = None
 
     battery_params = _battery_params_from_snapshot(snapshot)
+    flex = flex_consumers_from_snapshot(snapshot)
     savings_info = _build_backtesting_savings_info(
         matrix,
         chart_rows,
@@ -295,7 +316,10 @@ def build_backtesting_display_bundle(
         consumer_daily_targets_kwh=targets,
         sunrise_soc_min_index=sunrise_soc_min_index,
         battery_params=battery_params,
+        consumers=list(flex),
     )
+    if standard_rules is not None:
+        savings_info = apply_standard_rules(savings_info, chart_rows, standard_rules, list(flex))
     optimized_df = pd.DataFrame(chart_rows)
     baseline_df = pd.DataFrame(savings_info.get("baseline_rows") or [])
     matched_rows = savings_info.get("matched_baseline_rows")
@@ -315,7 +339,6 @@ def build_backtesting_display_bundle(
         view_mode=view_mode,
         segment_index=segment_index,
     )
-    flex = flex_consumers_from_snapshot(snapshot)
     return build_optimization_display_bundle(
         savings_info,
         optimized_df,
@@ -329,6 +352,7 @@ def build_backtesting_display_bundle(
         chart_header_help=header_help,
         backtesting_chart=True,
         flex_consumers=tuple(flex),
+        baseline_label=STANDARD_RULES_LABEL if standard_rules is not None else None,
     )
 
 
@@ -344,6 +368,7 @@ def load_backtesting_display_bundle(
     view_mode: str = VIEW_MODE_24H,
     segment_index: int = 0,
     log_horizon_mode: str | None = None,
+    standard_rules: StandardRulesSeries | None = None,
 ) -> OptimizationDisplayBundle | None:
     snapshot = load_window_snapshot(log_dir, window_anchor, scenario_id)
     if snapshot is None:
@@ -361,6 +386,7 @@ def load_backtesting_display_bundle(
         snapshot,
         view_mode=view_mode,
         segment_index=segment_index,
+        standard_rules=standard_rules,
     )
 
 
@@ -474,12 +500,14 @@ def resolve_backtesting_display_bundle(
         int(segment_index),
         str(log_horizon),
         "multi_ess_soc_v1",
+        "standard_rules_v1",
     )
     bundle_cache = _display_bundle_cache()
     cached = bundle_cache.get(bundle_key)
     if cached is not None:
         return cached
 
+    standard_rules = standard_rules_series(meta, hourly_df, scenario_id)
     existing = load_window_snapshot(log_dir, window_anchor, scenario_id)
     replace_stale = bool(
         existing is not None
@@ -495,6 +523,7 @@ def resolve_backtesting_display_bundle(
             view_mode=view_mode,
             segment_index=segment_index,
             log_horizon_mode=log_horizon,
+            standard_rules=standard_rules,
         )
     if bundle is None or replace_stale:
         snapshot = _on_demand_window_snapshot(
@@ -510,6 +539,7 @@ def resolve_backtesting_display_bundle(
             snapshot,
             view_mode=view_mode,
             segment_index=segment_index,
+            standard_rules=standard_rules,
         )
     if bundle is not None:
         bundle_cache[bundle_key] = bundle

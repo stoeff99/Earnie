@@ -11,6 +11,7 @@ from version import (
     __version_pkg__,
     display_version,
     normalize_for_image_build,
+    package_version,
     rewrite_version_file_for_image,
 )
 
@@ -22,7 +23,7 @@ def test_pyproject_uses_version_py_as_source_of_truth():
     version_attr = data["tool"]["setuptools"]["dynamic"]["version"]["attr"]
     assert version_attr == "version.__version_pkg__"
     assert __version__
-    assert __version_pkg__ == normalize_for_image_build(__version__)
+    assert __version_pkg__ == package_version(normalize_for_image_build(__version__))
 
 
 def test_requirements_txt_installs_project():
@@ -81,3 +82,19 @@ def test_rewrite_version_file_for_image_rejects_other_filenames(tmp_path):
     with pytest.raises(ValueError):
         rewrite_version_file_for_image(target)
     assert target.read_text(encoding="utf-8") == content
+
+
+@pytest.mark.parametrize(
+    ("raw", "image", "package", "label"),
+    [
+        ("2.8.0-stoeff.1", "2.8.0-stoeff.1", "2.8.0+stoeff.1", "2.8.0-stoeff.1"),
+        ("2.8.0-dev.20", "2.8.0-dev.20", "2.8.0-dev.20", "2.8.0-dev.20"),
+    ],
+)
+def test_fork_version_scheme(monkeypatch, raw, image, package, label):
+    import version as version_mod
+
+    monkeypatch.setattr(version_mod, "__version__", raw)
+    assert normalize_for_image_build(raw) == image
+    assert package_version(image) == package
+    assert display_version() == label

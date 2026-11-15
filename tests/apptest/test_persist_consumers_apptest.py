@@ -12,10 +12,13 @@ import os
 from pathlib import Path
 
 import pytest
+
+from house_config.heating_systems import SYSTEM_FIELDS
 from streamlit.testing.v1 import AppTest
 
 from house_config.profiles_store import clear_house_profiles_doc_cache
 from tests.apptest.fields import CONSUMER_FIELDS, Field
+from tests.fixtures.ev_wallbox import ev_fields, merge_wallboxes, wallbox_entry
 
 _SCRIPT = Path(__file__).parent / "scripts" / "run_page_house_config.py"
 _TIMEOUT_S = 30.0
@@ -30,7 +33,7 @@ _EXTRA_CONSUMERS = [
     },
     {
         "id": "ev1", "label": "Auto", "type": "ev",
-        "battery_capacity_kwh": 50.0, "nominal_power_kw": 11.0,
+        "battery_capacity_kwh": 50.0, **ev_fields("ev1", phases=3, max_current_a=16.0),
         "charging_schedule": {
             "weekday": {"car_available_from_hour": 15, "ready_by_hour": 7, "daily_rest_soc": 20.0},
         },
@@ -44,7 +47,8 @@ _EXTRA_CONSUMERS = [
 
 
 @pytest.fixture(autouse=True)
-def _profile_with_all_consumer_types():
+def _profile_with_all_consumer_types(_isolated_backtesting_config):
+    # Explicit dependency: writes only after the conftest bound the env to the tmp_path copy.
     path = os.environ["EARNIE_HOUSE_PROFILES_PATH"]
     with open(path, encoding="utf-8") as handle:
         doc = json.load(handle)
@@ -52,6 +56,15 @@ def _profile_with_all_consumer_types():
     doc["profiles"][0]["consumers"] += _EXTRA_CONSUMERS
     with open(path, "w", encoding="utf-8") as handle:
         json.dump(doc, handle, ensure_ascii=False)
+    components_path = os.environ["EARNIE_COMPONENTS_PATH"]
+    with open(components_path, encoding="utf-8") as handle:
+        components = json.load(handle)
+    components = merge_wallboxes(
+        components,
+        [wallbox_entry("ev1", max_current_a=16.0), wallbox_entry("wb_garage")],
+    )
+    with open(components_path, "w", encoding="utf-8") as handle:
+        json.dump(components, handle, ensure_ascii=False)
     clear_house_profiles_doc_cache()
 
 
@@ -75,6 +88,11 @@ def _stored(spec: Field):
         doc = json.load(handle)
     profile = next(p for p in doc["profiles"] if p["id"] == _PROFILE_ID)
     consumer = next(c for c in profile["consumers"] if c["id"] == spec.entity)
+    if spec.profile_key.split(".")[0] in SYSTEM_FIELDS and "heating_system_id" in consumer:
+        # Heat generation is written into the reference entry of the heating-system catalog.
+        with open(os.environ["EARNIE_COMPONENTS_PATH"], encoding="utf-8") as handle:
+            catalog = json.load(handle)["heating_systems"]
+        consumer = next(e for e in catalog if e["id"] == consumer["heating_system_id"])
     return _dig(consumer, spec.profile_key)
 
 
@@ -115,7 +133,7 @@ def test_t2_boundary_values_roundtrip(spec: Field, value) -> None:
 
 def test_t5_changes_across_consumer_types_are_all_persisted() -> None:
     by_id = {_ids(s): s for s in CONSUMER_FIELDS}
-    picks = ["wp-persons_0", "wasch-runs_1", "ev1-ev_cap_2", "pool-rc_set_3"]
+    picks = ["wp-solar_area_0", "wasch-runs_1", "ev1-ev_cap_2", "pool-rc_set_3"]
     at = _new_session()
     for pick in picks:
         _widget(at, by_id[pick]).set_value(by_id[pick].valid)
@@ -135,7 +153,7 @@ def _consumer_field(entity: str, suffix: str) -> Field:
     "entity,suffix,value",
     [
         pytest.param("pool", "nom_3", 0.0, id="pool-nominal-power-zero"),
-        pytest.param("ev1", "ev_min_2", 50.0, id="ev-min-power-above-nominal"),
+        pytest.param("ev1", "ev_min_a_2", 50.0, id="ev-min-current-above-max"),
     ],
 )
 def test_t3_rejected_value_shows_error_and_keeps_file(entity: str, suffix: str, value: float) -> None:
@@ -162,9 +180,20 @@ def test_ev_without_milp_block_shows_and_saves_the_suggested_values() -> None:
 
     from optimizer.eauto_milp import suggested_min_remaining_kwh
 
+    from house_config.wallboxes import pair_limits, wallboxes_by_id
+
     at = _new_session()
-    min_power = float(at.number_input(key=_KEY_PREFIX + "ev_min_2").value)
-    suggested = suggested_min_remaining_kwh(min_power)
+    car = {
+        "phases": int(at.number_input(key=_KEY_PREFIX + "ev_phases_2").value),
+        "min_current_a": float(at.number_input(key=_KEY_PREFIX + "ev_min_a_2").value),
+        "max_current_a": float(at.number_input(key=_KEY_PREFIX + "ev_max_a_2").value),
+    }
+    with open(os.environ["EARNIE_COMPONENTS_PATH"], encoding="utf-8") as handle:
+        wallbox = wallboxes_by_id(json.load(handle))["ev1"]
+    # The suggestion uses the pair minimum (car and wallbox, D2).
+    suggested = suggested_min_remaining_kwh(
+        pair_limits(car, wallbox, label="ev1")["min_power_kw"]
+    )
     assert at.number_input(key=_KEY_PREFIX + "ev_milp_rem_2").value == pytest.approx(suggested)
     assert at.number_input(key=_KEY_PREFIX + "ev_milp_eps_on_2").value == pytest.approx(
         SUGGESTED_TIE_BREAK_ON_EPSILON
@@ -179,3 +208,21 @@ def test_ev_without_milp_block_shows_and_saves_the_suggested_values() -> None:
         "tie_break_on_epsilon": pytest.approx(SUGGESTED_TIE_BREAK_ON_EPSILON),
         "tie_break_time_epsilon": pytest.approx(SUGGESTED_TIE_BREAK_TIME_EPSILON),
     }
+
+
+def test_new_wallbox_button_creates_a_wallbox_with_the_car_limits_and_assigns_it() -> None:
+    from house_config.wallboxes import wallboxes_by_id
+
+    at = _new_session()
+    at.button(key=_KEY_PREFIX + "ev_new_wallbox_2").click().run(timeout=_TIMEOUT_S)
+    assert not at.exception
+    with open(os.environ["EARNIE_COMPONENTS_PATH"], encoding="utf-8") as handle:
+        wallboxes = wallboxes_by_id(json.load(handle))
+    assert set(wallboxes) == {"ev1", "wb_garage", "wallbox_auto"}
+    created = wallboxes["wallbox_auto"]
+    car = _stored(Field(kind="", suffix="", profile_key="max_current_a", valid=None, entity="ev1"))
+    assert (created["voltage_v"], created["max_current_a"]) == (230.0, car)
+    assigned = _stored(Field(
+        kind="", suffix="", profile_key="wallbox_assignment.wallbox_id", valid=None, entity="ev1"
+    ))
+    assert assigned == "wallbox_auto"

@@ -19,6 +19,9 @@ class FlexPowerFacts:
     pv_follow_soll: int | None = None
     loxone_setpoint_kw: float | None = None
     nominal_power_kw: float | None = None
+    # True when ist_kw is this consumer's closed-interval slot mean; False for a
+    # decision-time sample or a live fallback, which say nothing about energy.
+    ist_is_slot_mean: bool = False
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,9 @@ class BatteryFacts:
     soll_plan_kw: float
     ist_power_kw: float
     control: str = "full"
+    # True when ist_power_kw is the closed-interval slot mean (energy / slot
+    # length); False for a decision-time sample, which says nothing about energy.
+    ist_is_slot_mean: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,6 +209,7 @@ def _battery_facts(
     entry: dict[str, Any],
     *,
     ist_snapshot: dict[str, Any] | None = None,
+    ist_is_slot_mean: bool = False,
 ) -> BatteryFacts:
     from house_config.battery_control import (
         DEFAULT_BATTERY_CONTROL,
@@ -222,6 +229,7 @@ def _battery_facts(
         soll_plan_kw=_battery_plan_kw(entry),
         ist_power_kw=_float_or_zero(snapshot.get("battery_kw")),
         control=control_from_battery_params({"control": control_raw}),
+        ist_is_slot_mean=ist_is_slot_mean,
     )
 
 
@@ -233,16 +241,20 @@ def build_slot_deviation_facts(
     closed_by_interval: dict | None = None,
 ) -> SlotDeviationFacts:
     """Extrahiert Vergleichsfakten aus einem Produktiv-Log-Eintrag."""
-    from runtime_store.slot_ist_powers import resolve_ist_snapshot
+    from runtime_store.slot_ist_powers import IST_SOURCE_MEAN, resolve_ist_snapshot
 
     ist_snap: dict[str, Any] | None = None
+    ist_source: str | None = None
     if slot_start is not None or closed_by_interval:
-        resolved, _source = resolve_ist_snapshot(
+        resolved, ist_source = resolve_ist_snapshot(
             slot_start or datetime.now(),
             entry,
             closed_by_interval,
         )
         ist_snap = resolved or None
+    mean_flex_kw = (
+        (ist_snap or {}).get("flex_kw") or {} if ist_source == IST_SOURCE_MEAN else {}
+    )
     consumers: dict[str, FlexPowerFacts] = {}
     for consumer_id in sorted(_consumer_ids_from_entry(entry)):
         consumer = _consumer_config(consumer_id)
@@ -255,6 +267,7 @@ def build_slot_deviation_facts(
             pv_follow_soll=_pv_follow_soll(entry, consumer_id, consumer),
             loxone_setpoint_kw=_loxone_setpoint_kw(entry, consumer_id, consumer),
             nominal_power_kw=_nominal_power_kw(consumer),
+            ist_is_slot_mean=consumer_id in mean_flex_kw,
         )
     thermal_index = _thermal_by_consumer(entry)
     thermal = {
@@ -273,7 +286,11 @@ def build_slot_deviation_facts(
     return SlotDeviationFacts(
         slot_quality=slot_quality,
         consumers=consumers,
-        battery=_battery_facts(entry, ist_snapshot=ist_snap),
+        battery=_battery_facts(
+            entry,
+            ist_snapshot=ist_snap,
+            ist_is_slot_mean=ist_source == IST_SOURCE_MEAN,
+        ),
         thermal=thermal,
         charging_contexts=contexts,
         consumer_remaining_kwh=remaining,

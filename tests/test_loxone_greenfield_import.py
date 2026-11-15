@@ -1,6 +1,7 @@
 """Tests for greenfield Loxone Merker + EFM import (2.4.n P2)."""
 from __future__ import annotations
 
+from tests.fixtures.heating_catalog import normalize_inline_house, save_inline_house
 import json
 from pathlib import Path
 
@@ -133,7 +134,7 @@ def test_match_merges_legacy_wp_alias_into_waermepumpe(monkeypatch):
     assert len(thermals) == 1
     assert thermals[0]["ehal_bindings"]["heatpump.waermepumpe.sens_power_act"] == ""
     assert thermals[0]["ehal_bindings"]["heatpump.waermepumpe.set_enable"] == ""
-    normalize_house_profiles_document(
+    normalize_inline_house(
         {"profiles": [dict(house["profiles"][pid], id=pid)]}
     )
 
@@ -320,8 +321,11 @@ def test_run_import_creates_typed_and_efm_consumers():
     assert by_id["e_auto"]["id_locked"] is False
     assert by_id["kochen"]["id_locked"] is False
     assert by_id["e_auto"]["battery_capacity_kwh"] == 50.0
-    assert by_id["e_auto"]["nominal_power_kw"] == 3.5
-    assert by_id["e_auto"]["min_power_kw"] == 1.4
+    # Data model 6: limits as current; the save gives the car its own wallbox (230 V).
+    assert by_id["e_auto"]["phases"] == 1
+    assert by_id["e_auto"]["min_current_a"] == 6.0
+    assert by_id["e_auto"]["max_current_a"] == 16.0
+    assert by_id["e_auto"]["wallbox_voltage_v"] == 230.0
     assert by_id["e_auto"]["min_on_quarterhours"] == 4
     assert "pool_swimspa" in by_id or "pool_swim_spa" in by_id or any(
         c["type"] == "thermal_rc" for c in consumers
@@ -455,7 +459,7 @@ def test_normalize_and_save_round_trip(tmp_path, monkeypatch):
     result = run_greenfield_import(_doc(), _empty_house(), grid_area_id=_AREA)
     house = result["house_doc"]
     path = tmp_path / "house_profiles.json"
-    save_house_profiles_document(
+    save_inline_house(
         str(path),
         {
             "plant": house.get("plant"),
@@ -469,7 +473,7 @@ def test_normalize_and_save_round_trip(tmp_path, monkeypatch):
         c.get("type") == "ev" for p in reloaded["profiles"] for c in p.get("consumers", [])
     )
     # In-memory normalize also accepts the list form
-    normalized = normalize_house_profiles_document(
+    normalized = normalize_inline_house(
         {
             "plant": house.get("plant"),
             "profiles": list(house["profiles"].values()),

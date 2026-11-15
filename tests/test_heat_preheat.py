@@ -40,23 +40,17 @@ def test_heat_never_comes_late():
 
 
 def _wp(**extra) -> dict:
-    return {
-        "id": "waermepumpe",
-        "type": "thermal_annual",
-        "nominal_power_kw": 3.0,
-        "living_area_m2": 145.0,
-        "building_mass": "mittel",
-        "house_tolerance_c": 0.5,
-        "heat_pump_type": "erde",
-        **extra,
-    }
+    from tests.heatpump_fixtures import normalized_heat_pump
+
+    return normalized_heat_pump(**extra)
 
 
 def test_storage_capacity_of_the_house():
-    from data.heating_need import heat_pump_jaz
+    from house_config.heat_source import default_efficiency
 
-    # 145 m² × 90 Wh/m²K = 13.05 kWh/K; × 0.5 K; ÷ JAZ.
-    expected = round(13.05 * 0.5 / heat_pump_jaz("erde"), 3)
+    # 145 m² × 90 Wh/m²K = 13.05 kWh/K; × 0.5 K; ÷ JAZ of a ground-source heat pump.
+    jaz = default_efficiency({"type": "heat_pump", "heat_pump_type": "erde"})
+    expected = round(13.05 * 0.5 / jaz, 3)
     assert preheat_storage_kwh(_wp(heat_preheat_enabled=True)) == pytest.approx(expected)
     assert preheat_storage_kwh(_wp()) == 0.0  # opt-in
     assert planning_thermal_to_milp(_wp(heat_preheat_enabled=True))[
@@ -65,21 +59,17 @@ def test_storage_capacity_of_the_house():
     assert planning_thermal_to_milp(_wp())["preheat_storage_kwh"] == 0.0
 
 
-def test_preheat_flag_survives_save():
-    from house_config.profiles_store import _normalize_consumer, _serialize_consumer
+def test_preheat_needs_a_heating_system():
+    with pytest.raises(ValueError, match="Heizsystem"):
+        preheat_storage_kwh({"id": "wp", "heat_preheat_enabled": True, "living_area_m2": 100.0})
 
-    raw = {
-        "id": "waermepumpe",
-        "label": "Waermepumpe",
-        "type": "thermal_annual",
-        "nominal_power_kw": 3.0,
-        "living_area_m2": 145.0,
-        "building_class": 3,
-        "heat_preheat_enabled": True,
-    }
-    saved = _serialize_consumer(_normalize_consumer(raw, 0, "house"))
+
+def test_preheat_flag_survives_save():
+    from tests.heatpump_fixtures import save_roundtrip
+
+    saved, again = save_roundtrip(heat_preheat_enabled=True)
     assert saved["heat_preheat_enabled"] is True
-    assert planning_thermal_to_milp(saved)["preheat_storage_kwh"] > 0
+    assert planning_thermal_to_milp(again)["preheat_storage_kwh"] > 0
 
 
 def _solve_two_days(consumer: dict) -> list[float]:
@@ -135,19 +125,8 @@ def _solve_two_days(consumer: dict) -> list[float]:
 
 
 def test_milp_preheats_in_cheap_evening_for_next_day():
-    base = {
-        "id": "waermepumpe",
-        "label": "Wärmepumpe",
-        "type": "thermal_annual",
-        "nominal_power_kw": 3.0,
-        "min_on_quarterhours": 1,
-        "max_on_quarterhours": 16,
-        "max_pulses_per_day": 14,
-        "living_area_m2": 145.0,
-        "building_mass": "mittel",
-        "house_tolerance_c": 0.5,
-        "heat_pump_type": "erde",
-    }
+    base = _wp(max_on_quarterhours=16, max_pulses_per_day=14)
+    assert base["nominal_power_kw"] == pytest.approx(3.0, abs=0.1)
     plain = _solve_two_days(planning_thermal_to_milp(base))
     assert sum(plain[8:]) == pytest.approx(1.5)  # day 2 must heat itself
     preheat = _solve_two_days(planning_thermal_to_milp({**base, "heat_preheat_enabled": True}))

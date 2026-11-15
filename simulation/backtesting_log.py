@@ -29,6 +29,8 @@ from .backtesting_snapshots import (
     write_window_snapshots_jsonl,
 )
 from .booked_consumption import BOOKED_CONSUMPTION_KEY
+from .capacity_charge import CAPACITY_KEY, CapacityResult
+from .heat_fuel import HEAT_FUEL_KEY
 from .period_clip import clip_results_map_to_period
 
 logger = logging.getLogger(__name__)
@@ -124,22 +126,28 @@ def _build_summary(
     results: dict[str, pd.DataFrame],
     labels: dict[str, str],
     monthly_fee_by_scenario: dict[str, float] | None = None,
+    capacity_by_scenario: dict[str, CapacityResult] | None = None,
 ) -> dict:
     fees = monthly_fee_by_scenario or {}
+    capacity = capacity_by_scenario or {}
     total_eur: dict[str, float] = {}
     monthly_eur: dict[str, dict[str, float]] = {}
     for scenario_id, df in results.items():
         label = labels.get(scenario_id, scenario_id)
         fee = float(fees.get(scenario_id, 0.0) or 0.0)
+        capacity_result = capacity.get(scenario_id) or CapacityResult()
+        capacity_by_month = capacity_result.gross_by_month
         month_count = 0
         volumetric_total = float(df["sim_cost"].sum()) if not df.empty else 0.0
         for period, value in df["sim_cost"].resample("ME").sum().items():
             month_key = pd.Timestamp(period).strftime("%Y-%m")
             month_count += 1
             monthly_eur.setdefault(month_key, {})[label] = round(
-                float(value) + fee, 4
+                float(value) + fee + capacity_by_month.get(month_key, 0.0), 4
             )
-        total_eur[scenario_id] = round(volumetric_total + fee * month_count, 4)
+        total_eur[scenario_id] = round(
+            volumetric_total + fee * month_count + capacity_result.gross_eur, 4
+        )
     return {"total_eur": total_eur, "monthly_eur": monthly_eur}
 
 
@@ -181,6 +189,8 @@ def _hourly_to_csv(results: dict[str, pd.DataFrame], labels: dict[str, str]) -> 
         "sim_soc",
         "batt_action_kw",
         "steuerbefehl",
+        "import_cap_limit",
+        "import_cap_cause",
     ]
     col_order = base_order + flex_cols + tail_order
     return out[[c for c in col_order if c in out.columns]]
@@ -442,12 +452,22 @@ def _fee_and_summary_parts(
     labels: dict[str, str],
     monthly_fee_by_scenario: dict[str, float] | None,
     fee_breakdown_by_scenario: dict[str, dict[str, float]] | None,
+    capacity_by_scenario: dict[str, CapacityResult] | None = None,
 ) -> dict:
     """Summary- und Fixkosten-Felder des Metadaten-Payloads (Reihenfolge erhalten)."""
+    capacity_part = (
+        {CAPACITY_KEY: {sid: item.as_dict() for sid, item in capacity_by_scenario.items()}}
+        if capacity_by_scenario
+        else {}
+    )
     return {
         "summary": _build_summary(
-            results, labels, monthly_fee_by_scenario=monthly_fee_by_scenario
+            results,
+            labels,
+            monthly_fee_by_scenario=monthly_fee_by_scenario,
+            capacity_by_scenario=capacity_by_scenario,
         ),
+        **capacity_part,
         "monthly_fee_by_scenario": {
             sid: float(monthly_fee_by_scenario.get(sid, 0.0) or 0.0)
             for sid in results
@@ -561,6 +581,10 @@ def _attach_period_bounds(
         payload["period"]["hours"] = len(all_ts) // max(scenario_count, 1)
     if period.get("reference_by_scenario"):
         payload["reference_by_scenario"] = period["reference_by_scenario"]
+    if period.get("ladder_by_scenario"):
+        payload["ladder_by_scenario"] = period["ladder_by_scenario"]
+        payload["ladder_report"] = period["ladder_report"]
+        payload["ladder_soc_correction"] = period["ladder_soc_correction"]
     if period.get("live_scenario_id"):
         payload["live_scenario_id"] = period["live_scenario_id"]
     if period.get("imported_pv_scenario_ids"):
@@ -585,6 +609,8 @@ def save_backtesting_log(
     prices: pd.DataFrame | None = None,
     *,
     booked_consumption: dict[str, dict],
+    heat_fuel: dict[str, dict] | None = None,
+    capacity_by_scenario: dict[str, CapacityResult] | None = None,
 ) -> str:
     """Schreibt Metadaten (JSON) und Stundenwerte (CSV). Gibt den JSON-Pfad zurück.
 
@@ -611,7 +637,11 @@ def save_backtesting_log(
         plausibility_by_scenario,
         period,
         _fee_and_summary_parts(
-            results, labels, monthly_fee_by_scenario, fee_breakdown_by_scenario
+            results,
+            labels,
+            monthly_fee_by_scenario,
+            fee_breakdown_by_scenario,
+            capacity_by_scenario,
         ),
         config_fingerprint=config_fingerprint,
         booked_consumption=booked_consumption,
@@ -621,6 +651,8 @@ def save_backtesting_log(
     _attach_window_snapshots(payload, target_dir, period, window_snapshots)
     _attach_price_series(payload, target_dir, prices)
     _attach_period_bounds(payload, period, all_ts, len(results))
+    if heat_fuel:
+        payload[HEAT_FUEL_KEY] = heat_fuel
 
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=False)

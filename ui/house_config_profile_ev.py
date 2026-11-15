@@ -25,6 +25,16 @@ from house_config.generic_schedule import (
     reject_legacy_start_flexibility,
 )
 from house_config.id_slug import slug_id
+from house_config.wallboxes import (
+    ASSIGNMENT_DYNAMIC,
+    ASSIGNMENT_FIXED,
+    WALLBOX_ASSIGNMENT_KEY,
+    assigned_wallbox_id,
+    dynamic_wallbox_ids,
+    is_dynamic_ev,
+    pair_limits,
+)
+from house_config.profile_schema_defaults import consumer_default, ev_schedule_default
 from house_config.thermal_labels import (
     CONSUMER_TYPE_LABELS,
     building_class_option_label,
@@ -44,10 +54,16 @@ from ui.auto_persist import auto_persist
 from ui.form_layout import (
     WIDE_LABEL_RATIOS,
     labeled_checkbox,
+    labeled_multiselect,
     labeled_number_input,
     labeled_selectbox,
     labeled_text_input,
 )
+
+_ASSIGNMENT_MODE_LABELS = {
+    ASSIGNMENT_FIXED: "Fest an einer Wallbox",
+    ASSIGNMENT_DYNAMIC: "Dynamisch (an mehreren Wallboxen)",
+}
 
 
 _PASSTHROUGH_CONSUMER_KEYS = (
@@ -74,18 +90,45 @@ _PASSTHROUGH_CONSUMER_KEYS = (
 
 
 
+# Car defaults of a new EV (1 phase, 6–16 A ≈ 1.4–3.7 kW at 230 V).
+DEFAULT_EV_PHASES = 1
+DEFAULT_EV_MIN_CURRENT_A = 6.0
+DEFAULT_EV_MAX_CURRENT_A = 16.0
+# Voltage of a wallbox the EV form creates (editable on the Wallboxen tab) and of the
+# MILP suggestion while no wallbox is chosen.
+NEW_WALLBOX_VOLTAGE_V = 230.0
+
+
+def _pair_kw(current_a: float, *, voltage_v: float, phases: int) -> float:
+    return float(current_a) * float(voltage_v) * int(phases) / 1000.0
+
+
+def ev_form_pair(item: dict) -> dict | None:
+    """Pair limits of the form's EV and its chosen wallbox; None without a usable pair."""
+    from ui.house_config_wallbox_io import wallboxes_map
+
+    wallbox = wallboxes_map().get(assigned_wallbox_id(item))
+    if wallbox is None:
+        return None
+    try:
+        return pair_limits(item, wallbox, label=str(item.get("label") or "E-Auto"))
+    except ValueError:
+        return None
+
+
 def _default_ev_consumer() -> dict:
     return {
         "label": "E-Auto",
         "type": "ev",
-        "nominal_power_kw": 3.5,
-        "min_power_kw": 1.4,
-        "min_on_quarterhours": 1,
+        "phases": DEFAULT_EV_PHASES,
+        "min_current_a": DEFAULT_EV_MIN_CURRENT_A,
+        "max_current_a": DEFAULT_EV_MAX_CURRENT_A,
+        "min_on_quarterhours": consumer_default("min_on_quarterhours", consumer_type="ev"),
         "battery_capacity_kwh": 60.0,
         "charging_schedule": {
-            "target_soc_percent": 100.0,
-            "charging_efficiency": 0.95,
-            "forecast_when_absent": True,
+            "target_soc_percent": ev_schedule_default("target_soc_percent"),
+            "charging_efficiency": ev_schedule_default("charging_efficiency"),
+            "forecast_when_absent": ev_schedule_default("forecast_when_absent"),
             "weekday": {
                 "car_available_from_hour": 18,
                 "ready_by_hour": 7,
@@ -96,7 +139,13 @@ def _default_ev_consumer() -> dict:
                 "ready_by_hour": 9,
                 "daily_rest_soc": 30.0,
             },
-            "milp": _suggested_ev_milp(1.4),
+            "milp": _suggested_ev_milp(
+                _pair_kw(
+                    DEFAULT_EV_MIN_CURRENT_A,
+                    voltage_v=NEW_WALLBOX_VOLTAGE_V,
+                    phases=DEFAULT_EV_PHASES,
+                )
+            ),
         },
     }
 
@@ -146,13 +195,14 @@ def _apply_ev_default_widget_keys(
     weekday = sched.get("weekday") or {}
     weekend = sched.get("weekend") or {}
     values = {
-        f"hc_nom_{index}": float(seeded["nominal_power_kw"]),
-        f"hc_ev_min_{index}": float(seeded["min_power_kw"]),
+        f"hc_ev_phases_{index}": int(seeded["phases"]),
+        f"hc_ev_min_a_{index}": float(seeded["min_current_a"]),
+        f"hc_ev_max_a_{index}": float(seeded["max_current_a"]),
         f"hc_ev_min_qh_{index}": int(seeded["min_on_quarterhours"]),
         f"hc_ev_cap_{index}": float(seeded["battery_capacity_kwh"]),
-        f"hc_ev_target_soc_{index}": float(sched.get("target_soc_percent", 100.0)),
-        f"hc_ev_eff_{index}": float(sched.get("charging_efficiency", 0.95)),
-        f"hc_ev_forecast_{index}": bool(sched.get("forecast_when_absent", True)),
+        f"hc_ev_target_soc_{index}": float(sched.get("target_soc_percent", ev_schedule_default("target_soc_percent"))),
+        f"hc_ev_eff_{index}": float(sched.get("charging_efficiency", ev_schedule_default("charging_efficiency"))),
+        f"hc_ev_forecast_{index}": bool(sched.get("forecast_when_absent", ev_schedule_default("forecast_when_absent"))),
         f"hc_ev_Werktag_from_{index}": int(weekday.get("car_available_from_hour", 18)),
         f"hc_ev_Werktag_ready_{index}": int(weekday.get("ready_by_hour", 7)),
         f"hc_ev_Werktag_soc_{index}": float(weekday.get("daily_rest_soc", 40.0)),
@@ -206,86 +256,253 @@ def _render_day_schedule(
         ),
     }
 
-def _render_ev_power_fields(consumer: dict, index: int, *, session_scope: str) -> dict:
-    return {
-        "min_power_kw": labeled_number_input(
-            "Mindestleistung (kW)",
-            min_value=0.0,
-            value=float(consumer.get("min_power_kw", 1.4)),
-            key=_scoped_key(session_scope, f"hc_ev_min_{index}"),
-        ),
-        "min_on_quarterhours": labeled_number_input(
-            "Mindest-Ladedauer (Viertelstunden)",
-            min_value=1,
-            value=int(consumer.get("min_on_quarterhours", 1)),
-            ratios=WIDE_LABEL_RATIOS,
-            key=_scoped_key(session_scope, f"hc_ev_min_qh_{index}"),
-        ),
-        "battery_capacity_kwh": labeled_number_input(
-            "Akkukapazität (kWh)",
-            min_value=0.1,
-            value=float(consumer.get("battery_capacity_kwh", 60.0)),
-            step=1.0,
-            key=_scoped_key(session_scope, f"hc_ev_cap_{index}"),
-        ),
-    }
+def _wallbox_select_key(index: int, session_scope: str) -> str:
+    return _scoped_key(session_scope, f"hc_ev_wallbox_{index}")
 
-def _render_ev_amp_conversion_fields(
-    sched: dict, index: int, *, session_scope: str
-) -> dict:
-    """Nennspannung / Phasen — only used when the Lademerker delivers Ampere."""
-    return {
-        "nominal_power_voltage_v": labeled_number_input(
-            "Nennspannung (V) für A→kW",
-            min_value=100.0,
-            max_value=500.0,
-            value=float(sched.get("nominal_power_voltage_v", 230.0)),
-            step=1.0,
-            ratios=WIDE_LABEL_RATIOS,
-            key=_scoped_key(session_scope, f"hc_ev_voltage_{index}"),
-            help="Nur relevant, wenn der Lademerker Ampere liefert. Standard: 230 V.",
-        ),
-        "nominal_power_phases": labeled_number_input(
-            "Phasen für A→kW",
+
+def _create_wallbox_for_ev(car: dict, *, select_key: str) -> None:
+    """Button: a new wallbox with the car's limits at 230 V, chosen for this EV."""
+    from ui.house_config_wallbox_io import upsert_wallbox
+
+    label = f"Wallbox {str(car.get('label') or 'E-Auto').strip()}"
+    try:
+        wallbox_id = upsert_wallbox(
+            {
+                "label": label,
+                "voltage_v": NEW_WALLBOX_VOLTAGE_V,
+                "phases": car["phases"],
+                "min_current_a": car["min_current_a"],
+                "max_current_a": car["max_current_a"],
+            }
+        )
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    st.session_state[f"{select_key}__pending"] = wallbox_id
+    st.rerun()
+
+
+def _render_wallbox_choice(consumer: dict, car: dict, index: int, *, session_scope: str) -> str:
+    """Fixed wallbox of the EV (D3); empty when none exists yet."""
+    from ui.house_config_wallbox_io import wallboxes_map
+
+    wallboxes = wallboxes_map()
+    key = _wallbox_select_key(index, session_scope)
+    pending = st.session_state.pop(f"{key}__pending", None)
+    if pending is not None:
+        st.session_state[key] = pending
+    if key in st.session_state and st.session_state[key] not in wallboxes:
+        del st.session_state[key]
+    wallbox_id = ""
+    if wallboxes:
+        ids = list(wallboxes)
+        if key not in st.session_state:
+            current = assigned_wallbox_id(consumer)
+            st.session_state[key] = current if current in ids else ids[0]
+        wallbox_id = str(
+            labeled_selectbox(
+                "Wallbox",
+                options=ids,
+                format_func=lambda wid: str(wallboxes[wid]["label"]),
+                key=key,
+                help="Feste Zuordnung: an dieser Wallbox lädt das Auto (Tab „Wallboxen“).",
+            )
+        )
+    else:
+        st.warning(
+            "Noch keine Wallbox angelegt — das E-Auto wird erst mit einer Wallbox gespeichert."
+        )
+    if st.button(
+        "Neue Wallbox für dieses E-Auto anlegen",
+        key=_scoped_key(session_scope, f"hc_ev_new_wallbox_{index}"),
+        help="Mit den Grenzen des Autos und 230 V; im Tab „Wallboxen“ anpassen.",
+    ):
+        _create_wallbox_for_ev({**consumer, **car}, select_key=key)
+    return wallbox_id
+
+
+def _render_assignment_mode(consumer: dict, index: int, *, session_scope: str) -> str:
+    key = _scoped_key(session_scope, f"hc_ev_assign_mode_{index}")
+    if key not in st.session_state:
+        st.session_state[key] = ASSIGNMENT_DYNAMIC if is_dynamic_ev(consumer) else ASSIGNMENT_FIXED
+    return str(
+        labeled_selectbox(
+            "Wallbox-Zuordnung",
+            options=list(_ASSIGNMENT_MODE_LABELS),
+            format_func=lambda mode: _ASSIGNMENT_MODE_LABELS[mode],
+            key=key,
+            help=(
+                "Dynamisch: Earnie erkennt, an welcher Wallbox das Auto steckt (Steckabgleich, "
+                "Probeladung oder Auswahl im Monitor) und plant es erst dann."
+            ),
+        )
+    )
+
+
+def _render_dynamic_wallboxes(consumer: dict, index: int, *, session_scope: str) -> list[str]:
+    """Wallboxes a dynamic EV may use (multi-EV M3)."""
+    from ui.house_config_wallbox_io import wallboxes_map
+
+    wallboxes = wallboxes_map()
+    if not wallboxes:
+        st.warning("Noch keine Wallbox angelegt (Tab „Wallboxen“).")
+        return []
+    key = _scoped_key(session_scope, f"hc_ev_dynamic_wallboxes_{index}")
+    if key in st.session_state:
+        st.session_state[key] = [w for w in st.session_state[key] if w in wallboxes]
+    else:
+        st.session_state[key] = [w for w in dynamic_wallbox_ids(consumer) if w in wallboxes]
+    chosen = list(
+        labeled_multiselect(
+            "Erlaubte Wallboxen",
+            options=list(wallboxes),
+            format_func=lambda wid: str(wallboxes[wid]["label"]),
+            key=key,
+            help="An diesen Wallboxen darf das Auto laden.",
+        )
+    )
+    if not chosen:
+        st.warning("Mindestens eine Wallbox wählen — sonst wird das E-Auto nicht gespeichert.")
+    missing = [w for w in chosen if not wallboxes[w].get("unknown_vehicle")]
+    if missing:
+        st.warning(
+            "Für "
+            + ", ".join(str(wallboxes[w]["label"]) for w in missing)
+            + " fehlt „Unbekanntes Auto“ (Tab „Wallboxen“)."
+        )
+    st.caption(
+        "Geplant wird das Auto erst, wenn es einer Wallbox zugeordnet ist; die Zuordnung "
+        "steht im Monitor. Für Steckabgleich und Probeladung braucht das Auto die Signale "
+        "„Auto meldet angesteckt“ und „Auto-Ladeleistung“ (EHAL-Com)."
+    )
+    return chosen
+
+
+def _render_pair_caption(item: dict) -> None:
+    from ui.house_config_wallbox_io import wallboxes_map
+
+    wallbox = wallboxes_map().get(assigned_wallbox_id(item))
+    if wallbox is None:
+        return
+    try:
+        limits = pair_limits(item, wallbox, label=str(item.get("label") or "E-Auto"))
+    except ValueError as exc:
+        st.error(str(exc))
+        return
+    st.caption(
+        f"Wallbox: {wallbox['voltage_v']:g} V, {wallbox['phases']} Phase(n), "
+        f"{wallbox['min_current_a']:g}–{wallbox['max_current_a']:g} A. "
+        f"Geladen wird mit {limits['min_current_a']:g}–{limits['max_current_a']:g} A an "
+        f"{limits['phases']} Phase(n): {limits['min_power_kw']:.2f} – "
+        f"{limits['max_power_kw']:.2f} kW (gemeinsamer Bereich von Auto und Wallbox)."
+    )
+
+
+def _render_ev_power_fields(consumer: dict, index: int, *, session_scope: str) -> dict:
+    """Car limits as current and the fixed wallbox (data model 6, D2 / D3)."""
+    phases = int(
+        labeled_number_input(
+            "Phasen des Autos",
             min_value=1,
             max_value=3,
-            value=int(sched.get("nominal_power_phases", 1)),
+            value=int(consumer.get("phases", DEFAULT_EV_PHASES)),
             step=1,
+            ratios=WIDE_LABEL_RATIOS,
             key=_scoped_key(session_scope, f"hc_ev_phases_{index}"),
-            help="Standard: 1 Phase.",
-        ),
-    }
+            help="Phasen, mit denen das Auto laden kann (Bordlader).",
+        )
+    )
+    min_a = float(
+        labeled_number_input(
+            "Mindest-Ladestrom des Autos (A)",
+            min_value=0.0,
+            value=float(consumer.get("min_current_a", DEFAULT_EV_MIN_CURRENT_A)),
+            step=1.0,
+            ratios=WIDE_LABEL_RATIOS,
+            key=_scoped_key(session_scope, f"hc_ev_min_a_{index}"),
+        )
+    )
+    max_a = float(
+        labeled_number_input(
+            "Höchst-Ladestrom des Autos (A)",
+            min_value=0.0,
+            value=float(consumer.get("max_current_a", DEFAULT_EV_MAX_CURRENT_A)),
+            step=1.0,
+            ratios=WIDE_LABEL_RATIOS,
+            key=_scoped_key(session_scope, f"hc_ev_max_a_{index}"),
+        )
+    )
+    car = {"phases": phases, "min_current_a": min_a, "max_current_a": max_a}
+    item: dict = dict(car)
+    mode = _render_assignment_mode(consumer, index, session_scope=session_scope)
+    if mode == ASSIGNMENT_DYNAMIC:
+        wallbox_ids = _render_dynamic_wallboxes(consumer, index, session_scope=session_scope)
+        if wallbox_ids:
+            item[WALLBOX_ASSIGNMENT_KEY] = {
+                "mode": ASSIGNMENT_DYNAMIC,
+                "wallbox_ids": wallbox_ids,
+            }
+    else:
+        wallbox_id = _render_wallbox_choice(consumer, car, index, session_scope=session_scope)
+        if wallbox_id:
+            item[WALLBOX_ASSIGNMENT_KEY] = {"mode": ASSIGNMENT_FIXED, "wallbox_id": wallbox_id}
+            _render_pair_caption({**item, "label": consumer.get("label")})
+    item.update(
+        {
+            "min_on_quarterhours": labeled_number_input(
+                "Mindest-Ladedauer (Viertelstunden)",
+                min_value=1,
+                value=int(consumer.get("min_on_quarterhours", 1)),
+                ratios=WIDE_LABEL_RATIOS,
+                key=_scoped_key(session_scope, f"hc_ev_min_qh_{index}"),
+            ),
+            "battery_capacity_kwh": labeled_number_input(
+                "Akkukapazität (kWh)",
+                min_value=0.1,
+                value=float(consumer.get("battery_capacity_kwh", 60.0)),
+                step=1.0,
+                key=_scoped_key(session_scope, f"hc_ev_cap_{index}"),
+            ),
+        }
+    )
+    return item
 
 def _render_ev_charging_schedule(
-    sched: dict, index: int, *, session_scope: str
+    sched: dict, index: int, *, session_scope: str, dynamic: bool = False
 ) -> dict:
+    forecast_key = _scoped_key(session_scope, f"hc_ev_forecast_{index}")
+    forecast_opts: dict = {}
+    if forecast_key not in st.session_state:
+        forecast_opts["value"] = bool(
+            sched.get("forecast_when_absent", ev_schedule_default("forecast_when_absent"))
+        )
     return {
         "target_soc_percent": labeled_number_input(
             "Ziel-SOC (%)",
             min_value=0.0,
             max_value=100.0,
-            value=float(sched.get("target_soc_percent", 100.0)),
+            value=float(sched.get("target_soc_percent", ev_schedule_default("target_soc_percent"))),
             key=_scoped_key(session_scope, f"hc_ev_target_soc_{index}"),
         ),
         "charging_efficiency": labeled_number_input(
             "Lade-Wirkungsgrad",
             min_value=0.01,
             max_value=1.0,
-            value=float(sched.get("charging_efficiency", 0.95)),
+            value=float(sched.get("charging_efficiency", ev_schedule_default("charging_efficiency"))),
             step=0.01,
             key=_scoped_key(session_scope, f"hc_ev_eff_{index}"),
         ),
         "forecast_when_absent": labeled_checkbox(
             "Prognose, wenn nicht angeschlossen",
-            value=bool(sched.get("forecast_when_absent", True)),
-            key=_scoped_key(session_scope, f"hc_ev_forecast_{index}"),
+            **forecast_opts,
+            key=forecast_key,
             help=(
-                "Lade-Prognose ohne Wallbox-Anschluss (charging_schedule). "
+                "Lade-Prognose ohne Wallbox-Anschluss (charging_schedule). Bei dynamischer "
+                "Wallbox-Zuordnung plant Earnie das Auto an den Wallboxen, die gerade frei sind."
+                if dynamic
+                else "Lade-Prognose ohne Wallbox-Anschluss (charging_schedule). "
                 "Unabhängig vom Haus-Abwesenheitsmodus."
             ),
-        ),
-        **_render_ev_amp_conversion_fields(
-            sched, index, session_scope=session_scope
         ),
         "weekday": _render_day_schedule(
             "Werktag",
@@ -305,11 +522,19 @@ def _render_ev_fields(consumer: dict, index: int, *, session_scope: str) -> dict
     sched = dict(consumer.get("charging_schedule") or {})
     item: dict = _render_ev_power_fields(consumer, index, session_scope=session_scope)
     item["charging_schedule"] = _render_ev_charging_schedule(
-        sched, index, session_scope=session_scope
+        sched,
+        index,
+        session_scope=session_scope,
+        dynamic=is_dynamic_ev(item),
     )
+    pair = ev_form_pair(item)
     item["charging_schedule"]["milp"] = _render_ev_milp_fields(
         sched.get("milp") or {},
-        float(item["min_power_kw"]),
+        pair["min_power_kw"]
+        if pair is not None
+        else _pair_kw(
+            item["min_current_a"], voltage_v=NEW_WALLBOX_VOLTAGE_V, phases=item["phases"]
+        ),
         index,
         session_scope=session_scope,
     )
@@ -329,8 +554,8 @@ def _render_ev_milp_fields(
     st.markdown("**MILP-Feintuning**")
     st.caption(
         "Pflicht für die Live-Optimierung, wenn Earnie den Ladestrom vorgibt. "
-        "Ohne gespeicherte Werte sind die Vorschläge eingetragen "
-        "(Restmenge 2 × Mindestleistung); mit **Speichern** gelten sie."
+        "Ohne gespeicherte Werte trägt das Formular die Vorschläge ein "
+        "(Restmenge 2 × Mindestleistung) und speichert sie automatisch mit dem Hausprofil."
     )
     return {
         "live_modus_a_min_remaining_kwh": labeled_number_input(

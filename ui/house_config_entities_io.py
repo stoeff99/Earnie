@@ -514,8 +514,10 @@ def save_live_scenario_id(scenario_id: str) -> None:
 
 def upsert_scenario(scenario: dict) -> None:
     from ui import house_config_io as _io
+    from house_config.import_cap import parse_import_cap
     from house_config.label_uniqueness import assert_unique_label
 
+    parse_import_cap(scenario.get("settings"))
     doc = _io.load_backtesting_scenarios_raw()
     scenarios = list(doc.get("scenarios", []))
     scenario_id = str(scenario.get("id", "")).strip()
@@ -593,10 +595,14 @@ def delete_scenario(scenario_id: str) -> None:
     doc["scenarios"] = remaining
     _io.save_backtesting_scenarios(doc)
 
-def preview_baseload(annual_kwh: float, consumers: list[dict]) -> dict:
-    return compute_baseload_kwh(annual_kwh, consumers)
+def preview_baseload(
+    annual_kwh: float, consumers: list[dict], *, cooling_kwh: float = 0.0
+) -> dict:
+    return compute_baseload_kwh(annual_kwh, consumers, cooling_kwh=cooling_kwh)
 
-def compute_baseload_kwh(annual_kwh: float, consumers: list[dict]) -> dict:
+def compute_baseload_kwh(
+    annual_kwh: float, consumers: list[dict], *, cooling_kwh: float = 0.0
+) -> dict:
     from house_config.baseload import compute_baseload_kwh as _compute
 
-    return _compute(annual_kwh, consumers)
+    return _compute(annual_kwh, consumers, cooling_kwh=cooling_kwh)

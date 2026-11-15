@@ -147,23 +147,14 @@ def test_without_min_off_no_pause_constraint():
 
 
 def test_normalize_keeps_cycle_fields_and_rejects_max_below_min():
-    from house_config.profiles_thermal_annual import normalize_thermal_annual_consumer
+    from tests.heatpump_fixtures import normalized_heat_pump
 
-    spec: dict = {}
-    raw = {
-        "id": "waermepumpe",
-        "nominal_power_kw": 3.0,
-        "min_on_quarterhours": 1,
-        "max_on_quarterhours": 3,
-        "min_off_quarterhours": 4,
-    }
-    normalize_thermal_annual_consumer(raw, spec, copy_loxone_binding=lambda *_: None)
+    spec = normalized_heat_pump(max_on_quarterhours=3, min_off_quarterhours=4)
     assert spec["max_on_quarterhours"] == 3
     assert spec["min_off_quarterhours"] == 4
+    # Minimum run time comes from the heating system (catalog), here 4 > max run 3.
     with pytest.raises(ValueError, match="kleiner als min_on_quarterhours"):
-        normalize_thermal_annual_consumer(
-            {**raw, "min_on_quarterhours": 4}, {}, copy_loxone_binding=lambda *_: None
-        )
+        normalized_heat_pump(4, max_on_quarterhours=3, min_off_quarterhours=4)
     assert _wp()["min_off_quarterhours"] == 4
 
 
@@ -222,33 +213,22 @@ def test_observe_records_only_readable_cycling_consumers(state_file, monkeypatch
 
 def test_house_profile_save_keeps_cycle_fields():
     """Regression: saving the Hauskonfigurator reverted max_on/min_off/max_pulses."""
-    from house_config.profiles_store import _normalize_consumer, _serialize_consumer
+    from tests.heatpump_fixtures import save_roundtrip
 
-    raw = {
-        "id": "waermepumpe",
-        "label": "Waermepumpe",
-        "type": "thermal_annual",
-        "nominal_power_kw": 3.0,
-        "living_area_m2": 145.0,
-        "building_class": 3,
-        "min_on_quarterhours": 1,
+    fields = {
         "max_on_quarterhours": 3,
         "min_off_quarterhours": 4,
         "max_pulses_per_day": 14,
         "optimizer_flex": True,
-        "thermal_flex_window": {"start_hour": 10, "end_hour": 16},
     }
-    saved = _serialize_consumer(_normalize_consumer(raw, 0, "house"))
-    again = _serialize_consumer(_normalize_consumer(saved, 0, "house"))
+    saved, again = save_roundtrip(**fields, thermal_flex_window={"start_hour": 10, "end_hour": 16})
     for out in (saved, again):
-        assert out["max_on_quarterhours"] == 3
-        assert out["min_off_quarterhours"] == 4
-        assert out["max_pulses_per_day"] == 14
-        assert out["optimizer_flex"] is True
-        assert out["thermal_flex_window"] == {"start_hour": 10, "end_hour": 16}
+        assert {key: out[key] for key in fields} == fields
+    assert saved["thermal_flex_window"] == {"start_hour": 10, "end_hour": 16}
+    assert again["min_on_quarterhours"] == 1
 
 
-def test_house_profiles_file_roundtrip_keeps_all_four_cycle_fields(tmp_path):
+def test_house_profiles_file_roundtrip_keeps_all_four_cycle_fields(tmp_path, monkeypatch):
     import json
 
     from house_config.profiles_store import (
@@ -256,22 +236,15 @@ def test_house_profiles_file_roundtrip_keeps_all_four_cycle_fields(tmp_path):
         load_house_profiles_document,
         save_house_profiles_document,
     )
+    from tests.heatpump_fixtures import HOUSE_THERMAL_RAW, heating_system_raw, raw_heat_pump
 
-    fields = {
-        "min_on_quarterhours": 2,
-        "max_on_quarterhours": 3,
-        "min_off_quarterhours": 4,
-        "max_pulses_per_day": 14,
-    }
-    wp = {
-        "id": "waermepumpe",
-        "label": "Waermepumpe",
-        "type": "thermal_annual",
-        "nominal_power_kw": 3.0,
-        "living_area_m2": 145.0,
-        "building_class": 3,
-        **fields,
-    }
+    components = tmp_path / "components.json"
+    components.write_text(
+        json.dumps({"heating_systems": [heating_system_raw(min_on_quarterhours=2)]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("EARNIE_COMPONENTS_PATH", str(components))
+    fields = {"max_on_quarterhours": 3, "min_off_quarterhours": 4, "max_pulses_per_day": 14}
     doc = {
         "profiles": [
             {
@@ -281,10 +254,12 @@ def test_house_profiles_file_roundtrip_keeps_all_four_cycle_fields(tmp_path):
                 "latitude": 47.4,
                 "longitude": 8.5,
                 "netznutzung": {"area_id": "user_no_grid_fee"},
-                "consumers": [wp],
+                "heating_enabled": True,
+                "thermal": dict(HOUSE_THERMAL_RAW),
+                "persons": 4,
+                "consumers": [raw_heat_pump(**fields)],
             }
         ],
-        "earnie_data_model": 4,
     }
     path = tmp_path / "house_profiles.json"
     save_house_profiles_document(str(path), doc)
@@ -293,3 +268,4 @@ def test_house_profiles_file_roundtrip_keeps_all_four_cycle_fields(tmp_path):
     loaded = load_house_profiles_document(str(path))["profiles"]["home"]["consumers"][0]
     for consumer in (on_disk, loaded):
         assert {key: consumer.get(key) for key in fields} == fields
+    assert loaded["min_on_quarterhours"] == 2

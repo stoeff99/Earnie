@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 import config
@@ -17,6 +18,7 @@ from optimizer.slot_duration import (
     slot_step,
 )
 from runtime_store.history_timeline import CHART_IST_BATTERY_KW_COLUMN
+from ui.chart_baseline_label import baseline_label
 from ui.chart_colors import (
     COLOR_ESS_UNDERLAY_CHARGE,
     COLOR_ESS_UNDERLAY_DISCHARGE,
@@ -312,20 +314,59 @@ def add_optimized_soc_trace(
             )
 
 
+def _resolve_chart_soc_entities(
+    chart_soc_entities: list[dict] | None,
+) -> list[dict]:
+    if chart_soc_entities is not None:
+        return list(chart_soc_entities)
+    try:
+        from optimizer.powerstation_soc_chart import load_chart_soc_entities
+
+        return list(load_chart_soc_entities())
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _resolve_virtual_soc_labels(
     chart_soc_entities: list[dict] | None,
 ) -> set[str]:
+    from optimizer.powerstation_soc_chart import virtual_soc_labels
+
+    return virtual_soc_labels(_resolve_chart_soc_entities(chart_soc_entities))
+
+
+def _capacity_by_soc_label(entities: list[dict]) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for entity in entities:
+        label = str(entity.get("label") or "").strip()
+        if not label:
+            continue
+        out[label] = float(entity.get("battery_capacity_kwh") or 0.0)
+    return out
+
+
+def _legacy_soc_line_width(
+    entities: list[dict],
+    battery_params: dict | None,
+) -> float:
     from optimizer.powerstation_soc_chart import (
-        load_chart_soc_entities,
-        virtual_soc_labels,
+        HOUSE_SOC_LINE_WIDTH,
+        soc_line_width_for_capacity_kwh,
     )
 
-    if chart_soc_entities is not None:
-        return virtual_soc_labels(chart_soc_entities)
-    try:
-        return virtual_soc_labels(load_chart_soc_entities())
-    except Exception:  # noqa: BLE001
-        return set()
+    for entity in entities:
+        if entity.get("virtual"):
+            continue
+        return soc_line_width_for_capacity_kwh(
+            float(entity.get("battery_capacity_kwh") or 0.0)
+        )
+    if battery_params:
+        capacity = battery_params.get("battery_capacity_kwh")
+        if capacity is None:
+            capacity = battery_params.get("capacity_kwh")
+        if capacity is not None:
+            return soc_line_width_for_capacity_kwh(float(capacity))
+    return HOUSE_SOC_LINE_WIDTH
 
 
 def add_optimized_soc_traces(
@@ -343,12 +384,13 @@ def add_optimized_soc_traces(
     """One SoC line (legacy) or one line per ESS/PS when multi columns exist."""
     from optimizer.powerstation_soc_chart import (
         HOUSE_SOC_LINE_WIDTH,
-        VIRTUAL_SOC_LINE_WIDTH,
+        soc_line_width_for_capacity_kwh,
     )
 
     # Virtual PS: never solid (overlap when SoC values match); cycle styles.
     _VIRTUAL_SOC_DASHES = ("dash", "dot", "dashdot", "longdash", "longdashdot")
 
+    entities = _resolve_chart_soc_entities(chart_soc_entities)
     series = discover_ess_soc_series(df)
     if not series:
         add_optimized_soc_trace(
@@ -361,18 +403,19 @@ def add_optimized_soc_traces(
             history_slot_count=history_slot_count,
             chart_now=chart_now,
             battery_params=battery_params,
+            line_width=_legacy_soc_line_width(entities, battery_params),
         )
         return
-    virtual_labels = _resolve_virtual_soc_labels(chart_soc_entities)
+    capacity_by_label = _capacity_by_soc_label(entities)
+    virtual_labels = _resolve_virtual_soc_labels(entities)
     virtual_dash_index = 0
     for index, (column, legend) in enumerate(series):
         label = legend.removeprefix("SoC · ").strip()
         is_virtual = label in virtual_labels
-        width = (
-            VIRTUAL_SOC_LINE_WIDTH
-            if is_virtual
-            else HOUSE_SOC_LINE_WIDTH
-        )
+        if label in capacity_by_label:
+            width = soc_line_width_for_capacity_kwh(capacity_by_label[label])
+        else:
+            width = HOUSE_SOC_LINE_WIDTH
         dash = None
         if is_virtual:
             dash = _VIRTUAL_SOC_DASHES[
@@ -411,7 +454,7 @@ def add_baseline_soc_traces(
     add_anchored_counterfactual_soc_traces(
         fig,
         matched_baseline_df,
-        name="SoC BL Ziel",
+        name=f"SoC {baseline_label()}",
         dash="dot",
         yaxis=yaxis,
         extrap_start=extrap_start,
@@ -420,6 +463,70 @@ def add_baseline_soc_traces(
         history_slot_count=history_slot_count,
         soc_at_now=soc_at_now,
         battery_params=battery_params,
+    )
+
+
+def add_ledger_baseline_soc_trace(
+    fig: go.Figure,
+    matched_baseline_df: pd.DataFrame | None,
+    axis: ChartSlotAxis,
+    slot_shadow_soc: Sequence[float | None],
+    *,
+    history_slot_count: int | None,
+    yaxis: str = "y2",
+    battery_params: dict | None = None,
+) -> None:
+    """Monitor: "SoC BL Ziel" as one line, the ledger's shadow chain up to *Jetzt*, then its plan.
+
+    The plan's baseline starts on the same chain (Ledger P11), so the line needs no
+    anchor at *Jetzt* and does not jump there. A slot the ledger has no value for leaves
+    a gap, except for those not booked yet at the end of the past.
+    """
+    history = max(0, min(int(history_slot_count or 0), len(axis.starts)))
+    times: list = []
+    values: list[float] = []
+    last_index: int | None = None
+    for index in range(min(history, len(slot_shadow_soc))):
+        value = slot_shadow_soc[index]
+        if value is None:
+            continue
+        if last_index is not None and last_index < index - 1:
+            times.append(pd.Timestamp(axis.starts.iloc[index]))
+            values.append(math.nan)
+        times.append(pd.Timestamp(axis.starts.iloc[index]) + axis.slot_duration(index))
+        values.append(float(value))
+        last_index = index
+    uhrzeit = pd.Series([], dtype=str)
+    if matched_baseline_df is not None and not matched_baseline_df.empty:
+        uhrzeit = matched_baseline_df["Uhrzeit"]
+        length = len(matched_baseline_df)
+        if history < length:
+            soc = matched_baseline_df["Simulierter SoC (%)"]
+            plan_x, plan_y = _segment_connected_line_xy(
+                axis,
+                soc,
+                history,
+                length,
+                tail_y=_soc_tail_y_from_row(
+                    matched_baseline_df.iloc[-1], battery_params=battery_params
+                ),
+                step_line=False,
+                bridge_left=False,
+            )
+            times.extend(pd.Timestamp(moment) for moment in plan_x)
+            values.extend(float(value) for value in plan_y)
+    if not times:
+        return
+    line_x = _chart_time_series(times)
+    _add_soc_line_trace(
+        fig,
+        line_x,
+        pd.Series(values, dtype=float),
+        name=f"SoC {baseline_label()}",
+        show_legend=True,
+        yaxis=yaxis,
+        hover_labels=_soc_hover_labels_for_times(line_x, uhrzeit, axis.starts),
+        line=dict(color=COLOR_SOC, width=2.5, dash="dot"),
     )
 
 
@@ -659,6 +766,7 @@ __all__ = [
     "ESS_UNDERLAY_HOLD",
     "add_anchored_counterfactual_soc_traces",
     "add_baseline_soc_traces",
+    "add_ledger_baseline_soc_trace",
     "add_ess_mode_soc_underlay_traces",
     "add_export_price_on_soc_axis_trace",
     "add_optimized_soc_trace",

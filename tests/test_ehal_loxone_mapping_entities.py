@@ -45,11 +45,13 @@ def test_fields_for_consumer_ev_vs_flex():
     assert "set_grid_export_power_limit" in PLANT_FIELDS
     assert "sens_energy_total" in FLEX_FIELDS
     assert "sens_energy_export" not in FLEX_FIELDS
+    from ehal.heat_fields import HEAT_FEEDBACK_KINDS
+
     assert fields_for_consumer({"type": "thermal_annual"}) == FLEX_FIELDS + (
         "flex.set_heat_boost",
         "sens_temperature_heat_storage",
         "sens_temperature_heat_storage_low",
-    )
+    ) + HEAT_FEEDBACK_KINDS
     assert fields_for_consumer({"id": "wp", "type": "thermal_annual"}) == (
         "heatpump.wp.sens_power_act",
         "heatpump.wp.sens_consumer_active",
@@ -57,7 +59,7 @@ def test_fields_for_consumer_ev_vs_flex():
         "heatpump.wp.set_heat_boost",
         "sens_temperature_heat_storage",
         "sens_temperature_heat_storage_low",
-    )
+    ) + HEAT_FEEDBACK_KINDS
     assert "get_filter_remaining_hours" in FILTER_FIELDS
 
 

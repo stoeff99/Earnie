@@ -158,13 +158,17 @@ def _flat_annual_hourly_kw(consumer: dict, *, hours: int) -> list[float]:
 
 
 def _modeled_ev_hourly_kw(consumer: dict, *, hours: int) -> list[float]:
-    hourly = [0.0] * hours
+    return _tile_daily_profiles(lambda day: ev_hourly_kw_for_day(consumer, day), hours=hours)
+
+
+def _tile_daily_profiles(day_profile, *, hours: int) -> list[float]:
+    """Hour-of-year series from a per-day 24 h profile (each day computed once)."""
+    hourly: list[float] = []
     start_day = modeled_profile_ref_start().date()
-    for hour_index in range(hours):
-        day = start_day + timedelta(days=hour_index // 24)
-        day_hourly = ev_hourly_kw_for_day(consumer, day)
-        hourly[hour_index] = day_hourly[hour_index % 24]
-    return hourly
+    days = (hours + 23) // 24
+    for day_offset in range(days):
+        hourly.extend(day_profile(start_day + timedelta(days=day_offset)))
+    return hourly[:hours]
 
 
 def _pwm_or_weekly_thermal_profile(
@@ -208,37 +212,37 @@ def _thermal_annual_daily_from_archive(consumer: dict) -> list[float] | None:
         last_full_archive_year,
     )
 
+    from house_config.heating_systems import consumer_input_power_kw
+
     params = heating_params_from_thermal(thermal)
     if "hp_electric_kw" not in params:
-        params["hp_electric_kw"] = float(consumer.get("nominal_power_kw", 3.0) or 3.0)
+        params["hp_electric_kw"] = consumer_input_power_kw(consumer)
+    from optimizer.house_gains import thermal_bundle_surfaces, thermal_climate_kwargs
+
     area_m2 = float(params.get("solar_thermal_area_m2", 0.0) or 0.0)
     year = last_full_archive_year()
     timezone = str(thermal.get("timezone_name") or _cfg.get_planning_timezone())
     collector = collector_surface_from_thermal(thermal, {})
-    surfaces = [collector] if area_m2 > 0.0 else []
     bundle = build_open_meteo_climate_bundle_for_year(
         year,
         lat=float(lat),
         lon=float(lon),
         timezone=timezone,
-        surfaces=surfaces,
-    )
-    hourly_wm2 = (
-        bundle.collector_surface_series(collector) if area_m2 > 0.0 else None
+        surfaces=thermal_bundle_surfaces(thermal, collector if area_m2 > 0.0 else None),
     )
     return daily_electric_kwh(
-        **params,
-        hourly_temperature_c=bundle.temperature_c,
-        hourly_collector_wm2=hourly_wm2,
+        **params, **thermal_climate_kwargs(bundle, thermal, collector)
     )
 
 
 def _modeled_thermal_annual_hourly_kw(consumer: dict, *, hours: int) -> list[float]:
     """Hourly WP profile; prefer Open-Meteo + collector irradiance over fixture."""
     thermal = consumer.get("thermal") or consumer
+    from house_config.heating_systems import consumer_input_power_kw
+
     params = heating_params_from_thermal(thermal)
     if "hp_electric_kw" not in params:
-        params["hp_electric_kw"] = float(consumer.get("nominal_power_kw", 3.0) or 3.0)
+        params["hp_electric_kw"] = consumer_input_power_kw(consumer)
     daily = _thermal_annual_daily_from_archive(consumer)
     if daily is None:
         daily = daily_electric_kwh(**params)
@@ -287,13 +291,9 @@ def _modeled_thermal_rc_hourly_kw(consumer: dict, *, hours: int) -> list[float]:
 def _modeled_generic_schedule_hourly_kw(consumer: dict, *, hours: int) -> list[float]:
     from house_config.generic_schedule import generic_hourly_kw_for_day
 
-    hourly = [0.0] * hours
-    start_day = modeled_profile_ref_start().date()
-    for hour_index in range(hours):
-        day = start_day + timedelta(days=hour_index // 24)
-        day_hourly = generic_hourly_kw_for_day(consumer, day)
-        hourly[hour_index] = day_hourly[hour_index % 24]
-    return hourly
+    return _tile_daily_profiles(
+        lambda day: generic_hourly_kw_for_day(consumer, day), hours=hours
+    )
 
 
 def _modeled_consumer_hourly_kw(consumer: dict, *, hours: int) -> list[float]:
@@ -329,6 +329,10 @@ def build_modeled_hourly_kw_by_consumer(
             consumer,
             hours=hours,
         )
+    from optimizer.house_cooling import cooling_modeled_hourly_kw
+
+    # Air conditioning: own series ``<heating id>_cooling`` (never in the heating's kW).
+    result.update(cooling_modeled_hourly_kw(profile, hours=hours))
     baseload_kwh = profile_baseload_kwh(profile)
     baseload_kw = baseload_kwh / max(1, hours)
     result["baseload"] = [baseload_kw] * hours
@@ -371,6 +375,14 @@ def build_modeled_kw_for_timestamps(
     for index, consumer in enumerate(profile.get("consumers", [])):
         cid = _consumer_id(consumer, index)
         result[cid] = _modeled_kw_series_for_timestamps(consumer, timestamps)
+    from house_config.house_cooling import cooling_consumer, cooling_id
+    from optimizer.house_cooling import cooling_kw_for_slots
+
+    carrier = cooling_consumer(profile)
+    if carrier is not None:
+        result[cooling_id(carrier)] = cooling_kw_for_slots(
+            profile, [_parse_profile_timestamp(ts) for ts in timestamps]
+        )
     result["baseload"] = [baseload_kw] * len(timestamps)
     return result
 
@@ -405,13 +417,48 @@ def _by_consumer_aligned_to_total_csv(
                 )
                 for ts in timestamps
             ]
+    from house_config.house_cooling import cooling_consumer, cooling_id
+    from optimizer.house_cooling import cooling_kw_for_slots
+
+    carrier = cooling_consumer(profile)
+    if carrier is not None:
+        result[cooling_id(carrier)] = cooling_kw_for_slots(
+            profile, [_parse_profile_timestamp(ts) for ts in timestamps]
+        )
     result["baseload"] = _residual_baseload_from_aligned(
         csv_path,
         profile,
-        result,
+        _reference_series_for_residual(profile, result, timestamps),
         total=total,
     )
     return result
+
+
+def _reference_series_for_residual(
+    profile: dict, series: dict[str, list[float]], timestamps: list[str]
+) -> dict[str, list[float]]:
+    """Consumer series the residual subtracts: those of the reference heating systems.
+
+    A scenario heating variant (``baseload_reference_consumers``) swaps only the heat load;
+    the baseload stays the residual of the installed system.
+    """
+    from house_config.heating_systems import BASELOAD_REFERENCE_CONSUMERS_KEY
+
+    out = dict(series)
+    reference = profile.get(BASELOAD_REFERENCE_CONSUMERS_KEY)
+    if reference is None:
+        return out
+    for index, consumer in enumerate(reference):
+        cid = _consumer_id(consumer, index)
+        if consumer_uses_profile_csv(consumer):
+            lookup = _csv_kw_lookup(consumer["profile_csv"])
+            out[cid] = [float(lookup.get(ts, 0.0)) for ts in timestamps]
+        else:
+            out[cid] = [
+                modeled_consumer_kw_at_datetime(consumer, _parse_profile_timestamp(ts))
+                for ts in timestamps
+            ]
+    return out
 
 
 def _residual_baseload_from_aligned(

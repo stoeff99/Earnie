@@ -12,6 +12,8 @@ Non-goals: usage analytics, feature tracking, error reporting, any per-user prof
 
 - **Opt-in, tri-state:** `unset` (never asked) / `on` / `off`. Only `on` sends. `unset` and `off` send nothing. Missing state file = `unset`.
 - **Hard kill-switch:** env `EARNIE_USAGE_PING=off` overrides config (for packagers / paranoid users).
+- **No install ping in the cloud demo:** with `EARNIE_CLOUD_DEMO=1` every browser session has its own empty `runtime/`, so an install ID would count each visit as a new install. `maybe_send_ping` is a no-op there (also with `force`), the consent dialog (explorer and editor fallback) does not open, and the settings show a note instead of the toggle.
+- **Cloud demo session counter (instead):** `runtime_store/cloud_demo_session_ping.py`. When `ensure_cloud_session_env` sets up a new browser session (`EARNIE_CLOUD_DEMO=1`, once per session via `SESSION_COUNTED_KEY`), a daemon thread POSTs exactly `{"v": 1}` to `POST /demo-session` (5 s timeout, no retry). No install ID, no app version, no consent dialog (maintainer decision 2026-11-09: the count is anonymous); the request comes from the Streamlit server, so earnie-server never sees the visitor's IP. The welcome note of the demo says so. `EARNIE_USAGE_PING=off` stops it too. Server side: earnie-server counts per UTC day in the column `demo_sessions` of `usage_daily.csv` (empty for days before the counter), own rate limit (`USAGE_PING_DEMO_RATE_LIMIT`, default 30 per minute) so demo traffic cannot use up the budget of `/ping`.
 - **Data minimisation:** payload is a fixed whitelist (§4); no free-form fields, no config content, no prices, no locations, no device names.
 - **Fire-and-forget:** ping runs off the optimisation path, short timeout, one attempt per day plus retries after failure; failure is logged at WARNING and never affects the cycle.
 - **Transparency:** the UI shows the exact JSON that would be sent ("Show what is sent").
@@ -53,13 +55,14 @@ Exact keys only: `v`, `id`, `app_version`, `context`, `stage`. `context` = `dete
 ### Schema v2 (Earnie-Points)
 
 ```json
-{"v": 2, "id": "<uuid4>", "app_version": "2.7.0", "context": "homeassistant_addon", "stage": "live", "points": 5, "points_v": 1}
+{"v": 2, "id": "<uuid4>", "app_version": "2.7.0", "context": "homeassistant_addon", "stage": "live", "points": 5, "points_v": 3}
 ```
 
 - Exact keys: `v`, `id`, `app_version`, `context`, `stage`, `points`, `points_v`.
 - The client sends v2 **only** when `stage == "live"` and the state holds valid points (`points` int ≥ 0, `points_v` int ≥ 1); otherwise it sends v1 exactly as above. `points` is the total of the Earnie-Points of the **live** plant (rule and breakdown: [`earnie-points.md`](earnie-points.md)); no tariff name is sent.
 - A change of `points` while consent is `on` clears `last_sent_date` / `last_attempt_at` and triggers a send, so the daily statistic is current (same mechanism as the scenario counter).
 - **Receiver:** accepts v1 and v2. v2 requires `stage == "live"`, `points` int 0–99, `points_v` int ≥ 1. Per UTC day and salted id, install counters (stage, context, version) stay first-wins; `points` is **latest-wins**. `usage_daily.csv` gets a `points_hist` column (JSON histogram, buckets `"0"` … `"20"` and `"21+"`). The tariff split S / M / L is computed offline from the histogram with the then-current ranges.
+- **Rule versions:** `points_v` 1 until 2.8.0-dev.9, 2 in the `-dev` builds from 2026-11-08, 3 since 2026-11-13 (see [`earnie-points.md`](earnie-points.md) §2). A client update changes an install's total once without a change of the plant. The receiver's `points_hist` does not separate rule versions yet, so days with clients on different versions mix their totals.
 - Consent: no re-prompt for installs that already opted in; "Was wird gesendet?" shows the exact v2 JSON and the German docs / privacy note describe `points`.
 
 ## 5. Server design

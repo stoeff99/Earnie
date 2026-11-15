@@ -25,7 +25,7 @@ def _profile() -> dict:
                 "nominal_power_kw": 2.0,
                 "living_area_m2": 120.0,
                 "building_class": 3,
-                "heat_pump_type": "luft",
+                "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
                 "persons": 2,
                 "solar_thermal_area_m2": 0.0,
             }
@@ -112,7 +112,7 @@ def test_thermal_annual_kwh_from_archive(monkeypatch):
         "longitude": 10.0,
         "living_area_m2": 120.0,
         "building_class": 3,
-        "heat_pump_type": "luft",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
         "persons": 2,
         "heat_storage": {
             "volume_liters": 800.0,
@@ -129,6 +129,43 @@ def test_thermal_annual_kwh_from_archive(monkeypatch):
     assert year == 2024
     assert without > 0.0
     assert with_solar < without
+
+
+def test_thermal_annual_heat_kwh_is_input_energy_times_efficiency(monkeypatch):
+    from data.modeled_climate import (
+        thermal_annual_fuel_kwh_from_archive,
+        thermal_annual_heat_kwh_from_archive,
+        thermal_annual_kwh_from_archive,
+    )
+    from house_config.heat_source import heat_source_efficiency
+    from tests.fixtures.open_meteo_mock import install_open_meteo_climate_mock
+
+    install_open_meteo_climate_mock(monkeypatch)
+    base = {
+        "latitude": 48.0,
+        "longitude": 10.0,
+        "living_area_m2": 120.0,
+        "building_class": 3,
+        "persons": 2,
+    }
+    heat_pump = {"type": "heat_pump", "heat_pump_type": "luft"}
+    gas = {"type": "gas"}
+    # Same thermal heating power (8 kW) for both sources.
+    hp_thermal = {**base, "heat_source": heat_pump,
+                  "nominal_power_kw": 8.0 / heat_source_efficiency(heat_pump)}
+    gas_thermal = {**base, "heat_source": gas,
+                   "nominal_power_kw": 8.0 / heat_source_efficiency(gas)}
+
+    hp_heat, year = thermal_annual_heat_kwh_from_archive(hp_thermal, reference_year=2024)
+    hp_electric, _ = thermal_annual_kwh_from_archive(hp_thermal, reference_year=2024)
+    gas_heat, _ = thermal_annual_heat_kwh_from_archive(gas_thermal, reference_year=2024)
+    gas_fuel, _ = thermal_annual_fuel_kwh_from_archive(gas_thermal, reference_year=2024)
+
+    assert year == 2024
+    assert hp_heat > 0.0
+    assert hp_heat == pytest.approx(hp_electric * heat_source_efficiency(heat_pump), rel=1e-3)
+    assert gas_heat == pytest.approx(gas_fuel * heat_source_efficiency(gas), rel=1e-3)
+    assert gas_heat == pytest.approx(hp_heat, rel=1e-3)
 
 
 def test_strip_assets_reference_has_no_zero_kwp_pv_surface():
@@ -188,7 +225,7 @@ def _heat_pump_consumer() -> dict:
         "timezone_name": "Europe/Vienna",
         "living_area_m2": 150.0,
         "building_class": 2,
-        "heat_pump_type": "erde",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
         "persons": 2,
         "target_temp_c": 21.5,
         "heating_limit_c": 15.0,

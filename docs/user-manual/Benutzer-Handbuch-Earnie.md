@@ -52,7 +52,7 @@ Earnie ist unabhängig von Energieversorger und Systemlieferant.
 
 ### Support
 
-- **Kontakt in der App:** In der Sidebar unter **Info / About** Art, Thema und Beschreibung eintragen, dann **GitHub-Issue öffnen**. Issues sind öffentlich, daher gehören keine Zugangsdaten oder andere Geheimnisse hinein. Optional stellt **Informationen in ZIP sammeln** eine ZIP zusammen, die lokal bleibt.
+- **Kontakt in der App:** In der Sidebar unter **Info / About** Art, Thema und Beschreibung eintragen, dann **GitHub-Issue öffnen**. Issues sind öffentlich, daher gehören keine Zugangsdaten oder andere Geheimnisse hinein. Ein ZIP für den Support (nur Konfiguration oder vollständig mit Historie und Logs) erstellt **Sichern & Übertragen → Support-Paket**; es bleibt lokal.
 - **Registry und Vertrauliches:** Expander **Privater Support** an `support@earnie-hems.com`.
 - **Projekt und Issues:** [GitHub – JochenTCC/Earnie](https://github.com/JochenTCC/Earnie/issues)
 - **Website:** [earnie-hems.com](https://earnie-hems.com)
@@ -100,7 +100,7 @@ In dieser Phase wird das Haus so abgebildet, dass Earnie **Vergleichsszenarien**
 
 Empfohlene Reihenfolge:
 
-1. **Hauskonfigurator:** Haus, Verbraucher, Wechselrichter, PV-Felder und Speicher anlegen.
+1. **Hauskonfigurator:** Haus, Verbraucher, Wechselrichter, PV-Felder, Speicher und Wallboxen anlegen.
 2. **Szenarienkonfigurator:** Varianten bilden (mit/ohne Speicher, anderer Tarif, …).
 3. **Live-Szenario zuweisen:** festlegen, welche Bausteine als Basis gelten.
 4. **Szenario-Explorer:** Verbrauch erzeugen, Rechnung starten, Ergebnisse auswerten.
@@ -115,17 +115,18 @@ Empfohlene Reihenfolge:
 
 *Hauskonfigurator: Hausprofil, Verbraucher, PV und Speicher als Kataloge.*
 
-Unter **Konfiguration → Hauskonfigurator** werden die baulichen und technischen Bausteine des Haushalts gepflegt. Gespeichert werden sie als Kataloge (Hausprofile, Komponenten), auf die die Szenarien später verweisen.
+Unter **Konfiguration → Hauskonfigurator** werden die baulichen und technischen Bausteine des Haushalts gepflegt. Gespeichert werden sie als Kataloge (Hausprofile, Komponenten), auf die die Szenarien später verweisen. Die Bereiche sind **Hausprofil**, **Heizsysteme** (Heizsystem-Varianten für den Szenario-Vergleich, siehe [Flexible Verbraucher](../konfiguration/flexible-verbraucher.md#haus-wärme-heizsystem-heating_system_id)), **Wechselrichter**, **PV-Felder**, **Batterien** und **Wallboxen**.
 
 Die Sidebar zeigt, welche Schritte der Ersteinrichtung noch fehlen.
 
-Änderungen im Hauskonfigurator und im Szenarienkonfigurator speichert Earnie **automatisch**. Komplette Konfigurationspakete (ZIP) lassen sich in der Sidebar unter **„Konfiguration speichern / laden“** exportieren und importieren – siehe [Speichern / Laden](../konfiguration/speichern-laden.md).
+Änderungen im Hauskonfigurator und im Szenarienkonfigurator speichert Earnie **automatisch**. Komplette Konfigurationspakete (ZIP) lassen sich in der Sidebar unter **„Sichern & Übertragen“** exportieren und importieren – siehe [Speichern / Laden](../konfiguration/speichern-laden.md).
 
 #### Hausprofil anlegen
 
 Ein **Hausprofil** beschreibt den Standort und wer bzw. was im Haus Strom verbraucht:
 
 - **Standort:** Breite, Länge und Land. Daraus leitet Earnie die Zeitzone ab, die für Sonnenzeiten und PV-Prognose wichtig ist.
+- **Gebäude / Wärmebedarf:** Schalter **„Heizung betrachten“**. Aus (Standard) bleibt die Heizung in der Grundlast und es ist nichts weiter einzugeben. An: Wohnfläche, Gebäudeklasse bzw. HWB, Bauweise, Personen, Solltemperatur, Heizgrenze und Absenkung bei Abwesenheit des Hauses; danach unter **Verbraucher** die Haus-Wärme anlegen. Ausschalten löscht keine Werte. Details: [Gebäude / Wärmebedarf](../konfiguration/flexible-verbraucher.md#gebäude--wärmebedarf-hausprofil).
 - **Verbraucher im Profil:** z. B. Haus-Wärme, E-Auto, Pool oder generische Geräte.
 - **Grundlast:** typischer Haushaltsverbrauch über den Tag (Vorschau im Konfigurator prüfen).
 - **Abwesend / Urlaub:** Schalter für den Abwesenheitsmodus im Live-Betrieb; je Verbraucher optional **„Inaktiv wenn abwesend“**. Der Modus wirkt, sobald der Earnie-Schalter **oder** das Abwesenheitssignal am aktiven Smarthome-Backend eingeschaltet ist (EHAL-Feld `sens_absent_mode`, Zuordnung in der **Signalliste**; Loxone-Namenskatalog: `Earnie_Abwesend`). Details: [Flexible Verbraucher – Abwesenheitsmodus](../konfiguration/flexible-verbraucher.md#abwesenheitsmodus-live).
@@ -145,10 +146,11 @@ Je mehr Spielraum Earnie beim Verschieben der Verbraucher bekommt, desto größe
 
 #### Haus-Wärme
 
-Thermischer Verbraucher für Heizung bzw. Wärmepumpe (je nach Modell im Profil):
+Die Heizung des Hauses (Wärmepumpe oder andere Wärmequelle), nur wählbar bei eingeschaltetem **„Heizung betrachten“**:
 
-- **Solltemperaturen und thermische Parameter** (Wärmeverlust, Volumen bzw. Gebäudekennwerte). Ein Energieausweis des Gebäudes hilft dabei.
-- **Temperaturabsenkung wenn abwesend:** Bei wirksamem Abwesenheitsmodus und aktiver Verbraucher-Option gilt im Live-Betrieb Solltemperatur minus Absenkung. Den Warmwasserbedarf rechnet Earnie dann mit 0 Personen.
+- **Gebäudedaten** stehen nicht hier, sondern im Abschnitt **Gebäude / Wärmebedarf** des Hausprofils. Ein Energieausweis des Gebäudes hilft dabei.
+- **Heizsystem:** Wärmequelle, Heizleistung (kW, thermisch), Wärmespeicher und Heizstab; bei Wärmepumpe und Stromheizung zusätzlich die Mindestlaufzeit. Dazu der Solarthermie-Kollektor.
+- **Temperaturabsenkung wenn abwesend** (im Abschnitt Gebäude / Wärmebedarf): Bei wirksamem Abwesenheitsmodus und eingeschaltetem „Absenken wenn abwesend“ gilt im Live-Betrieb Solltemperatur minus Absenkung. Den Warmwasserbedarf rechnet Earnie dann mit 0 Personen.
 - **Wärmebedarf:** Earnie schätzt ihn aus Wetterdaten und den thermischen Parametern und plant den Strombedarf zeitlich ein.
 - **Live-Betrieb:** Die Anbindung erfolgt später über die **Signalliste** (Leistung, Freigabe, ggf. Temperaturen).
 
@@ -158,7 +160,8 @@ Je genauer die thermischen Angaben, desto realistischer der Jahresvergleich. Fü
 
 E-Auto und Wallbox als planbarer Verbraucher:
 
-- **Fahrzeug und Wallbox:** Akkukapazität, Ladeleistung und Wirkungsgrad.
+- **Fahrzeug:** Akkukapazität, Wirkungsgrad sowie Phasen, Mindest- und Höchst-Ladestrom des Autos.
+- **Wallbox:** feste Zuordnung zu einer Wallbox aus dem Bereich **Wallboxen** (Spannung, Phasen, Ladestrom der Wallbox). Geladen wird im gemeinsamen Bereich von Auto und Wallbox; die Ladeleistung in kW steht unter der Auswahl. **Neue Wallbox für dieses E-Auto anlegen** erzeugt eine Wallbox mit den Grenzen des Autos und 230 V. Mit **Wallbox-Zuordnung: Dynamisch** darf das Auto an mehreren Wallboxen laden, und mehrere Autos können sich Wallboxen teilen; Earnie erkennt, wo es steckt. Im Szenario-Explorer gilt dafür „wer zuerst kommt, lädt zuerst“ ([Dynamische Zuordnung](../konfiguration/flexible-verbraucher.md#dynamische-zuordnung-mehrere-autos-mehrere-wallboxen)).
 - **Zeitfenster:** ab wann das Auto da ist und bis wann es geladen sein soll, getrennt für Werktage und Wochenende.
 - **Ziel-SoC:** gewünschter Ladestand beim Abfahren.
 - **Prognose, wenn nicht angeschlossen:** optionale Lade-Prognose, auch wenn das Auto nicht an der Wallbox hängt (unabhängig vom Abwesenheitsmodus des Hauses).
@@ -221,7 +224,7 @@ Relevante Parameter:
 - **Wechselrichter:** der zugeordnete Wechselrichter (Hausbatterie) bzw. der integrierte Wechselrichter einer physischen Powerstation.
 - **Verschleißkosten (optional):** Damit bewertet Earnie viele Ladezyklen wirtschaftlich.
 
-Im Live-Betrieb gibt Earnie Ziel-SoC sowie Lade- und Entlade-Sollwerte über das Smarthome-System vor. Die eigentliche Wechselrichter-Logik bleibt in der Hausautomation bzw. im Wechselrichter.
+Im Live-Betrieb gibt Earnie über das Smarthome-System die Sollleistung sowie die Lade- und Entladegrenze vor, bei Loxone und Home Assistant zusätzlich den ESS-Modus. Ist bei der Batterie das Signal „Ziel-SoC“ (`set_ess_target_soc`) zugeordnet, sendet Earnie auch den Ziel-SoC: Beim Halten (Entladesperre) ist das der aktuelle Ladestand, beim Zwangsladen oder -entladen der geplante Ladestand am Ende der Viertelstunde, um einen kleinen Puffer weiter in Lade- bzw. Entladerichtung. Der Puffer beträgt 1 % plus ein Viertel der in der Viertelstunde geplanten Ladestandsänderung, bei 5 kW an einem 15-kWh-Speicher also rund 3 %. Er gleicht aus, dass zum Beispiel ein Huawei den Ladestand nur in ganzen Prozent meldet und sonst zu früh aufhört. Die eigentliche Wechselrichter-Logik bleibt in der Hausautomation bzw. im Wechselrichter.
 
 ### Szenarienkonfigurator
 
@@ -251,11 +254,15 @@ Typische Vergleiche:
 
 **Tarife:** Bezugs- und Einspeisetarif kommen aus dem Tarifkatalog oder werden als **Eigener Festpreis** mit eigenem Wert in Cent/kWh eingetragen (der Wert gehört dann zum Szenario, nicht zum Katalog).
 
+**Bezugsgrenze:** Optionale Grenze für den Netzbezug je Viertelstunde, gedacht für den Leistungspreis. Leer bedeutet keine Grenze. Sie wirkt nur in Monaten, in denen der Netzbereich einen Leistungspreis hat, im Szenario-Explorer und im Live-Betrieb. Ist im laufenden Monat schon eine höhere Viertelstunde gemessen, plant Earnie bis zu dieser Höhe, weil sie ohnehin bezahlt wird. Ist der Monat noch ohne Messung, etwa direkt nach der Installation, hält der Plan die Grenze selbst. Kann Earnie nicht planen und schaltet in den Automatikbetrieb, gilt die Grenze nicht; das Protokoll und der [Monitor](#monitor) vermerken das. Der Monitor zeigt auch Monatsspitze, Betrag und Viertelstunden, in denen der Plan die Grenze nicht halten kann. Eine enge Grenze kann mehr kosten, als sie spart. Das zeigt ein Vergleich von Varianten mit verschiedenen Grenzen im Szenario-Explorer.
+
+**Im Live-Betrieb: Beobachten oder Danach planen.** Mit einer Bezugsgrenze legt das Szenario fest, was Earnie im Live-Betrieb damit tut. Vorgeschlagen ist **Beobachten**: Earnie plant und steuert wie ohne Grenze. Jede Viertelstunde rechnet er zusätzlich einen Plan mit Grenze, führt ihn aber nicht aus. Der [Monitor](#monitor) zeigt dann, wo und wie Earnie eingegriffen hätte, die geschätzte Monatsspitze und den Leistungspreis mit Earnie. So lässt sich die Grenze ohne Risiko ansehen, bevor sie steuert. **Danach planen** hält die Grenze ein, wie oben beschrieben. Die Wahl gilt nur für das Live-Szenario; der Szenario-Explorer plant immer mit der Grenze.
+
 - Unter jedem gewählten Tarif steht eine **Vorschau**: Hinweise und Preiskurven, gerechnet mit Land, Region und Netzbereich des Hausprofils dieses Szenarios. Bitte die Werte auf Richtigkeit prüfen – für Vollständigkeit und Aktualität gibt es keine Garantie.
 - Eigene Tarife (**· Benutzertarif** in den Listen) entstehen auf der Seite [Tarife](#tarife-benutzertarife). **Benutzertarife verwalten** öffnet sie mit dem Hausprofil des Szenarios; ist ein Benutzertarif gewählt, öffnet **Benutzertarif bearbeiten** genau diesen. Beide Knöpfe sind gesperrt, solange das Szenario ungespeicherte Änderungen hat.
 - Land- und Tariftyp-Filter schränken nur die Liste ein. Ein gespeicherter Tarif bleibt gewählt, auch wenn er nicht zum Filter passt.
 - Kurz vor Monatsende warnt der Editor, wenn einem Monatstarif (`monthly_table`) der Preis des nächsten Monats fehlt. Bei Katalogtarifen wird er direkt dort eingetragen; bei einem Benutzertarif führt **Im Tarif-Editor öffnen** auf die Seite Tarife.
-- **Monatliche Fixkosten** (Grundpreis des Lieferanten, optional Netz-, Messstellen- und sonstige Kosten) fließen als Näherung in die Gesamt- und Monatskosten des Szenario-Explorers ein, nicht in die Live-Optimierung.
+- **Monatliche Fixkosten** (Grundpreis des Lieferanten, feste Beträge des Netzbereichs, optional Messstellen- und sonstige Kosten) fließen als Näherung in die Gesamt- und Monatskosten des Szenario-Explorers ein, nicht in die Live-Optimierung.
 - Der volumetrische **Netznutzung-Arbeitspreis** wird im Hausprofil (Standort) gepflegt. Er fließt in Live-Betrieb und Szenario-Explorer ein und steht in den Fake-Jahresrechnungen getrennt vom Lieferantenanteil.
 - Nach jedem Lauf des Szenario-Explorers liegen **Fake-Jahresrechnungen** (Markdown) im Log-Ordner unter `invoices/`: Bezug und Einspeisung mit Ø Tarif- und Ø Ist-Preis, die Katalogparameter stehen am Ende.
 
@@ -266,11 +273,15 @@ Nachrechnen: [Tarife und Preise nachrechnen](../referenz/tarife-quellen.md) · T
 Unter **Konfiguration → Tarife** entstehen eigene Tarife, wenn der eigene Tarif nicht im Katalog steht: fester Preis, Spot-Tarif mit Aufschlag, Monatspreise oder Zeitfenster (zum Beispiel Nacht- oder Wochenendpreise). Die Seite erscheint zusammen mit dem Szenarienkonfigurator.
 
 - **Hausprofil:** Oben wird das Hausprofil gewählt. Land, Region, Zeitzone und Netzbereich kommen von dort und werden nur angezeigt; ändern lassen sie sich im Hauskonfigurator. Vorschau und Prüfungen rechnen mit diesen Werten.
-- **Neu, kopieren, importieren:** Links stehen die eigenen Tarife sowie **Neuer Bezugstarif** und **Neuer Einspeisetarif**. Ein Katalogtarif lässt sich als Vorlage kopieren, Tarife im JSON-Format lassen sich importieren.
+- **Übersicht und Bearbeiten:** Oben schaltet **Ansicht** zwischen **Übersicht** und **Bearbeiten** um; daneben stehen **Neuer Bezugstarif** und **Neuer Einspeisetarif**, die das Formular in der Ansicht Bearbeiten öffnen. Die Seite startet in der Übersicht. Der Knopf **Benutzertarif bearbeiten** im Szenarienkonfigurator öffnet den Tarif direkt in der Ansicht Bearbeiten.
+- **Tariftabellen:** Die Übersicht hat einen Reiter für Bezug und einen für Einspeisung. Jeder listet die eigenen Tarife (Herkunft **Eigener**), die Tarife des Katalogs `tariffs.json` (**Katalog**) und, sobald geladen, Vorlagen aus der Tarifdatenbank (**Vorlage**). Die Parameter stehen als Spalten (Anbieter, Preisart, Basispreis bzw. Vergütung, Auf- und Abschläge, Grundgebühr, Prüfstatus); **Alle Spalten zeigen** ergänzt weitere. **Preise** rechnet die Preisspalten auf brutto oder netto um. Filter je Reiter: Land (startet mit dem Land des Hausprofils), Preisart, Herkunft, Suche in Bezeichnung und Anbieter, **Nur meine Region**.
+- **Auswählen und handeln:** Zeilen in der Tabelle anhaken, dann eine Aktion wählen. **Öffnen** (genau ein eigener Tarif) öffnet ihn zum Ändern. **Als Vorlage kopieren** (Katalogtarife oder Vorlagen) legt eigene Tarife an: eine einzelne Kopie öffnet sich ungespeichert in der Ansicht Bearbeiten, mehrere Kopien werden sofort gespeichert. **Löschen** gilt nur für eigene Tarife. **Vergleichen** zeigt ein bis fünf Tarife nebeneinander, mit den Parametern als Zeilen (**Nur Unterschiede** blendet gleiche aus) und der Preiskurve eines Tages. Eine Aktion, die nicht zur Auswahl passt, ist ausgegraut; der Mauszeiger darüber nennt den Grund.
+- **Importieren:** Unter den Tabellen nimmt **JSON importieren** Tarife im JSON-Format auf.
 - **Eingabe in vier Schritten:** Name, Anbieter, **Land des Tarifs** (vorbelegt mit dem Land des Hausprofils), Tarifart und Preis; danach Zeitfenster, Kosten und erweiterte Einstellungen. Rechts zeigt die Vorschau Hinweise, Preiskurven und einen Rechnungsvergleich.
 - **Speichern:** **Tarif speichern** erscheint, sobald der Tarif gültig ist, und schreibt ihn nach `user_tariffs.json`. Im Szenarienkonfigurator steht er danach mit dem Zusatz **· Benutzertarif** zur Auswahl.
 - **Prüfung:** Nach jedem Speichern oder Löschen prüft Earnie alle Tarife und die Szenarien, die sie verwenden, und zeigt Befunde als Fehlermeldung.
-- **Löschen:** **Diesen Tarif löschen** entfernt einen ungenutzten Tarif sofort. Wird er in einem Szenario verwendet, nennt Earnie die Szenarien und löscht erst nach **Trotzdem löschen**. Diese Szenarien meldet die Prüfung danach, bis dort ein anderer Tarif gewählt ist.
+- **Löschen:** In der Übersicht den Tarif auswählen und **Löschen** klicken. Ein ungenutzter Tarif ist sofort entfernt. Wird er in einem Szenario verwendet, nennt Earnie die Szenarien und löscht erst nach **Trotzdem löschen**. Diese Szenarien meldet die Prüfung danach, bis dort ein anderer Tarif gewählt ist.
+- **Teilen mit der Tarifdatenbank:** Benutzertarife lassen sich freiwillig an die kostenlose Edibert-Tarifdatenbank senden, damit andere sie als Vorlage nutzen können. Dafür braucht es eine eigene Zustimmung im Abschnitt **Teilen mit der Tarifdatenbank** (Schalter **Teilen mit der Edibert-Tarifdatenbank erlauben**), getrennt von der Nutzungsstatistik. Ohne Zustimmung sendet der Editor nichts und fragt beim Server nichts an. Auch mit Zustimmung ist kein Tarif vorausgewählt: Im Abschnitt *Teilen* des Editors wird jeder Tarif einzeln angehakt, vorher steht dort das genaue Paket. Gesendet wird nur der Tarif selbst (Typ, Produktname, Anbieter, Land, Preise, Gebühren, Regeln), keine Installations-ID, keine Adresse, keine Verbrauchsdaten und keine Notizen. Mit Zustimmung zeigt der Editor außerdem den Prüfstatus von Tarifen aus der Datenbank und kann Vorlagen laden. Der Schalter lässt sich jederzeit wieder ausschalten; bereits gesendete Tarife bleiben in der Datenbank. Mit `EARNIE_OFFLINE=1` oder `EDIBERT_EXCHANGE_OFF=1` bleibt das Teilen auch mit Zustimmung aus.
 
 Technik: [Benutzertarife](../konfiguration/preise.md#benutzertarife-usertariffsjson)
 
@@ -312,6 +323,8 @@ Die erzeugten Verbrauchsverläufe lassen sich im Explorer prüfen (Plausibilitä
 3. Rechnung starten. Je nach Umfang kann das länger dauern.
 4. Warten, bis die Auswertung fertig ist. Die Ergebnisse legt Earnie in der Laufzeitablage des Explorers ab.
 
+**Lauf abbrechen:** Während der Rechnung steht im Fortschrittsblock die Schaltfläche **Abbrechen**. Earnie stoppt dann nach der gerade gerechneten Stunde und speichert nichts; die Ergebnisse des letzten vollständigen Laufs bleiben unverändert. Wer während der Rechnung eine andere Seite öffnet oder etwas anklickt, unterbricht nur die Anzeige: Die Rechnung läuft weiter, und beim nächsten Aufruf des Szenario-Explorers erscheinen Fortschritt und **Abbrechen** wieder. Nach einem Neuladen des Browser-Tabs ist der laufende Lauf nicht mehr sichtbar; er rechnet trotzdem zu Ende und speichert sein Ergebnis.
+
 > **Rechenzeit:** Earnie startet für jedes Szenario einen eigenen Prozess auf einem eigenen Prozessorkern. Auf Rechnern mit wenigen Kernen dauert die Rechnung entsprechend länger. Den Szenario-Explorer daher besser nicht auf der Hardware ausführen, die später den Live-Betrieb übernimmt.
 
 **Was rechnet die Zeile „Historisch“?** Die zuvor erzeugte Last mit den Tarifen des Live-Szenarios, **ohne** PV und **ohne** Batterie. Weitere Referenzen ohne Optimierung entstehen per Heuristik bzw. über die Einstellung **Eigene Referenz ohne Optimierung** (bei PV-Szenarien mit dem PV-Ertrag des jeweiligen Szenarios). Batterie und Lastverschiebung gehören zur **optimierten** Variante, nicht zur Zeile Historisch.
@@ -320,14 +333,15 @@ Die erzeugten Verbrauchsverläufe lassen sich im Explorer prüfen (Plausibilitä
 
 Die Auswertung umfasst unter anderem:
 
-- **Gesamtkosten und -Verbrauch:** Tabelle mit Jahres Verbrauch, Speicher-Standby, Gesamtverbrauch, Jahres Kosten, Δ zur Live-Referenz und Hinweis
+- **Ersparnis gegen Standard-Regeln:** Was Earnie über Batterie und freie Regeln hinaus bringt, dazu der Anteil der Regeln an der Gesamtersparnis. Der Bereich **Alle Stufen** zeigt die Leiter von „Ohne Steuerung“ bis Earnie. Der Wert ist kleiner als die frühere Ersparnis gegen die Referenz ohne Optimierung, weil die Methode strenger ist. Details: [Betriebsmodi](../ui/betriebsmodi.md#ersparnis-gegen-standard-regeln)
+- **Gesamtkosten und -Verbrauch:** Tabelle mit Jahres Verbrauch, Speicher-Standby, Gesamtverbrauch, Jahres Kosten, Ersparnis gegen Standard-Regeln, Δ zur Live-Referenz und Hinweis
 - **Kostenvergleich** je Monat (Referenz und optimierte Szenarien)
 - **Monatsverläufe** und Plausibilitätsansichten
 - Charts zu Leistung, Verbrauch und PV, je nach gewählter Ansicht
 
 Die Ergebnisse sind eine **Entscheidungsgrundlage** für Investition und Tarifwahl, keine exakte Prognose der nächsten Stromrechnung. Eine Gewähr, dass sie genau so eintreffen, gibt es nicht.
 
-Der volumetrische **Netznutzung Arbeitspreis** (Hausprofil) fließt in die Kosten ein. Leistungspreis und netzgebietsspezifische Tabellen sind nicht berücksichtigt.
+Der volumetrische **Netznutzung Arbeitspreis** (Hausprofil) fließt in die Kosten ein. Trägt der Netzbereich einen **Leistungspreis**, weist der Szenario-Explorer ihn je Kalendermonat aus. Die Planung kennt den Preis selbst nicht, die SE-Optimierung plant aber unter einer eingetragenen Bezugsgrenze.
 
 <a id="gesamtkosten-jahres-verbrauch-kwh"></a>
 
@@ -340,6 +354,7 @@ Alle Zeilen zählen dasselbe: den **gebuchten Hausverbrauch** der jeweiligen Zei
 | ------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | **Historisch** (ohne Optimierung, …) | Last des Live-Hausprofils ohne PV und Batterie über dieselben Zeitfenster wie die Optimierung      |
 | **Referenz** (…) ohne Optimierung    | Last des Hausprofils des Szenarios über dieselben Zeitfenster wie die Optimierung                  |
+| **Wechselrichter-Eigenverbrauch**, **Standard-Regeln** | Grundlast und flexible Verbraucher mit derselben Energie wie die Optimierung, ohne Speicher-Standby |
 | **Optimiertes Szenario**             | Gebuchte Last aus Grundlast und flexiblen Verbrauchern nach der Optimierung, ohne Speicher-Standby |
 
 
@@ -354,7 +369,7 @@ Die Spalte **Speicher-Standby** zeigt den Eigenverbrauch der Hausbatterie (`stan
 
 Für den Abgleich von Ist und Modell eignen sich der Hauskonfigurator mit der Leistungsprofil-CSV sowie die Tabellen **Gesamtkosten und -Verbrauch** und **Verbrauchsvergleich** im Explorer.
 
-Weicht der Jahresverbrauch einer Zeile um **mehr als 5 %** von der Live-Referenz ab, zeigt die Spalte **Hinweis** eine Warnung. Dahinter kann ein Simulationsproblem stecken, das wir gerne nachvollziehen möchten. Melden Sie es am besten über **Info / About → Kontakt** als öffentliches Issue (ohne Zugangsdaten) oder senden Sie die Config-ZIP privat an `support@earnie-hems.com` – vielen Dank!
+Weicht der Jahresverbrauch einer Zeile um **mehr als 5 %** von der Live-Referenz ab, zeigt die Spalte **Hinweis** eine Warnung. Ausgenommen sind Szenarien mit einem anderen Heizsystem als die Live-Referenz, weil sich ihr Stromverbrauch gewollt ändert; den Strom eines Heizstabs rechnet Earnie vorher heraus. Dahinter kann ein Simulationsproblem stecken, das wir gerne nachvollziehen möchten. Melden Sie es am besten über **Info / About → Kontakt** als öffentliches Issue (ohne Zugangsdaten) oder senden Sie die Config-ZIP privat an `support@earnie-hems.com` – vielen Dank!
 
 Technische Details: [Betriebsmodi – Szenario-Explorer](../ui/betriebsmodi.md#gesamtkosten-und--verbrauch) · [Historische Leistungsprofil-CSV](../konfiguration/verbrauchs-csv.md)
 
@@ -449,11 +464,24 @@ Die Abschnitte folgen der Navigation: zuerst die Seiten unter **Live-Cockpit** (
 
 *Monitor (Chart 1): Vergangenheit, laufender Plan und Preisprognose in einem Sunset-2-Sunset-Fenster.*
 
+Gibt es E-Autos mit dynamischer Wallbox-Zuordnung, steht oben der Abschnitt **Wallboxen**: je Wallbox frei, angesteckt und noch nicht erkannt, Probeladung läuft, oder das zugeordnete Auto mit dem Beleg (Steckabgleich, Probeladung, Auswahl im Monitor). Bei einer angesteckten Wallbox wird das Auto aus der Liste gewählt und mit **Zuordnen** bestätigt; der Optimierer-Dienst übernimmt die Auswahl sofort. Ein dynamisches Auto, das noch nicht zugeordnet ist, plant Earnie mit **Prognose, wenn nicht angeschlossen** gegen die freien Wallboxen; Sollwerte bekommt es erst nach der Zuordnung.
+
 Der Monitor unter **Live-Cockpit → Monitor** (Sunset-2-Sunset) zeigt Vergangenheit, Gegenwart und Vorausschau in einem Cockpit. Am Desktop umfasst das Fenster SA₀→SA₂ (SA = Sonnenaufgang), auf dem Smartphone wird es in Abschnitte von Sonnenaufgang zu Sonnenaufgang geteilt. Chart 1, SoC-Linien und Sankey: [Charts & Panels](../ui/charts.md) · Modus: [Betriebsmodi](../ui/betriebsmodi.md)
 
 **Abwesenheitsmodus:** Ist er wirksam (Earnie-Schalter und/oder Smarthome-Signal `sens_absent_mode`), erscheint oben der Hinweis „Abwesenheitsmodus aktiv“ mit der Quelle. Verbraucher mit der Option „Inaktiv wenn abwesend“ fallen dann aus der Live-Optimierung – außer der Haus-Wärme, die mit abgesenkter Temperatur weiterläuft.
 
-**Ersparnis in Chart 2:** Die Kennzahlen gelten **je Sonnenaufgangs-Tag** (Smartphone: der sichtbare Tag; Desktop: zwei Spalten für SA₀→SA₁ und SA₁→SA₂). Am laufenden Tag zeigt Chart 2 die **Ersparnis bisher** (seit Sonnenaufgang) und die **Ersparnis erwartet** (bis zum nächsten Sonnenaufgang). Der Energievergleich im Expander bezieht sich dagegen auf den vollen Planungshorizont (jetzt bis übernächster Sonnenaufgang).
+**Leistungspreis:** Mit einer Bezugsgrenze im Live-Szenario oder einem Leistungspreis des Netzbereichs im laufenden Monat zeigt der Monitor unter Chart 2 (Bereich „Earnie-Effekt“) die Monatsspitze, die abgerechnete Leistung (mindestens die Mindestleistung), den Betrag des Monats bisher (brutto) und was ein kW mehr Spitze diesen Monat kostet. Ist im Monat noch nichts gemessen, steht „unbekannt“, nie 0. Kann der letzte Plan die Grenze in einzelnen Viertelstunden nicht halten, erscheint eine Warnung mit Anzahl, erster Viertelstunde und Hauptursache; die Einzelheiten und gemessene Überschreitungen stehen unter „Details zur Bezugsgrenze“. Hinweise nennen eine Grenze unter der Mindestleistung, eine noch inaktive Grenze und Zyklen, die die Grenze nicht eingeplant haben. Im Beobachtungsmodus kommt eine zweite Zeile dazu: die gemessene und die geschätzte Spitze seit Beginn der Beobachtung (ohne und mit Earnie), die geschätzte Ersparnis beim Leistungspreis zwischen beiden und die Mehrkosten für Strom im aktuellen Plan; die Details listen die Viertelstunden, in denen Earnie eingegriffen hätte. Der Wert ist Earnies eigene Messung; maßgeblich ist die Abrechnung des Netzbetreibers. Details: [Betriebsmodi](../ui/betriebsmodi.md#sunset-2-sunset-seite-monitor)
+
+**Mit Earnie gespart:** Die Kachel unter der Überschrift „Earnie-Effekt“, über Chart 2, zeigt das Ergebnis aller abgeschlossenen Sonnenaufgangs-Tage seit Beginn der Zählung, mit Datum und Anzahl der Tage. Darunter steht der laufende Tag („Heute bisher (vorläufig)“) mit denselben Zahlen wie in Chart 2, sobald der Tag gebuchte Viertelstunden hat. War Earnie insgesamt teurer, heißt die Kachel „Mit Earnie mehr ausgegeben“.
+
+- **Vergleich:** gleiche PV, gleiche Preise und je Gerät der gleiche Tagesverbrauch, aber zur gewohnten Zeit: Geräte so, wie das Hausprofil sie beschreibt (eingestellte Startzeit, Wärmemodell), der Poolfilter in seinem eigenen Fenster, das E-Auto ab dem Einstecken mit voller Leistung, ein Heizstab neben Gas, Öl oder Pellets aus und seine Wärme aus dem Brennstoff; eine Hausbatterie im Herstellermodus (Eigenverbrauch). Grundlage sind die gemessenen Werte, keine Planwerte.
+- **Laufender Tag:** Bis zum Tagesabschluss zählt nur die Batterie. Erst dann steht fest, wie viel Energie jedes Gerät bekommen hat; verschobene Geräte, E-Auto und Heizstab kommen dann dazu.
+- **Grenzen:** Die gewohnte Zeit ist das Modell aus dem Hausprofil, nicht der tatsächliche Tagesablauf. Gemessene Verbrauchsprofile nimmt das Buch bewusst nicht: Sie stammen aus der Zeit, in der Earnie die Geräte schon verschiebt. Geräte ohne eigenen Zähler zählen zur gemessenen Zeit, der Hilfetext der Kachel nennt sie. Die Szenario-Analyse vergleicht strenger, mit Standard-Regeln wie Laden bei PV-Überschuss; ihre Ersparnis ist deshalb meist kleiner. Was Powerstations aus ihrem Speicher liefern, ist nicht bewertet; ihr Laden zählt zur tatsächlichen Zeit.
+- **Ohne Hausbatterie:** Das Buch läuft auch dann; die Vergleichsanlage hat keine Batterie und es gibt keine SoC-Korrektur.
+- **Genauigkeit:** Das Ergebnis hängt vom eingestellten Batterie-Wirkungsgrad ab und ist keine Stromrechnung. Einzelne Tage schwanken, aussagekräftig sind längere Zeiträume.
+- **Unvollständige Tage:** Tage mit weniger als 80 % gebuchten Viertelstunden zählen mit. Der Hilfetext der Kachel nennt ihre Anzahl, Chart 2 markiert sie mit „unvollständig“.
+
+**Ersparnis in Chart 2:** Chart 2 ist eine Kontoansicht: Zwei Linien zeigen den Kontostand seit Fensterstart mit und ohne Earnie (links von Jetzt gebucht aus dem Ersparnis-Buch, rechts der Plan gegen BL Ziel); fällt eine Linie, wird bezahlt. Der grüne oder rote Abstand zwischen den Linien ist die Ersparnis. Mit dem Umschalter **Ist bei Jetzt** treffen sich die Linien bei Jetzt (Abstand am Fensterstart = bisher, am Ende = erwartet), mit **Gemeinsamer Start** beginnen beide bei 0 € (Abstand bei Jetzt = bisher, am Ende = gesamt). Das Panel darunter prüft, ob beide Seiten mit demselben Verbrauch gerechnet wurden. Beträge stehen ohne Vorzeichen, die Bedeutung als Wort dabei („gespart“, „mehr ausgegeben“). Das Dezimalzeichen folgt der Sprache des Browsers: Steht in den Spracheinstellungen Englisch vor Deutsch, zeigt Earnie einen Punkt (`2.18 €`), sonst ein Komma (`2,18 €`). Das gilt auch für kWh, kW und Prozent, für Tabellen und für die Achsen der Charts. Nur Eingabefelder zeigen weiter einen Punkt. Die SoC-Korrektur steht als eigenes Label, abgeschlossene Tage zeigen ihr **Ergebnis** aus dem Buch, ein Fenster ohne Vergangenheit den **Plan**. Details: [Charts](../ui/charts.md#chart-2-kontostand-mit-und-ohne-earnie). Der Energievergleich im Expander bezieht sich dagegen auf den vollen Planungshorizont (jetzt bis übernächster Sonnenaufgang).
 
 #### Chart 1: SoC-Linien (Plausibilität)
 
@@ -470,9 +498,11 @@ Die Seite **Live-Cockpit → Manuelle Geräte** zeigt alle Verbraucher mit der R
 
 ### Analyse Verbrauch & Kosten
 
-Die Seite **Live-Cockpit → Analyse Verbrauch & Kosten** gibt es nur im Live-Betrieb mit bestehender Smarthome-Verbindung (UI-Modus `live_environment`). Sie wertet das Produktiv-Log aus:
+Die Seite **Live-Cockpit → Analyse Verbrauch & Kosten** gibt es nur im Live-Betrieb mit bestehender Smarthome-Verbindung (UI-Modus `live_environment`). Ganz oben steht der **Kontostand mit und ohne Earnie** für den gewählten Zeitraum, aus dem Ersparnis-Buch und in derselben Darstellung wie Chart 2 im Monitor: Zwei Linien zeigen den Kontostand seit Fensterstart, mit dem Umschalter **Ist bei Jetzt** enden beide am Fensterende (der Abstand am Anfang ist die Ersparnis des Zeitraums), mit **Gemeinsamer Start** beginnen beide bei 0 €. Weil bei mehreren Wochen die Gesamtkosten die Skala bestimmen, zeigt ein Panel darunter die **Ersparnis seit Fensterstart** allein: grün gespart, rot mehr ausgegeben. Unvollständige Tage sind markiert; die SoC-Korrekturen der abgeschlossenen Tage stecken in keinem Abstand, eine Zeile unter dem Chart nennt ihre Summe.
 
-- die letzten **7** oder **28 Tage** (verschiebbar),
+Darunter wertet die Seite das Produktiv-Log aus:
+
+- die letzten **7** oder **28 Tage** (verschiebbar; gilt auch für den Kontostand),
 - eine Kennzahl für die letzten **365 Tage** vorhandener Log-Daten,
 - Batterieflüsse,
 - den **Wärmeinhalt** (Simulation und Ist) aus der Live-Historie.
@@ -543,7 +573,7 @@ Die signierte Datei lässt sich **nicht selbst erzeugen**. Earnie berechnet nur 
    Die Ausgabe enthält `fingerprint=` (vollständig) und `fingerprint_display=` (Kurzform).
 4. Über **Info / About → Registry per E-Mail anfordern** an `support@earnie-hems.com` senden. Betreff („Earnie Registry“), Fingerprint und Datenschutzhinweis sind im Mailtext bereits enthalten.
   - Die Speicherung der Absenderadresse für Supportzwecke ist standardmäßig aus (**Nein**, DSGVO); bei Bedarf auf **Ja** stellen.
-  - Optional die Kontakt-ZIP über **Privater Support** anhängen – nicht in öffentlichen GitHub-Issues.
+  - Optional das Support-Paket (**Sichern & Übertragen**) an die Mail anhängen – nicht in öffentlichen GitHub-Issues.
 5. Die Antwort enthält die Datei `earnie_registry.json`.
 6. Datei ablegen:
 

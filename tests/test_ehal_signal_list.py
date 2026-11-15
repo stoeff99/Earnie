@@ -317,7 +317,9 @@ def test_normalize_export_host_strips_pasted_scheme(raw: str, expected: str) -> 
     assert normalize_export_host(raw) == expected
 
 
-@pytest.mark.parametrize("raw", ["http://192.168.1.10:8541", "192.168.1.10/ehal"])
+@pytest.mark.parametrize(
+    "raw", ["http://192.168.1.10:8541", "192.168.1.10/ehal", "ftp://192.168.1.10"]
+)
 def test_normalize_export_host_rejects_port_or_path(raw: str) -> None:
     with pytest.raises(ValueError, match="ohne Port"):
         normalize_export_host(raw)
@@ -420,6 +422,18 @@ _SETUP_LIVE_READ_IDS = {
     "heatpump.waermepumpe.sens_energy_total",
     "heatpump.waermepumpe.sens_temperature_heat_storage",
     "heatpump.waermepumpe.sens_temperature_heat_storage_low",
+    "heatpump.waermepumpe.sens_temperature_heat_storage_top",
+    "heatpump.waermepumpe.get_temperature_heat_storage_setpoint",
+    "heatpump.waermepumpe.get_temperature_heat_storage_tolerance",
+    "heatpump.waermepumpe.get_temperature_heat_storage_max",
+    "heatpump.waermepumpe.sens_operating_mode",
+    "heatpump.waermepumpe.sens_sg_ready_state",
+    "heatpump.waermepumpe.sens_heat_power",
+    "heatpump.waermepumpe.sens_temperature_source",
+    "heatpump.waermepumpe.sens_temperature_dhw",
+    "heatpump.waermepumpe.get_temperature_dhw_min",
+    "heatpump.waermepumpe.sens_temperature_room",
+    "heatpump.waermepumpe.get_temperature_room_setpoint",
     "evcs.e_auto.sens_evcs_active_power",
     "evcs.e_auto.sens_evcs_connected",
     "ev.e_auto.sens_evcs_soc_act",
@@ -428,6 +442,8 @@ _SETUP_LIVE_READ_IDS = {
     "ev.e_auto.get_evcs_ready_by_time",
     "ev.e_auto.get_evcs_limit_soc",
     "ev.e_auto.get_evcs_soc_min_immediate",
+    "ev.e_auto.sens_ev_connected",
+    "ev.e_auto.sens_ev_charge_power",
     "ev.e_auto.sens_energy_total",
     "consumer.verbraucher.sens_power_act",
     "consumer.verbraucher.sens_consumer_active",

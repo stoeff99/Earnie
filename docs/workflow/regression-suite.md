@@ -212,7 +212,7 @@ Order: **R-Rec → R0 → P1 → P2 → L3 → P3.**
 
 **Capture point:** the central input is `optimization_matrix` in `main.py` (per slot: `k_act`, `expected_p_pv`, `expected_p_act`, …) plus `planning_window`. Live snapshot / thermal prep run **before** this hook; afterwards the matrix is still modified (`prepare_optimization_matrix`, standby relief), so it is captured **directly before `prepare_optimization_matrix`** — a well-defined replay entry point. The debug snapshot already serializes `planning_matrix` / `planning_window`; the recorder does the same every cycle.
 
-**Entry per cycle:** timestamp, `app_version`, config hash; matrix + window (columnar arrays, not row dicts); start state (SoC, `flexible_consumers_state`, charging contexts, run state, PV counter state); **outputs:** setpoints actually written, plan hash, flags (override, immediate charging, outage, manual intervention).
+**Entry per cycle:** timestamp, `app_version`, config hash; matrix + window (columnar arrays, not row dicts); start state (SoC, `flexible_consumers_state`, charging contexts, run state, PV counter state); **outputs:** setpoints actually written, plan hash, flags (override, immediate charging, `out_of_band` — out-of-band trigger, called `outage` in cycles recorded before 2026-11-09 —, manual intervention), and `solver`: one record per MILP solve (stage `strict` / `gap`, elapsed seconds, whether the stage stopped at its time limit, objective). A plan from a stage stopped at its time limit depends on CPU speed, so its replay may differ; `recorder_replay.recorded_time_limit_hit(entry)` tells such cycles apart (`None` for cycles recorded before `solver` existed).
 
 **Storage:** one gzip JSONL segment per day, `runtime/recorder/cycles_YYYY-MM-DD.jsonl.gz`; ring buffer = delete segments older than N days. Configuration snapshots are stored once per hash and referenced from cycles. Estimate (to be measured): ~10–20 KB per cycle compressed, ~1–2 MB/day, 7–14 MB for 7 days.
 
@@ -223,6 +223,8 @@ Order: **R-Rec → R0 → P1 → P2 → L3 → P3.**
 **Privacy:** entries contain load profiles → local only, never uploaded, documented as opt-out in `docs/einrichtung/betrieb.md`. Same line as §9.
 
 **Acceptance test:** record a cycle, replay it offline from the recording, and assert the replay produces the same plan as the live run (under the solver mode of §16). This doubles as the first determinism evidence.
+
+**Replay runs with Live cycle semantics:** `recorder_replay` solves inside `live_cycle_scope()` and freezes the planning clock at the cycle's tick, as `main.py` does. Code that asks whether it plans a Live cycle (`in_live_cycle`, `is_live_thermal_planning`) therefore answers as in production. This matters when the live snapshot was rejected (`all_zero`, `negative_house`) and row 0 of the recorded matrix stayed `forecast`: Live still plans thermal consumers from the store need, while outside the scope the row marker made replay plan them with SE day targets (cycle 2026-11-01 16:44: heat pump with 23.6 kWh remaining instead of 0).
 
 **Debug-dump integration (decided):** the unified debug-dump ZIP (schema v3) automatically contains the matching recorder window (`recorder/` segments plus the referenced config snapshots) — **whole ring buffer** by default. Consequence: **every user report becomes a potential golden case.** `--intake` (P2) turns such a ZIP into a case folder; L3 (§15) cuts the relevant time window from the recorded cycles. The dump manifest records the window (`recorder.from`, `recorder.to`, cycle count, config hashes) as an **optional** `manifest.recorder` block (no schema bump). Dumps without recorder data (older versions, recorder off) stay valid for replay, but `--intake` rejects them (fail loud, no synthetic fallback — §9, §13.6); such reports get a pytest regression instead. Privacy: a dump now carries up to N days of load profile; the dump dialog and `docs/einrichtung/betrieb.md` disclose this and require sharing only with the maintainer.
 
@@ -241,8 +243,8 @@ Order: **R-Rec → R0 → P1 → P2 → L3 → P3.**
 Frozen inputs remove time and price as sources of deviation. What remains is the MILP solver. Findings from `optimizer/cbc_solver.py`:
 
 1. Default solver is **HiGHS** (`threads=1`); CBC is optional. Spec text and fingerprint must name the solver actually used.
-2. `solve_with_strict_fallback` is two-stage: a **strict** attempt with a **3 s wall-clock limit**; if not `Optimal`, a fallback with **`gapRel = 10 %`**. Consequences: which stage produces the plan depends on CPU speed and load (also on the same machine, e.g. parallel workers; dev machine vs. NAS), and stage 2 may return any feasible plan within 10 % of the optimum.
-3. `optimizer/cbc_events.py` already logs slow strict runs; production logs show how often the fallback occurs.
+2. `solve_with_strict_fallback` is two-stage: a **strict** attempt with a **5 s wall-clock limit** (3 s before 2026-11-09); if not proven optimal, a fallback with **`gapRel = 10 %`** and a **15 s wall-clock limit**. PuLP reports a time limit with a solution as `Optimal`; since 2026-11-09 the solver checks the solution status (`stopped_at_limit`) and treats such a strict stop as not optimal (`strict_fallback`, `strict_status` `TimeLimit`), so a strict plan never depends on CPU speed. Before, stage 1 returned whatever plan it had at the limit and stage 2 only ran without any solution. Remaining dependence: stage 2 may return any feasible plan within 10 % of the optimum, which is reproducible as long as it ends on the gap, but a stage 2 stopped at its own limit (`gap_time_limit_hit` in `outputs.solver`) depends on CPU speed and load again. SE runs use their own strict limit (`cbc_strict_time_limit_sec` in `backtesting_scenarios.json`).
+3. `optimizer/cbc_events.py` logs slow strict runs and fallbacks (`time_limit_hit` on each event); the recorder stores one record per solve in `outputs.solver`, so production recordings show how often the fallback occurs.
 4. The existing `tests/test_prod_dump_regression.py::_solve_urgent_dump_milp` calls `PULP_CBC_CMD(msg=False)` directly, not the production path.
 
 **Study design (once recordings exist):**
@@ -250,7 +252,7 @@ Frozen inputs remove time and price as sources of deviation. What remains is the
 | Factor | Levels |
 |---|---|
 | Solver | HiGHS (default), CBC for comparison |
-| Mode | production path (3 s → 10 %), strict without limit, `gapRel` 1 % |
+| Mode | production path (5 s → 10 %), strict without limit, `gapRel` 1 % |
 | Load | idle, N parallel workers |
 | Repetitions | 20 per case |
 | Input perturbation | none, prices ±0.1 ct |

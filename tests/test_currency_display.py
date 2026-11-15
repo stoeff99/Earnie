@@ -56,11 +56,13 @@ def test_active_units_from_house_profile(monkeypatch):
     assert currency_display.active_units() is EUR
 
 
-def test_cost_annotations_in_chf(swiss):
-    from ui.chart_decorations import _cost_summary_annotations
+def test_number_format_amounts_in_chf(swiss):
+    from ui.number_format import format_cent_kwh, format_euro
 
-    texts = [item["text"] for item in _cost_summary_annotations(12.34, 11.50)]
-    assert texts == ["BL Ziel: 12.34 CHF", "Optimiert: 11.50 CHF", "Ersparnis: -0.84 CHF"]
+    # Viewer language without a browser header: de (decimal comma).
+    assert format_euro(12.34) == "12,34 CHF"
+    assert format_euro(-0.84, signed=True) == "-0,84 CHF"
+    assert format_cent_kwh(28.5) == "28,50 Rp/kWh"
 
 
 def test_tariff_preview_uses_tariff_currency(swiss):

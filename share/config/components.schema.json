@@ -30,13 +30,71 @@
         "$ref": "#/definitions/pv_system_entity"
       }
     },
+    "heating_systems": {
+      "type": "array",
+      "description": "Heizsystem-Katalog: Referenzsysteme der Häuser (thermal_annual heating_system_id in house_profiles.json) und Varianten für Szenarien (settings.heating_system_ids).",
+      "items": {
+        "$ref": "#/definitions/heating_system_entity"
+      }
+    },
+    "wallboxes": {
+      "type": "array",
+      "description": "Wallboxen (Anlagenteil, Datenmodell 6): Kennung, Spannung, Phasen, Stromgrenzen und die Lade-Bindings. Ein E-Auto im Hausprofil verweist über wallbox_assignment darauf.",
+      "items": {
+        "$ref": "#/definitions/wallbox_entity"
+      }
+    },
     "earnie_data_model": {
       "type": "integer",
-      "const": 5,
+      "const": 6,
       "description": "Earnie data-model version for config pack import/export."
     }
   },
   "definitions": {
+    "wallbox_entity": {
+      "type": "object",
+      "required": ["id", "voltage_v", "phases", "min_current_a", "max_current_a"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Kennung der Wallbox (EHAL evcs.<Kennung>.*)." },
+        "label": { "type": "string" },
+        "voltage_v": { "type": "number", "exclusiveMinimum": 0, "description": "Spannung je Phase (V)." },
+        "phases": { "type": "integer", "minimum": 1, "maximum": 3 },
+        "min_current_a": { "type": "number", "minimum": 0, "description": "Kleinster Ladestrom, den die Wallbox einstellt (A)." },
+        "max_current_a": { "type": "number", "minimum": 0, "description": "Größter Ladestrom der Wallbox (A)." },
+        "ehal_bindings": {
+          "type": "object",
+          "description": "Lade-Felder der Wallbox (sens_evcs_active_power, sens_evcs_connected, get_evcs_nominal_current, set_evcs_max_current, set_evcs_mode; bare oder evcs.<Kennung>.<Feld>).",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "heating_system_entity": {
+      "type": "object",
+      "required": ["id", "heat_source", "heating_power_kw"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "heat_source": { "$ref": "./house_profiles.schema.json#/definitions/heat_source" },
+        "heating_power_kw": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Heizleistung des Wärmeerzeugers (kW thermisch), für jede Wärmequelle. Die Eingangsleistung (Strom bei Wärmepumpe / Stromheizung, Brennstoff sonst) leitet Earnie als Heizleistung / Wirkungsgrad (JAZ bzw. Nutzungsgrad) ab."
+        },
+        "min_on_quarterhours": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Mindestlaufzeit in Viertelstunden, nur für elektrische Wärmequellen (Wärmepumpe, Stromheizung); ohne Angabe der thermal_annual-Standard aus house_profiles.schema.json."
+        },
+        "heat_storage": { "$ref": "./house_profiles.schema.json#/definitions/heat_storage" },
+        "parts": {
+          "type": "array",
+          "description": "Innere Teile (D1): nur der Heizstab (id/type heating_rod), nur mit heat_storage. Wire-Kennung = <consumer_id>_<part_id>.",
+          "items": { "$ref": "./house_profiles.schema.json#/definitions/consumer_part" }
+        }
+      }
+    },
     "battery_wear": {
       "type": "object",
       "description": "Verschleißkosten für Batterie-Durchsatz (Laden + Entladen) in der MILP-Zielfunktion.",

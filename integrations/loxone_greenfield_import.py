@@ -276,6 +276,7 @@ def ensure_live_profile(
                     "include_status": ["verordnet"],
                 },
                 "consumers": [],
+                "heating_enabled": False,
             }
         }
         house["profiles"] = profiles
@@ -305,16 +306,24 @@ def _stub_consumer(*, consumer_id: str, label: str, hk_type: str, bindings: dict
         consumer["earnie_role"] = "known"
         consumer["use_profile_csv"] = False
     elif hk_type == "ev":
-        consumer["nominal_power_kw"] = 3.5
+        from house_config.wallboxes import WALLBOX_VOLTAGE_FORM_KEY
+
+        # Data model 6: charge limits as current; the save creates the EV's own wallbox
+        # (its charger bindings move there, house_config.wallboxes.route_evs_to_wallboxes).
+        consumer.pop("nominal_power_kw")
+        consumer["phases"] = 1
+        consumer["min_current_a"] = 6.0
+        consumer["max_current_a"] = 16.0
+        consumer[WALLBOX_VOLTAGE_FORM_KEY] = 230.0
         consumer["battery_capacity_kwh"] = 50.0
-        consumer["min_power_kw"] = 1.4
         consumer["min_on_quarterhours"] = 4
         consumer["charging_schedule"] = dict(_DEFAULT_EV_SCHEDULE)
     elif hk_type == "thermal_annual":
-        consumer["living_area_m2"] = 0.0
-        consumer["building_class"] = 3
-        consumer["heat_pump_type"] = "luft"
-        consumer["persons"] = 2
+        # Building fields live at the house (see apply_typed_matches). Heating power in kW
+        # thermal: the former 1 kW electric stub at the default JAZ 3.5 of an air heat pump.
+        consumer.pop("nominal_power_kw")
+        consumer["heat_source"] = {"type": "heat_pump", "heat_pump_type": "luft"}
+        consumer["heating_power_kw"] = 3.5
     elif hk_type == "thermal_rc":
         consumer["thermal_rc"] = dict(_DEFAULT_THERMAL_RC)
     return consumer
@@ -417,6 +426,10 @@ def apply_typed_matches(
         taken.add(cid)
         if hk_type in {"thermal_annual", "thermal_rc"}:
             needs_geo = True
+        if hk_type == "thermal_annual":
+            # A heat pump in Loxone: „Heizung betrachten“ on, building data to fill in.
+            profile["heating_enabled"] = True
+            profile.setdefault("thermal", {"living_area_m2": 0.0, "building_class": 3})
         consumer = _stub_consumer(
             consumer_id=cid,
             label=match.label,
@@ -634,7 +647,7 @@ def run_greenfield_import(
     ``doc`` (control-name presence). ``probe_host`` / credentials are unused
     when ``doc`` is already loaded (kept for call-site compatibility).
     """
-    from runtime_store.shadow.replay import assert_not_shadow_backend
+    from runtime_store.shadow.hooks import assert_not_shadow_backend
 
     assert_not_shadow_backend("loxone_greenfield_import.run_greenfield_import")
     del probe_host, probe_username, probe_password, probe_timeout_sec

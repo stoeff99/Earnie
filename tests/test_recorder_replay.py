@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 
@@ -32,6 +33,13 @@ _TEST_BATTERY = {
 }
 
 
+def _fixture_heating_systems() -> list[dict]:
+    from tests.fixtures.backtesting_fixtures import FIXTURES_ROOT
+
+    path = FIXTURES_ROOT / "components.json"
+    return json.loads(path.read_text(encoding="utf-8"))["heating_systems"]
+
+
 def _cfg_with_battery(tmp_path, monkeypatch):
     monkeypatch.setenv("EARNIE_OFFLINE", "1")
     monkeypatch.setenv("EARNIE_RUNTIME_PATH", str(tmp_path / "runtime"))
@@ -43,6 +51,8 @@ def _cfg_with_battery(tmp_path, monkeypatch):
                 "inverters": [main_hybrid_inverter()],
                 "batteries": [house_battery_stub()],
                 "pv_systems": [],
+                # The fixture house profile references its heating system from this catalog.
+                "heating_systems": _fixture_heating_systems(),
             }
         ),
         live_settings={**default_live_settings(), "battery_ids": ["home"]},
@@ -86,12 +96,16 @@ def test_replay_strict_stable_plan_hash(tmp_path, monkeypatch):
     _cfg_with_battery(tmp_path, monkeypatch)
     # Use "today" so prune_old_segments does not delete the fresh segment.
     now = datetime.now().replace(microsecond=0)
+    matrix = _sample_matrix(8, base=now.replace(minute=0, second=0, microsecond=0))
+    slot_times = [row["slot_datetime"].isoformat() for row in matrix]
     token = cycle_recorder.begin_cycle(
-        optimization_matrix=_sample_matrix(8, base=now.replace(minute=0, second=0)),
+        optimization_matrix=matrix,
         planning_window={
             "start": now.isoformat(timespec="seconds"),
             "end": (now + timedelta(hours=24)).isoformat(timespec="seconds"),
             "horizon_hours": 24,
+            "sunrise_anchor": slot_times[-1],
+            "slot_datetimes": slot_times,
         },
         soc_percent=55.0,
         soc_percent_by_ess={"home": 55.0},
@@ -108,6 +122,9 @@ def test_replay_strict_stable_plan_hash(tmp_path, monkeypatch):
     )
     segment = cycle_recorder.segment_path_for_day(now.date())
     entry = cycle_recorder.read_segment_cycles(segment)[0]
+    # No thermal consumer reads the forecast, so the empty marker must not
+    # break the replay.
+    assert entry["start_state"]["outdoor_forecast"] is None
     recorder_root = cycle_recorder.recorder_dir()
 
     first = replay_recorded_cycle(
@@ -129,6 +146,86 @@ def test_replay_strict_stable_plan_hash(tmp_path, monkeypatch):
     assert second.cost_euro == pytest.approx(first.cost_euro, rel=1e-9)
     assert first.stage == "strict_only"
     assert first.n_slots == 8
+
+
+class _StopAfterPrepare(Exception):
+    pass
+
+
+def _replay_reading_outdoor_forecast(monkeypatch, start_state: dict):
+    """Run _solve_prepared_entry up to input prep, reading the forecast like a thermal consumer.
+
+    Returns the series read and the mock that stands in for the live fetch.
+    """
+    from data import outdoor_forecast as of
+    from runtime_store import recorder_replay
+
+    read: list[tuple[list[float], str]] = []
+
+    def _prepare(entry, cfg):
+        read.append(of.get_outdoor_forecast_with_fallback(horizon=2, fallback_ambient_c=9.0))
+        raise _StopAfterPrepare
+
+    monkeypatch.setattr(recorder_replay, "_prepare_replay_inputs", _prepare)
+    entry = {
+        "timestamp": "2026-10-28T09:44:52",
+        "planning_window": {"start": "2026-10-28T09:45:00+01:00"},
+        "start_state": start_state,
+    }
+    with patch.object(of, "get_hourly_outdoor_forecast_c", return_value=[3.0, 4.0]) as fetch:
+        with pytest.raises(_StopAfterPrepare):
+            recorder_replay._solve_prepared_entry(entry, solver_mode="strict", verbose=False)
+    return read, fetch
+
+
+def test_replay_runs_inside_the_live_cycle_scope(tmp_path, monkeypatch):
+    """A rejected live snapshot leaves row 0 ``forecast``; Live still plans thermals as Live.
+
+    Replay outside the scope took such a cycle for an SE matrix and planned the heat pump
+    with HDD day targets (cycle 2026-11-01 16:44: 23.6 kWh remaining instead of 0).
+    """
+    from optimizer.live_cycle_scope import in_live_cycle, is_live_thermal_planning
+    from runtime_store import recorder_replay
+
+    _cfg_with_battery(tmp_path, monkeypatch)
+    seen: list[tuple[bool, bool]] = []
+
+    def _prepare(entry, cfg):
+        seen.append((in_live_cycle(), is_live_thermal_planning([{"consumption_mode": "forecast"}])))
+        raise _StopAfterPrepare
+
+    monkeypatch.setattr(recorder_replay, "_prepare_replay_inputs", _prepare)
+    entry = {
+        "timestamp": "2026-11-01T16:44:53",
+        "planning_window": {"start": "2026-11-01T16:45:00+01:00"},
+        "start_state": {},
+    }
+    with patch("data.outdoor_forecast.get_hourly_outdoor_forecast_c", return_value=[3.0]):
+        with pytest.raises(_StopAfterPrepare):
+            recorder_replay._solve_prepared_entry(entry, solver_mode="strict", verbose=False)
+    assert seen == [(True, True)]
+    assert not in_live_cycle()
+
+
+def test_replay_fails_loud_when_recorded_forecast_is_empty(tmp_path, monkeypatch):
+    _cfg_with_battery(tmp_path, monkeypatch)
+    with pytest.raises(ValueError, match="outdoor_forecast"):
+        _replay_reading_outdoor_forecast(monkeypatch, {"outdoor_forecast": None})
+
+
+def test_replay_fetches_live_forecast_for_cycles_without_the_key(tmp_path, monkeypatch):
+    _cfg_with_battery(tmp_path, monkeypatch)
+    read, fetch = _replay_reading_outdoor_forecast(monkeypatch, {})
+    fetch.assert_called_once()
+    assert read == [([3.0, 4.0], "open_meteo")]
+
+
+def test_replay_serves_recorded_forecast(tmp_path, monkeypatch):
+    _cfg_with_battery(tmp_path, monkeypatch)
+    recorded = {"values_c": [1.5, 2.5, 3.5], "source": "open_meteo"}
+    read, fetch = _replay_reading_outdoor_forecast(monkeypatch, {"outdoor_forecast": recorded})
+    fetch.assert_not_called()
+    assert read == [([1.5, 2.5], "open_meteo")]
 
 
 def _bind_limit_soc_marker(monkeypatch, marker: str = "ev.e_auto.get_evcs_limit_soc"):
@@ -216,6 +313,43 @@ def test_recorder_collects_thermal_readings_for_enabled_thermal_control(monkeypa
     assert fetched == ["pool"]
 
 
+def test_sunrise_index_none_without_recorded_anchor():
+    from runtime_store.recorder_replay import _recorded_sunrise_soc_min_index
+
+    entry = {
+        "planning_window": {
+            "slot_datetimes": ["2026-10-28T10:00:00+01:00", "2026-10-28T10:15:00+01:00"],
+            "seed_anchor": "2026-10-28T10:00:00+01:00",
+        }
+    }
+    assert _recorded_sunrise_soc_min_index(entry) is None
+
+
+def test_sunrise_index_from_recorded_window():
+    from runtime_store.recorder_replay import _recorded_sunrise_soc_min_index
+
+    entry = {
+        "planning_window": {
+            "sunrise_anchor": "2026-10-29T07:03:11+01:00",
+            "slot_datetimes": [
+                "2026-10-28T10:00:00+01:00",
+                "2026-10-29T07:00:00+01:00",
+                "2026-10-29T07:15:00+01:00",
+            ],
+        }
+    }
+    assert _recorded_sunrise_soc_min_index(entry) == 1
+
+
+def test_sunrise_index_fails_loud_without_slots():
+    from runtime_store.recorder_replay import _recorded_sunrise_soc_min_index
+
+    with pytest.raises(ValueError, match="slot_datetimes"):
+        _recorded_sunrise_soc_min_index(
+            {"planning_window": {"sunrise_anchor": "2026-10-29T07:00:00+01:00"}}
+        )
+
+
 def test_restored_matrix_keeps_recorded_utc_offset():
     from runtime_store.recorder_replay import _coerce_matrix_datetimes
 
@@ -225,3 +359,135 @@ def test_restored_matrix_keeps_recorded_utc_offset():
     assert rows[0]["slot_datetime"].utcoffset() == timedelta(hours=1)
     assert rows[0]["hour"] == 0
     assert rows[1]["slot_datetime"].tzinfo is None
+
+
+def test_recorded_reserves_shape_battery_params(monkeypatch):
+    from optimizer import powerstation_live
+    from runtime_store import recorder_replay as rr
+
+    seen = {}
+
+    def _apply(params, reserves=None, *, current_soc=None):
+        seen["reserves"] = reserves
+        seen["current_soc"] = current_soc
+        return {**params, "_virtual_reserve_asap_kwh": 0.38}
+
+    monkeypatch.setattr(powerstation_live, "apply_reserves_to_battery_params", _apply)
+    reserves = [{"powerstation_id": "virtual_gs", "asap_charge_kwh": 0.38}]
+    out = rr._battery_params_with_recorded_reserves(
+        {"capacity_kwh": 15.0}, {"active_reserves": reserves}, 12.0
+    )
+    assert seen["reserves"] == reserves
+    # Live relaxes the reserve floor by the SoC reading; replay must pass the same SoC.
+    assert seen["current_soc"] == 12.0
+    assert out["_virtual_reserve_asap_kwh"] == 0.38
+
+
+def test_cycles_without_recorded_reserves_keep_config_params():
+    from runtime_store import recorder_replay as rr
+
+    params = {"capacity_kwh": 15.0}
+    assert rr._battery_params_with_recorded_reserves(params, {}, 50.0) is params
+
+
+def test_recorded_reserves_must_be_a_list():
+    from runtime_store import recorder_replay as rr
+
+    with pytest.raises(TypeError, match="active_reserves"):
+        rr._battery_params_with_recorded_reserves({}, {"active_reserves": {}}, 50.0)
+
+
+def test_early_start_cycle_replays_at_its_tick_not_the_recording_time():
+    """Live plans an early-start cycle for its tick: 23:59:57 belongs to the next day."""
+    from runtime_store import recorder_replay as rr
+
+    moment = rr._recorded_planning_moment(
+        {
+            "timestamp": "2026-10-30T23:59:57",
+            "planning_window": {"start": "2026-10-31T00:00:00+01:00"},
+        }
+    )
+    assert moment == datetime.fromisoformat("2026-10-31T00:00:00+01:00")
+    assert moment.date().isoformat() == "2026-10-31"
+
+
+def test_late_cycle_replays_at_its_recording_time():
+    from runtime_store import recorder_replay as rr
+
+    moment = rr._recorded_planning_moment(
+        {
+            "timestamp": "2026-10-30T05:24:04",
+            "planning_window": {"start": "2026-10-30T05:15:00+01:00"},
+        }
+    )
+    assert moment == datetime(2026, 10, 30, 5, 24, 4).astimezone()
+
+
+def test_planning_moment_needs_the_window_start():
+    from runtime_store import recorder_replay as rr
+
+    with pytest.raises(ValueError, match="planning_window.start"):
+        rr._recorded_planning_moment({"timestamp": "2026-10-30T05:24:04"})
+
+
+def test_naive_window_start_counts_as_system_local():
+    from runtime_store import recorder_replay as rr
+
+    moment = rr._recorded_planning_moment(
+        {
+            "timestamp": "2026-10-30T08:59:53",
+            "planning_window": {"start": "2026-10-30T09:00:00"},
+        }
+    )
+    assert moment == datetime(2026, 10, 30, 9, 0, 0).astimezone()
+
+
+def test_recorded_ess_limits_replace_config_limits_per_ess():
+    from runtime_store import recorder_replay as rr
+
+    params = [{"id": "home", "min_soc": 10.0, "max_charge_power_kw": 5.0, "capacity_kwh": 15.0}]
+    limits = {
+        "home": {
+            "min_soc": 12.0,
+            "max_soc": 95.0,
+            "max_charge_power_kw": 3.0,
+            "max_discharge_power_kw": 5.0,
+            "max_power_kw": 5.0,
+        }
+    }
+    out = rr._battery_params_with_recorded_ess_limits(params, {"ess_limits": limits})
+    assert out[0]["min_soc"] == 12.0
+    assert out[0]["max_charge_power_kw"] == 3.0
+    assert out[0]["capacity_kwh"] == 15.0
+    assert params[0]["min_soc"] == 10.0
+
+
+def test_recorded_ess_limits_fail_loud_for_an_unrecorded_ess():
+    from runtime_store import recorder_replay as rr
+
+    with pytest.raises(ValueError, match="'other'"):
+        rr._battery_params_with_recorded_ess_limits(
+            {"id": "other", "min_soc": 10.0}, {"ess_limits": {"home": {"min_soc": 5.0}}}
+        )
+
+
+def test_cycles_without_recorded_ess_limits_keep_config_params():
+    from runtime_store import recorder_replay as rr
+
+    params = [{"id": "home", "min_soc": 10.0}]
+    assert rr._battery_params_with_recorded_ess_limits(params, {}) is params
+    assert rr._filter_batteries_with_soc(params, None, {}) is params
+
+
+def test_recorded_export_limits_reach_the_milp():
+    from runtime_store import recorder_replay as rr
+
+    assert rr._recorded_export_limits(
+        {"export_limits": {"hk_max_export_kw": 11.0, "inbound_export_limit_kw": None}}
+    ) == {"hk_max_export_kw": 11.0, "inbound_export_limit_kw": None}
+    assert rr._recorded_export_limits({}) == {
+        "hk_max_export_kw": None,
+        "inbound_export_limit_kw": None,
+    }
+    with pytest.raises(ValueError, match="inbound_export_limit_kw"):
+        rr._recorded_export_limits({"export_limits": {"hk_max_export_kw": 11.0}})

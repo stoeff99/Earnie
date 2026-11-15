@@ -30,11 +30,11 @@ Im **Szenario-Explorer** (Verbrauchsdaten / cons_data) gilt für die PV-Linien:
 | `battery_max_charge_power_kw` | kW | `components.json` → `batteries[]` | Max. Ladeleistung (ersetzt das gemeinsame `battery_max_power_kw`) |
 | `battery_max_discharge_power_kw` | kW | `components.json` → `batteries[]` | Max. Entladeleistung |
 | `battery_max_power_kw` | kW | `components.json` → `batteries[]` | **Veraltet (deprecated):** früher eine Grenze für beide Richtungen; wird beim Laden der Konfiguration in Lade- und Entladegrenze übertragen |
-| `limits_from_live` | bool | `components.json` → `batteries[]` | Bei `true` kommen SOC-Min/Max und max. Lade-/Entladeleistung live aus `get_ess_*` (Fallback: Hauskonfigurator-Werte) |
+| `limits_from_live` | bool | `components.json` → `batteries[]` | Bei `true` kommen SOC-Min/Max und max. Lade-/Entladeleistung live aus `get_ess_*` (Fallback: Hauskonfigurator-Werte). Diese Lesewerte müssen statische Gerätegrenzen sein, nie ein Wert, den Earnie selbst schreibt (Details: [EHAL-Referenz](../referenz/ehal.md#get_ess_-limits-device-capability-only-never-an-earnie-setpoint)) |
 | `efficiency` | 0–1 | `components.json` → `inverters[]` | Einweg-Wirkungsgrad DC↔AC (**η_inv**), Pflicht. Wirkt auf PV DC→AC und als Teil des Speicherpfads. Migration bestehender Konfigurationen: `python -m scripts.migrate_conversion_efficiency_once --config-dir <config>` |
 | `battery_efficiency` | 0–1 | `components.json` → `batteries[]` | Einweg-Wirkungsgrad der Zellchemie (**η_batt**). Optimierung und Simulation nutzen **η_path = η_inv · η_batt** (Roundtrip ≈ η_path²). Früher stand hier ein zusammengefasster Pfad-Faktor; die Migration rechnet η_inv heraus. |
-| `battery_min_soc` | % | `components.json` → `batteries[]` | Untere SOC-Grenze (Schutz) |
-| `battery_max_soc` | % | `components.json` → `batteries[]` | Obere SOC-Grenze |
+| `battery_min_soc` | % | `components.json` → `batteries[]` | Untere SOC-Grenze (Schutz). Liegt der gemessene SoC darunter, plant Earnie keine Entladung, bis die Grenze wieder erreicht ist; geladen wird preisoptimal, nicht sofort. Danach wird die Grenze nicht mehr unterschritten. Ausnahme: eine angegriffene virtuelle Reserve (SoC zwischen dieser Grenze und dem SoC-Floor, siehe unten) wird sofort nachgeladen |
+| `battery_max_soc` | % | `components.json` → `batteries[]` | Obere SOC-Grenze. Liegt der gemessene SoC darüber, plant Earnie keine Ladung, bis die Grenze wieder erreicht ist; entladen wird preisoptimal, nicht sofort. Danach wird die Grenze nicht mehr überschritten |
 | `threshold_power` | Anteil | `components.json` → `batteries[]` | Relativ zu `max(charge, discharge)` in kW (z. B. `0.2` = 20 %). Schwellwert für die Modus-Erkennung und für die Entscheidung zwischen Zwangsentladen und Automatik |
 | `standby_power_kw` | kW | `components.json` → `batteries[]` | Dauerhafte AC-Eigenleistung der Batterie (in der Optimierung als Verbrauch rund um die Uhr) |
 | `control` | enum | `components.json` → `batteries[]` | Steuerbarkeit der Anlage: `full` (Default) = Zwangsladen/-entladen; `limits_only` = nur Lade-/Entladegrenzen (Automatik/Entladesperre); `read_only` = Eigenverbrauch ohne Sollwerte. Das Feld beschreibt die Installation und gilt deshalb auch für Simulation, Backtesting und Business Case. |
@@ -60,6 +60,11 @@ Mehrere manuelle Geräte können dieselbe virtuelle Powerstation nutzen. Sie tei
 - Button auf der Seite **Manuelle Geräte**.
 
 Solange ein Gerät aktiv ist, gibt Earnie die gehaltene Reserve frei, der SoC-Floor der Hausbatterie sinkt also. Nach dem Lauf bucht Earnie den Restvorrat weiter ab. Danach lädt Earnie **preisoptimal** nach, mit einer harten Frist von **24 h**.
+
+**Schutz der gehaltenen Reserve:** Der SoC-Floor ist der Mindest-SoC der Hausbatterie plus der Carve-out (z. B. 5 % + 1,1 kWh von 15 kWh = 12,3 %).
+
+- Im Modus **Automatik** begrenzt Earnie das geschriebene Entladelimit auf die Energie über diesem Floor, die in einer Viertelstunde abfließen darf. Bei 13 % SoC sind das rund 0,4 kW. So kann ein großer Verbraucher (z. B. SwimSpa) die Reserve nicht innerhalb eines Slots leeren, die danach aus dem Netz nachgeladen werden müsste. Weiter über dem Floor bleibt das volle Entladelimit.
+- Die Anlage meldet den SoC in ganzen Prozent. Liegt die Anzeige höchstens 1 % unter dem Floor (z. B. 12 % bei 12,3 %), nimmt Earnie die Anzeige als Floor und lädt nicht sofort nach. Liegt der SoC weiter darunter, lädt Earnie die Reserve wie bisher nach.
 
 Einige Felder sind ausgeblendet: Max. Lade-/Entladeleistung, Wirkungsgrad, SoC-Grenzen, Leistungsschwelle, Standby, Steuerbarkeit, `limits_from_live` und Verschleiß. Beim Speichern bzw. Normalisieren übernimmt Earnie diese Werte von der Hausbatterie. Ohne Hausbatterie gelten feste Defaults.
 
@@ -87,6 +92,16 @@ Die Live-PV-Leistung (AC-Summe der Anlage) leitet Earnie aus den netzgekoppelten
 - **Unvollständige Mappings** führen zu einem Fehler.
 - **Kein flaches Anlagen-Feld mehr:** `plant.ehal_bindings.sens_pv_production_active` gibt es nicht mehr. Die Migration überträgt ein eindeutiges Mapping auf den einzigen Wechselrichter.
 - **Intervallenergie:** Die Intervallenergie für `cons_data` (`pv_kwh_interval`) integriert Earnie aus der abgeleiteten Anlagen-Leistung.
+
+### PV-Prognose im Live-Betrieb
+
+Earnie holt die PV-Prognose je PV-Feld in dieser Reihenfolge:
+
+1. **forecast.solar** mit Neigung, Ausrichtung und kWp des Felds. Earnie fragt höchstens alle 15 min neu ab und hält ein Rate-Limit (HTTP 429) ein. Dazwischen nutzt es die letzte Antwort. Diese liegt auch in `runtime/pv_forecast_cache.json` und überbrückt so einen Neustart, solange sie höchstens 6 h alt ist. forecast.solar liefert die Leistung **zum** jeweiligen Zeitpunkt (volle Stunden sowie Sonnenauf- und -untergang). Earnie nimmt für jeden Slot den Mittelwert dieses Verlaufs über die Dauer des Slots. Damit stimmt die Slot-Energie mit der Stundenenergie von forecast.solar überein, auch in der Stunde von Sonnenauf- und -untergang.
+2. **Open-Meteo-Einstrahlung** (`global_tilted_irradiance`) für Neigung und Ausrichtung des Felds, wenn forecast.solar keine Daten liefert. Die Leistung ist Einstrahlung / 1000 W/m² × kWp, wie im Backtesting. Das Log meldet das als WARNING, und das Cockpit zeigt einen Hinweis mit den betroffenen PV-Feldern.
+3. **Abbruch des Zyklus**, wenn auch Open-Meteo nicht antwortet. Earnie plant dann nicht mit erfundenen PV-Werten, sondern meldet einen Fehler und versucht es im nächsten Zyklus erneut, wie bei fehlenden Day-Ahead-Preisen.
+
+Die Quelle je PV-Feld steht im Laufzustand (`optimizer_run_state.json`, Feld `pv_forecast_sources`: `forecast_solar`, `open_meteo` oder `none` bei 0 kWp).
 
 ## Wechselrichter (`inverters[]`)
 

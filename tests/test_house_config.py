@@ -1,6 +1,11 @@
 """Tests für Hauskonfigurator-Entitäten, Tarife und Szenario-Auflösung (Version 1.24)."""
 from __future__ import annotations
 
+from tests.fixtures.heating_catalog import (
+    normalize_inline_house,
+    save_inline_house,
+    write_inline_house,
+)
 import json
 import re
 from datetime import date, datetime
@@ -175,7 +180,7 @@ def test_strip_assets_for_reference():
 def test_house_profile_without_consumers():
     from house_config.profiles_store import normalize_house_profiles_document
 
-    doc = normalize_house_profiles_document(
+    doc = normalize_inline_house(
         {
             "profiles": [
                 {
@@ -229,13 +234,30 @@ def _ev_profile_doc(**ev_overrides):
     }
 
 
-def test_ev_min_power_must_not_exceed_nominal():
+def test_ev_min_current_must_not_exceed_max_current():
     from house_config.profiles_store import normalize_house_profiles_document
+    from tests.fixtures.ev_wallbox import ev_fields, wallbox_catalog, wallbox_entry
 
-    with pytest.raises(ValueError, match="min_power_kw .* darf nicht größer"):
+    doc = _ev_profile_doc(**ev_fields("e_auto", min_current_a=10.0, max_current_a=8.0))
+    for key in ("nominal_power_kw", "min_power_kw"):
+        doc["profiles"][0]["consumers"][0].pop(key)
+    with pytest.raises(ValueError, match="min_current_a .* darf nicht größer"):
         normalize_house_profiles_document(
-            _ev_profile_doc(nominal_power_kw=1.0, min_power_kw=1.4)
+            doc, wallboxes=wallbox_catalog(wallbox_entry("e_auto"))
         )
+
+
+def test_ev_and_wallbox_without_common_current_fail_loud():
+    """D2: a pair whose minimum exceeds its maximum is an error, never clamped."""
+    from house_config.profiles_store import normalize_house_profiles_document
+    from tests.fixtures.ev_wallbox import ev_fields, wallbox_catalog, wallbox_entry
+
+    doc = _ev_profile_doc(**ev_fields("e_auto", min_current_a=6.0, max_current_a=16.0))
+    for key in ("nominal_power_kw", "min_power_kw"):
+        doc["profiles"][0]["consumers"][0].pop(key)
+    box = wallbox_entry("e_auto", min_current_a=20.0, max_current_a=32.0)
+    with pytest.raises(ValueError, match="keinen gemeinsamen Ladestrom"):
+        normalize_house_profiles_document(doc, wallboxes=wallbox_catalog(box))
 
 
 def test_ev_min_on_quarterhours_defaults_to_one_and_is_never_zero():
@@ -243,10 +265,10 @@ def test_ev_min_on_quarterhours_defaults_to_one_and_is_never_zero():
 
     raw = _ev_profile_doc()
     assert "min_on_quarterhours" not in raw["profiles"][0]["consumers"][0]
-    doc = normalize_house_profiles_document(raw)
+    doc = normalize_inline_house(raw)
     assert doc["profiles"]["ev_profile"]["consumers"][0]["min_on_quarterhours"] == 1
 
-    doc_zero = normalize_house_profiles_document(_ev_profile_doc(min_on_quarterhours=0))
+    doc_zero = normalize_inline_house(_ev_profile_doc(min_on_quarterhours=0))
     assert doc_zero["profiles"]["ev_profile"]["consumers"][0]["min_on_quarterhours"] == 1
 
 
@@ -327,10 +349,24 @@ def test_consumer_annual_kwh_flat_thermal():
         "type": "thermal_annual",
         "living_area_m2": 120.0,
         "building_class": 3,
-        "heat_pump_type": "luft",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
+        "nominal_power_kw": 3.0,
         "persons": 2,
     }
     assert consumer_annual_kwh(consumer) > 0.0
+
+
+def test_consumer_annual_kwh_thermal_without_power_fails_loud():
+    consumer = {
+        "id": "wp",
+        "type": "thermal_annual",
+        "living_area_m2": 120.0,
+        "building_class": 3,
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
+        "persons": 2,
+    }
+    with pytest.raises(ValueError, match="Leistung des Wärmeerzeugers fehlt"):
+        consumer_annual_kwh(consumer)
 
 
 def test_house_profile_thermal_annual(monkeypatch):
@@ -672,8 +708,9 @@ def test_ev_consumer_normalization(tmp_path):
     import json
 
     path = tmp_path / "house_profiles.json"
-    path.write_text(
-        json.dumps(
+    write_inline_house(
+        path,
+        (
             {
                 "profiles": [
                     {
@@ -695,7 +732,6 @@ def test_ev_consumer_normalization(tmp_path):
                 ]
             }
         ),
-        encoding="utf-8",
     )
     doc = load_house_profiles_document(str(path))
     ev = doc["profiles"]["home"]["consumers"][0]
@@ -770,7 +806,7 @@ def test_house_profile_save_preserves_loxone_bindings(tmp_path, monkeypatch):
         "nominal_power_kw": 1.6,
         "living_area_m2": 157.0,
         "building_class": 2,
-        "heat_pump_type": "erde",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
         "persons": 2,
         "loxone_inputs": {"power_name": "Ernie_WP_P_act"},
         "loxone_outputs": {"enable_name": "Ernie_WP_Freigabe"},
@@ -801,7 +837,7 @@ def test_house_profile_save_preserves_loxone_bindings(tmp_path, monkeypatch):
         "nominal_power_kw": 1.6,
         "living_area_m2": 157.0,
         "building_class": 2,
-        "heat_pump_type": "erde",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
         "persons": 2,
     }
     merged = [
@@ -809,7 +845,7 @@ def test_house_profile_save_preserves_loxone_bindings(tmp_path, monkeypatch):
         _merge_passthrough_consumer_fields(ev_original, ev_edited),
         _merge_passthrough_consumer_fields(spa_original, spa_edited),
     ]
-    save_house_profiles_document(
+    save_inline_house(
         str(path),
         {
             "profiles": [
@@ -895,8 +931,9 @@ def test_build_hourly_kw_profile_with_ev_consumer(tmp_path):
 
     path = tmp_path / "house_profiles.json"
     ev = _sample_ev_consumer()
-    path.write_text(
-        json.dumps(
+    write_inline_house(
+        path,
+        (
             {
                 "profiles": [
                     {
@@ -918,7 +955,6 @@ def test_build_hourly_kw_profile_with_ev_consumer(tmp_path):
                 ]
             }
         ),
-        encoding="utf-8",
     )
     doc = load_house_profiles_document(str(path))
     profile = doc["profiles"]["home"]
@@ -1136,7 +1172,7 @@ def test_merge_empty_base_uses_historical_chart_color_indices():
                 "nominal_power_kw": 1.6,
                 "living_area_m2": 120.0,
                 "building_class": 2,
-                "heat_pump_type": "erde",
+                "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
                 "persons": 2,
                 "target_temp_c": 21.5,
                 "heating_limit_c": 15.0,
@@ -1511,8 +1547,9 @@ def test_scenario_resolution_includes_ev_planning_flex(tmp_path):
     from house_config.scenario_resolution import resolve_scenario_settings
 
     path = tmp_path / "house_profiles.json"
-    path.write_text(
-        json.dumps(
+    write_inline_house(
+        path,
+        (
             {
                 "profiles": [
                     {
@@ -1546,7 +1583,6 @@ def test_scenario_resolution_includes_ev_planning_flex(tmp_path):
                 ]
             }
         ),
-        encoding="utf-8",
     )
     resolved = resolve_scenario_settings(
         {"house_profile_id": "home_ev"},
@@ -1634,6 +1670,11 @@ def test_live_scenario_resolves_entity_refs(tmp_path, monkeypatch):
                 "pv_tilt": 30,
                 "pv_azimuth": 180,
                 "inverter_id": "wr_main"
+            }],
+            "heating_systems": [{
+                "id": "heating_efh",
+                "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
+                "heating_power_kw": 10.5
             }]
         }
         """.strip(),
@@ -1650,7 +1691,15 @@ def test_live_scenario_resolves_entity_refs(tmp_path, monkeypatch):
                 "latitude": 48.2,
                 "longitude": 11.0,
                 "netznutzung": {"area_id": "user_no_grid_fee"},
-                "consumers": [{"id": "heat", "type": "thermal_annual", "nominal_power_kw": 3.0}]
+                "heating_enabled": true,
+                "thermal": {},
+                "consumers": [
+                    {
+                        "id": "heat",
+                        "type": "thermal_annual",
+                        "heating_system_id": "heating_efh"
+                    }
+                ]
             }]
         }
         """.strip(),
@@ -1921,3 +1970,66 @@ def test_save_main_config_roundtrip_strips_triggers_and_blocks(tmp_path, monkeyp
     assert "event_triggers" not in reloaded.get("system", {})
     assert "event_trigger_enabled" not in reloaded.get("system", {})
     assert "loxone_blocks" not in reloaded
+
+
+def test_fixed_pair_keeps_its_wallbox_as_charger_on_the_live_path(monkeypatch):
+    """Multi-EV M4: the MILP shape of a fixed pair names its wallbox (evcs.<Wallbox>.*).
+
+    Regression: the live consumers (``config.get_flexible_consumers``) lost ``charger_id``,
+    so every Loxone adapter build failed with "keine Wallbox zugeordnet".
+    """
+    from ehal.qualified_ids import charger_id_of_ev
+    from house_config.planning_flex_converters import planning_ev_to_milp
+    from house_config.profiles_store import normalize_house_profiles_document
+    from integrations import ev_assignment_live
+    from integrations.ehal_live_adapters import ev_charger_markers
+    from tests.fixtures.ev_wallbox import ev_fields, wallbox_catalog, wallbox_entry
+
+    doc = _ev_profile_doc(**ev_fields("garage", min_current_a=6.0, max_current_a=16.0))
+    consumer = doc["profiles"][0]["consumers"][0]
+    for key in ("nominal_power_kw", "min_power_kw"):
+        consumer.pop(key)
+    box = wallbox_entry("garage", ehal_bindings={"set_evcs_max_current": ""})
+    loaded = normalize_house_profiles_document(doc, wallboxes=wallbox_catalog(box))
+    milp = planning_ev_to_milp(loaded["profiles"]["ev_profile"]["consumers"][0])
+    assert charger_id_of_ev(milp) == "garage"
+
+    monkeypatch.setattr("integrations.ehal_live.config.get_flexible_consumers", lambda **_: [milp])
+    monkeypatch.setattr(ev_assignment_live, "dynamic_charger_consumers", lambda: [])
+    assert [marker[0] for marker in ev_charger_markers()] == ["garage"]
+
+
+def test_dynamic_ev_loads_with_a_view_and_keeps_its_wallboxes_for_the_live_overlay():
+    """Multi-EV M3: a dynamic EV loads; the MILP shape carries what the overlay needs."""
+    from house_config.planning_flex_converters import planning_ev_to_milp
+    from house_config.profiles_store import normalize_house_profiles_document
+    from house_config.wallboxes import VIEW_DYNAMIC_KEY
+    from tests.fixtures.ev_wallbox import ev_fields, wallbox_catalog, wallbox_entry
+
+    doc = _ev_profile_doc(**ev_fields("e_auto", min_current_a=6.0, max_current_a=16.0))
+    consumer = doc["profiles"][0]["consumers"][0]
+    for key in ("nominal_power_kw", "min_power_kw"):
+        consumer.pop(key)
+    consumer["wallbox_assignment"] = {"mode": "dynamic", "wallbox_ids": ["wb_1", "wb_2"]}
+    consumer["charging_schedule"]["forecast_when_absent"] = False
+    boxes = [
+        {
+            **wallbox_entry(wid, max_current_a=max_a, ehal_bindings={f"evcs.{wid}.sens_evcs_connected": ""}),
+            "unknown_vehicle": policy,
+        }
+        for wid, max_a, policy in (("wb_1", 16.0, "off"), ("wb_2", 10.0, "immediate"))
+    ]
+    loaded = normalize_house_profiles_document(doc, wallboxes=wallbox_catalog(*boxes))
+    ev = loaded["profiles"]["ev_profile"]["consumers"][0]
+    assert [w["id"] for w in ev[VIEW_DYNAMIC_KEY]] == ["wb_1", "wb_2"]
+    assert ev["nominal_power_kw"] == pytest.approx(10 * 230 * ev["phases"] / 1000)
+    milp = planning_ev_to_milp(ev)
+    assert milp["wallbox_assignment"]["mode"] == "dynamic"
+    assert [w["id"] for w in milp[VIEW_DYNAMIC_KEY]] == ["wb_1", "wb_2"]
+    assert milp["phases"] == ev["phases"]
+
+    # Planning ahead against the free wallboxes (M4, D8).
+    consumer["charging_schedule"]["forecast_when_absent"] = True
+    loaded = normalize_house_profiles_document(doc, wallboxes=wallbox_catalog(*boxes))
+    ev = loaded["profiles"]["ev_profile"]["consumers"][0]
+    assert ev["charging_schedule"]["forecast_when_absent"] is True

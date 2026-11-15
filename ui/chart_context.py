@@ -21,6 +21,7 @@ from data.planning_window import (
     ui_chart_zones,
 )
 from runtime_store import optimization_history
+from ui.chart_ledger_savings import load_ledger_chart_savings
 from optimizer.deviation_eval import DeviationEvent
 from optimizer.deviation_timeline import empty_deviation_series
 from runtime_store.history_timeline import (
@@ -466,28 +467,40 @@ def align_rows_to_display_slots(
     sim_rows: list[dict],
     slot_datetimes: tuple[datetime, ...],
 ) -> list[dict]:
-    """Stündliche MILP-Zeilen auf beliebige Display-Slots (inkl. Viertelstunden) abbilden."""
-    by_hour: dict[datetime, dict] = {}
+    """MILP-Zeilen auf beliebige Display-Slots (inkl. Viertelstunden) abbilden.
+
+    A row for the exact slot wins; only without one does the row of the full hour fill
+    the slot (hourly rows). Quarter-hour plans start at *Jetzt*, e.g. 18:15: looking up
+    the hour alone found no 18:00 row and left 18:15-18:45 empty (gap in SoC BL Ziel).
+    """
+    by_slot: dict[datetime, dict] = {}
     for row in sim_rows:
         slot = _row_slot(row)
         if slot is not None:
-            by_hour[slot] = row
+            by_slot[slot] = row
     aligned: list[dict] = []
     for slot in slot_datetimes:
-        hour = normalize_hour_slot(slot)
-        if hour in by_hour:
-            aligned.append(_quarter_row_from_milp(by_hour[hour], slot))
+        row = by_slot.get(slot)
+        if row is None:
+            row = by_slot.get(normalize_hour_slot(slot))
+        if row is not None:
+            aligned.append(_quarter_row_from_milp(row, slot))
         else:
             aligned.append(_empty_chart_row(slot))
     return aligned
 
 
-def _slots_per_hour(slot_datetimes: tuple[datetime, ...]) -> dict[datetime, int]:
-    counts: dict[datetime, int] = {}
-    for slot in slot_datetimes:
-        hour = normalize_hour_slot(slot)
-        counts[hour] = counts.get(hour, 0) + 1
-    return counts
+def _slot_durations(starts: list[datetime]) -> list[timedelta]:
+    """Length of each slot = gap to the next start; the last one repeats the previous gap.
+
+    A single slot is one quarter-hour (the MILP matrix and the log are quarter-hourly).
+    """
+    if not starts:
+        return []
+    if len(starts) == 1:
+        return [timedelta(minutes=15)]
+    gaps = [later - earlier for earlier, later in zip(starts, starts[1:])]
+    return gaps + [gaps[-1]]
 
 
 def align_hourly_increments_to_display_slots(
@@ -496,21 +509,43 @@ def align_hourly_increments_to_display_slots(
     chart: UiChartWindow,
     slot_datetimes: tuple[datetime, ...],
 ) -> list[float]:
-    """Stunden-Inkremente gleichmäßig auf Display-Slots der jeweiligen Stunde verteilen."""
-    by_hour: dict[datetime, float] = {}
+    """Map per-row matrix increments (€ / kWh) onto the display slots, keeping the sum.
+
+    Each matrix row covers ``[slot, next row slot)``. Its value is split evenly over the
+    display slots that start inside that interval (display finer than the matrix, e.g. a
+    legacy hourly matrix on quarter-hour slots); a row with no display slot starting
+    inside it goes whole to the display slot that contains its start (display coarser
+    than the matrix, e.g. four quarter-hour rows on one hourly slot). Rows outside the
+    display axis are dropped, so Σ result = Σ of the rows that lie on the axis.
+    """
+    rows: list[tuple[datetime, float]] = []
     for index, row in enumerate(matrix):
         slot = _row_slot(row)
         if slot is None or not (chart.start <= slot <= chart.end):
             continue
         if index < len(hourly_values):
-            by_hour[slot] = float(hourly_values[index])
-    per_hour = _slots_per_hour(slot_datetimes)
-    increments: list[float] = []
-    for slot in slot_datetimes:
-        hour = normalize_hour_slot(slot)
-        hourly = by_hour.get(hour, 0.0)
-        count = per_hour.get(hour, 1)
-        increments.append(hourly / count if count else 0.0)
+            rows.append((slot, float(hourly_values[index])))
+    rows.sort(key=lambda item: item[0])
+    display = list(slot_datetimes)
+    display_ends = [
+        start + length for start, length in zip(display, _slot_durations(display))
+    ]
+    row_lengths = _slot_durations([start for start, _ in rows])
+    increments = [0.0] * len(display)
+    for (row_start, value), length in zip(rows, row_lengths):
+        row_end = row_start + length
+        inside = [
+            index for index, start in enumerate(display) if row_start <= start < row_end
+        ]
+        if inside:
+            share = value / len(inside)
+            for index in inside:
+                increments[index] += share
+            continue
+        for index, start in enumerate(display):
+            if start <= row_start < display_ends[index]:
+                increments[index] += value
+                break
     return increments
 
 
@@ -530,6 +565,31 @@ def _actual_slot_increments(
             cost[index] = history.slot_costs_euro[index]
             kwh[index] = history.slot_consumption_kwh[index]
     return cost, kwh
+
+
+def _plan_kwh_after_window(
+    source: dict,
+    matrix: list[dict],
+    chart: UiChartWindow,
+) -> tuple[float, float]:
+    """Plan energy of baseline and optimized after the window, up to the horizon end.
+
+    Chart 2's consumption control is zero at the horizon end, also when the window
+    (a phone's 24 h segment) ends before it.
+    """
+    baseline = source.get("hourly_matched_baseline_consumption_kwh") or []
+    optimized = source.get("hourly_optimized_consumption_kwh") or []
+    baseline_total = 0.0
+    optimized_total = 0.0
+    for index, row in enumerate(matrix):
+        slot = _row_slot(row)
+        if slot is None or slot <= chart.end:
+            continue
+        if index < len(baseline):
+            baseline_total += float(baseline[index])
+        if index < len(optimized):
+            optimized_total += float(optimized[index])
+    return baseline_total, optimized_total
 
 
 def build_display_savings_series(
@@ -558,40 +618,26 @@ def build_display_savings_series(
         view[key] = align_hourly_increments_to_display_slots(
             values, matrix, chart, slots
         )
-    _overlay_history_plan_costs(view, display_ctx)
+    soc_correction = matrix_source.get("hourly_soc_correction_euro")
+    if soc_correction:
+        view["hourly_soc_correction_euro"] = align_hourly_increments_to_display_slots(
+            soc_correction, matrix, chart, slots
+        )
+    else:
+        view.pop("hourly_soc_correction_euro", None)
+    baseline_after, optimized_after = _plan_kwh_after_window(matrix_source, matrix, chart)
+    view["hourly_matched_baseline_consumption_after_window_kwh"] = baseline_after
+    view["hourly_optimized_consumption_after_window_kwh"] = optimized_after
     actual_cost, actual_kwh = _actual_slot_increments(display_ctx)
     view["slot_actual_cost_euro"] = actual_cost
     view["slot_actual_consumption_kwh"] = actual_kwh
-    return view
-
-
-def _overlay_history_plan_costs(
-    view: dict,
-    display_ctx: ChartDisplayContext,
-) -> None:
-    """Replace gray-zone MILP fills with planned costs from the productivity log.
-
-    Current MILP only covers now→SA₂; history slots would otherwise stay 0.0 and
-    Chart 2 **Ersparnis bisher** would always read 0.
-    """
-    history = display_ctx.history_result
-    hist = display_ctx.history_slot_count
-    if history is None or hist <= 0:
-        return
-    mapping = (
-        ("hourly_matched_baseline_cost_euro", history.slot_planned_matched_cost_euro),
-        ("hourly_optimized_cost_euro", history.slot_planned_optimized_cost_euro),
-        ("hourly_savings_euro", history.slot_planned_savings_euro),
+    view["ledger_savings"] = load_ledger_chart_savings(
+        slots,
+        display_ctx.history_slot_count,
+        window_start=chart.start,
+        window_end=chart.end,
     )
-    for key, planned in mapping:
-        if not planned:
-            continue
-        series = view.get(key)
-        if not series:
-            continue
-        limit = min(hist, len(series), len(planned))
-        for index in range(limit):
-            series[index] = float(planned[index])
+    return view
 
 
 def align_hourly_values_to_chart_slots(

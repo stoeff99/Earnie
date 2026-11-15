@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
+from dataclasses import replace
 
 import config
 from .cbc_events import (
@@ -21,6 +22,8 @@ from .charging_context import (  # noqa: F401  (consumer_charging_eligible_indic
 from .generic_flex_run import continue_on_from_state, update_generic_flex_run_state
 from .filter_context import adjust_targets_for_native_filter, resolve_filter_contexts
 from .fixed_load import adjust_targets_for_continuous_load
+from .import_cap_report import first_slot_mark
+from .import_power_limit import ImportCaps
 from .milp import milp_horizon_schedule, milp_optimizer
 from .targets import (
     consumer_column_name,
@@ -86,6 +89,13 @@ from optimizer.sim_horizon_chart_soc import (  # noqa: F401  (re-exported)
 logger = logging.getLogger(__name__)
 
 
+def _consumers_or_configured(flexible_consumers: list | None) -> list:
+    """The given consumers, an empty list included; the configured ones only for ``None``."""
+    if flexible_consumers is not None:
+        return flexible_consumers
+    return config.get_flexible_consumers(optimizer_only=True)
+
+
 def _simulate_single_hour_optimizer(
     remaining_matrix: list,
     row: dict,
@@ -105,6 +115,7 @@ def _simulate_single_hour_optimizer(
     consumer_continue_on: dict[str, bool] | None = None,
     soc_hold_index: int | None = None,
     soc_hold_percent: float | None = None,
+    import_caps: ImportCaps | None = None,
 ) -> tuple[float, dict, int, float]:
     """Simuliert eine einzelne Stunde im optimierten Pfad (Huawei-Logik für die Batterie)."""
     h = row["hour"]
@@ -118,8 +129,8 @@ def _simulate_single_hour_optimizer(
         matrix_hour_index,
         len(remaining_matrix),
     )
-    consumers_cfg = flexible_consumers or config.get_flexible_consumers(optimizer_only=True)
-    mode, target_power, target_soc, consumer_powers, consumer_pv_follow, _, _ = milp_optimizer(
+    consumers_cfg = _consumers_or_configured(flexible_consumers)
+    mode, target_power, target_soc, consumer_powers, consumer_pv_follow, plan, _ = milp_optimizer(
         remaining_matrix,
         h,
         sim_soc,
@@ -137,8 +148,9 @@ def _simulate_single_hour_optimizer(
         consumer_continue_on=consumer_continue_on,
         soc_hold_index=rel_hold,
         soc_hold_percent=soc_hold_percent if rel_hold is not None else None,
+        import_caps=import_caps,
     )
-    return _chart_row_from_controls(
+    result = _chart_row_from_controls(
         row,
         sim_soc,
         battery_params,
@@ -148,6 +160,10 @@ def _simulate_single_hour_optimizer(
         consumer_powers,
         consumer_pv_follow,
     )
+    mark = first_slot_mark(plan, import_caps) if import_caps is not None else None
+    if mark is not None:
+        result[1].update(mark)
+    return result
 
 
 
@@ -203,7 +219,7 @@ def _prepare_horizon_state(
     current_soc_by_id: dict[str, float] | None = None,
 ) -> _HorizonSetup:
     """Bereitet Matrix, Lade-/Filterkontexte, Flex-Horizontgrenzen und Terminal-SoC auf."""
-    consumers_cfg = flexible_consumers or config.get_flexible_consumers(optimizer_only=True)
+    consumers_cfg = _consumers_or_configured(flexible_consumers)
     optimization_matrix, charging_contexts, consumer_daily_targets_kwh = (
         _matrix_and_charging_contexts(
             optimization_matrix,
@@ -345,6 +361,7 @@ def _solve_slot_mpc(
         consumer_continue_on=slot_in.continue_on,
         soc_hold_index=options.soc_hold_index,
         soc_hold_percent=options.soc_hold_percent,
+        import_caps=options.import_caps_from(hour_index),
     )
 
 
@@ -390,6 +407,7 @@ def _refill_commit_buffer(
             options.soc_hold_percent if rel_hold is not None else None
         ),
         current_soc_by_id=setup.current_soc_by_id,
+        import_caps=options.import_caps_from(hour_index),
     )
     commit_slots = _commit_slots_for_buffer(
         options.commit_hours,
@@ -462,6 +480,66 @@ def _own_cbc_event_collection():
             clear_cbc_milp_context()
 
 
+_BOOKED_PRICE_FIELDS = ("k_act", "price_buy", "price_source", "k_push_act")
+_BOOKED_KW_FIELDS = ("expected_p_act", "expected_p_total", "expected_p_pv")
+
+
+def _booking_rows(
+    raw_plan: list[dict],
+    prepared_plan: list[dict],
+    booking_matrix: list[dict],
+    options: _HorizonOptions,
+) -> list[dict]:
+    """Prepared plan rows with the actual prices and kW inside the book.
+
+    What the preparation added to the plan's kW (immediate charging, appliance plans, standby
+    relief) is added to the actuals too. Slots outside the book are never booked and keep the
+    plan's values, so the SoC hold at SA₁ stays reachable.
+    """
+    if not len(raw_plan) == len(prepared_plan) == len(booking_matrix):
+        raise ValueError(
+            f"Buchungsmatrix passt nicht zum Plan: {len(booking_matrix)} Zeilen, Plan {len(prepared_plan)}."
+        )
+    start = options.flex_book_start
+    stop = len(prepared_plan) if options.flex_book_hours is None else start + options.flex_book_hours
+    rows: list[dict] = []
+    for index, (raw, prepared, actual) in enumerate(zip(raw_plan, prepared_plan, booking_matrix)):
+        if raw["slot_datetime"] != actual["slot_datetime"]:
+            raise ValueError(
+                f"Buchungsmatrix Zeile {index}: Slot {actual['slot_datetime']} statt {raw['slot_datetime']}."
+            )
+        row = dict(prepared)
+        if start <= index < stop:
+            row.update({key: actual[key] for key in _BOOKED_PRICE_FIELDS if key in actual})
+            for key in _BOOKED_KW_FIELDS:
+                if key in actual:
+                    added = float(prepared[key]) - float(raw[key])
+                    row[key] = float(actual[key]) + added if added else actual[key]
+        rows.append(row)
+    return rows
+
+
+def _reject_slot_resolve_with_several_house_batteries(batteries: list[dict]) -> None:
+    """``commit_hours=1`` plans one battery: it cannot run a house with several.
+
+    The slot re-solve carries one plant SoC from slot to slot and gives the MILP the aggregate
+    of the batteries (capacity of the first, power of all). With several house batteries that
+    is a different plant, so the run stops instead of booking it. Open loop plans each battery.
+    """
+    from .milp_defaults import _default_inverter_params
+    from .milp_inverter import coerce_inverter_params_list, filter_house_balance_batteries
+
+    house = filter_house_balance_batteries(
+        batteries, coerce_inverter_params_list(_default_inverter_params())
+    )
+    if len(house) > 1:
+        ids = ", ".join(str(b.get("id") or "?") for b in house)
+        raise ValueError(
+            f"commit_hours=1 (Neuberechnung je Slot) unterstützt nur eine Hausbatterie, "
+            f"gefunden: {ids}. Mit mehreren Hausbatterien commit_hours > 1 (Open-Loop) verwenden."
+        )
+
+
 def _run_horizon_slots(
     setup: _HorizonSetup,
     initial_soc: float,
@@ -496,7 +574,7 @@ def _run_horizon_slots(
                 slot = commit_buffer[buffer_pos]
                 buffer_pos += 1
                 sim_soc, chart_row, mode, target_power = _chart_row_from_schedule_slot(
-                    row,
+                    setup.booking_matrix[i] if setup.booking_matrix is not None else row,
                     sim_soc,
                     setup.battery_params,
                     setup.consumers_cfg,
@@ -552,24 +630,34 @@ def simulate_horizon(
     soc_hold_index: int | None = None,
     soc_hold_percent: float | None = None,
     current_soc_by_id: dict[str, float] | None = None,
+    booking_matrix: list | None = None,
+    import_caps: ImportCaps | None = None,
 ) -> list:
     """
     Simuliert einen Optimierungshorizont über die gesamte Matrix.
 
-    commit_hours=1: re-solve every matrix slot (Live MPC).
+    commit_hours=1: re-solve every matrix slot (Live MPC). One house battery only; with
+    several the run raises (the slot re-solve carries a single plant SoC).
     commit_hours=N (N>1): wall-clock hours → commit N/dt_h QH slots open-loop (SE).
     disable_horizon_soc_anchor: keine Terminal-/Sonnenaufgangs-SOC_min-Gleichheit.
     flex_book_hours / flex_book_start: Flex nur in Absolutstunden
     [flex_book_start, flex_book_start + flex_book_hours).
     soc_hold_*: optional hard SoC equality (SE SA₁ carry-in); survives disable_horizon_soc_anchor.
+    booking_matrix: SE forecast mode, the MILP plans on ``optimization_matrix`` and the schedule
+    is applied to these actual rows (open-loop only; ``docs/dev/se-forecast-mode.md``).
+    import_caps: SE import limit per matrix slot. A re-solve inside the matrix keeps these limits
+    and does not lift them by what it already booked (``docs/dev/max-power-tariff-plan.md``, P4).
     """
     if commit_hours < 1:
         raise ValueError(
             f"commit_hours must be >= 1 (got {commit_hours}). "
             "Use 1 for per-slot re-opt or len(matrix) for open-loop."
         )
+    if booking_matrix is not None and commit_hours <= 1:
+        raise ValueError("booking_matrix erfordert den Open-Loop-Pfad (commit_hours > 1).")
     if disable_horizon_soc_anchor:
         sunrise_soc_min_index = None
+    raw_plan = [dict(row) for row in optimization_matrix] if booking_matrix is not None else None
     options = _HorizonOptions(
         k_push=k_push,
         verbose=verbose,
@@ -579,6 +667,7 @@ def simulate_horizon(
         sunrise_soc_min_index=sunrise_soc_min_index,
         soc_hold_index=soc_hold_index,
         soc_hold_percent=soc_hold_percent,
+        import_caps=import_caps,
     )
     setup = _prepare_horizon_state(
         optimization_matrix,
@@ -593,6 +682,13 @@ def simulate_horizon(
         flexible_consumers=flexible_consumers,
         current_soc_by_id=current_soc_by_id,
     )
+    if commit_hours <= 1:
+        _reject_slot_resolve_with_several_house_batteries(setup.batteries)
+    if booking_matrix is not None:
+        setup = replace(
+            setup,
+            booking_matrix=_booking_rows(raw_plan, setup.matrix, booking_matrix, options),
+        )
     chart_rows, sim_soc = _run_horizon_slots(
         setup, initial_soc, on_progress, simulation_hour_offset
     )

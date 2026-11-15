@@ -13,6 +13,11 @@ from optimizer.thermal_coupled import (
     heat_storage_enabled,
     normalize_heat_storage,
 )
+from optimizer.thermal_live_band import (  # noqa: F401  (re-exported)
+    BAND_SOURCE_BACKEND,
+    BAND_SOURCE_CONFIG,
+    resolve_live_store_band,
+)
 from optimizer.thermal_model import ThermalBand, capacity_kwh_per_k_from_volume, heat_content_kwh
 from optimizer.thermal_live_solar import (  # noqa: F401  (re-exported)
     SOLAR_SOURCE_ARCHIVE_FALLBACK,
@@ -64,6 +69,10 @@ class LiveStorePlan:
     q_sim_kwh: list[float] = field(default_factory=list)
     # Collector heat input: SOLAR_SOURCE_* (ThermalHorizon P3); "provided" when passed in.
     solar_source: str = "provided"
+    # Where ``band`` comes from: BAND_SOURCE_* (HeatControl P1).
+    band_source: str = BAND_SOURCE_CONFIG
+    # Mapped level 3 feedback reads of this cycle (kind → value, None = no value).
+    feedback: dict[str, float | None] = field(default_factory=dict)
 
 
 def resolve_heat_storage_setpoint_band(heat_storage: dict) -> ThermalBand:
@@ -138,6 +147,7 @@ def plan_live_store_horizon(
     start_house_temp_c: float | None = None,
     used_measured_eq: bool = False,
     used_measured_low: bool = False,
+    gain_kw_by_hour: list[float] | None = None,
 ) -> LiveStorePlan:
     """Bang-bang floor on T_eq plus optional T_low near-term force; opp headroom."""
     horizon = len(ambient_forecast_c)
@@ -169,6 +179,7 @@ def plan_live_store_horizon(
         jaz_f=jaz_f,
         ww=_ww_kw(persons),
         house=house,
+        gain_kw_by_hour=gain_kw_by_hour,
     )
     forced, electric_by_hour, floor_electric, low_forced = _apply_t_low_near_term_force(
         forced,
@@ -215,9 +226,14 @@ def plan_live_store_for_thermal_consumer(
     ambient_forecast_c: list[float],
     solar_forecast_kw: list[float] | None = None,
     house_doc: dict | None = None,
+    baseload_kw_by_hour: list[float] | None = None,
 ) -> LiveStorePlan | None:
-    """Build Live store plan from a thermal_annual house consumer; None if no store."""
-    from data.heating_need import heat_pump_jaz
+    """Build Live store plan from a thermal_annual house consumer; None if no store.
+
+    House gains (SUSI P2): Grundlast from ``baseload_kw_by_hour`` (matrix forecast) or, without
+    it, the flat Grundlast of the year model; windows from the forecast.
+    """
+    from house_config.heat_source import consumer_heat_source, heat_source_efficiency
 
     thermal = consumer.get("thermal") or consumer
     storage_raw = thermal.get("heat_storage")
@@ -232,10 +248,20 @@ def plan_live_store_for_thermal_consumer(
         resolved_solar, solar_source = resolve_live_collector_solar_kw(
             thermal, house_profile, len(ambient_forecast_c)
         )
-    band = ThermalBand(storage["setpoint_c"], storage["tolerance_c"])
-    readings = resolve_heat_storage_readings(
-        consumer, house_doc=house_doc, heat_storage=storage
+    from integrations.ehal_live import fetch_heat_feedback
+
+    # The backend owns the band where it reports it; read every cycle, held over the horizon.
+    live_band = resolve_live_store_band(
+        consumer, ThermalBand(storage["setpoint_c"], storage["tolerance_c"])
     )
+    band = live_band.band
+    readings = resolve_heat_storage_readings(
+        consumer,
+        house_doc=house_doc,
+        heat_storage={**storage, "setpoint_c": band.setpoint_c, "tolerance_c": band.tolerance_c},
+    )
+    # Read in the planning path so the cycle recorder stores them like the store temperatures.
+    feedback = fetch_heat_feedback(consumer)
     capacity = capacity_kwh_per_k_from_volume(storage["volume_liters"])
     wp_kw = float(
         thermal.get("nominal_power_kw")
@@ -244,12 +270,22 @@ def plan_live_store_for_thermal_consumer(
     )
     living = float(thermal.get("living_area_m2", 0.0) or 0.0)
     house_h = None
+    gains: list[float] | None = None
     if living > 0.0:
+        from optimizer.thermal_live_gains import live_gain_kw_by_hour
         from optimizer.thermal_parameters import house_thermal_parameters
+        from runtime_store.planning_clock import planning_now
 
         house_h = house_thermal_parameters(
             _thermal_with_nominal(thermal, consumer), house_profile=house_profile
         ).house_heat_loss_kw_per_k
+        gains, _gain_source = live_gain_kw_by_hour(
+            consumer,
+            house_profile,
+            start=planning_now(),
+            horizon=len(ambient_forecast_c),
+            baseload_kw_by_hour=baseload_kw_by_hour,
+        )
     plan = plan_live_store_horizon(
         start_temp_c=readings.temp_eq_c,
         ambient_forecast_c=ambient_forecast_c,
@@ -257,7 +293,7 @@ def plan_live_store_for_thermal_consumer(
         capacity_kwh_per_k=capacity,
         heat_loss_kw_per_k=float(storage["heat_loss_kw_per_k"]),
         wp_electric_kw=wp_kw,
-        jaz=heat_pump_jaz(str(thermal.get("heat_pump_type", "luft"))),
+        jaz=heat_source_efficiency(consumer_heat_source(consumer)),
         temp_low_c=readings.temp_low_c,
         solar_forecast_kw=resolved_solar,
         living_area_m2=living,
@@ -269,8 +305,14 @@ def plan_live_store_for_thermal_consumer(
         persons=int(thermal.get("persons", 2) or 2),
         used_measured_eq=readings.used_measured_eq,
         used_measured_low=readings.used_measured_low,
+        gain_kw_by_hour=gains,
     )
-    return replace(plan, solar_source=solar_source)
+    return replace(
+        plan,
+        solar_source=solar_source,
+        band_source=live_band.source,
+        feedback=feedback,
+    )
 
 
 
@@ -300,8 +342,11 @@ def live_store_plan_for_matrix(
         horizon_h,
         matrix_slot_datetime(matrix, 0).isoformat(),
     )
+    from optimizer.thermal_live_gains import matrix_hourly_kw
+
+    baseload = matrix_hourly_kw(matrix, "expected_p_act", horizon_h)
     return cycle_memo(
-        key, lambda: _build_live_store_plan(source, house_profile, horizon_h)
+        key, lambda: _build_live_store_plan(source, house_profile, horizon_h, baseload)
     )
 
 
@@ -330,12 +375,14 @@ def _build_live_store_plan(
     source: dict,
     house_profile: dict,
     horizon_h: int,
+    baseload_kw_by_hour: list[float],
 ) -> LiveStorePlan | None:
     return plan_live_store_for_thermal_consumer(
         source,
         house_profile=house_profile,
         ambient_forecast_c=_live_ambient_forecast(horizon_h),
         house_doc=None,
+        baseload_kw_by_hour=baseload_kw_by_hour,
     )
 
 
@@ -390,11 +437,34 @@ def live_house_plan_for_matrix(
     )
     return cycle_memo(
         key,
-        lambda: plan_live_house_horizon(
+        lambda: _build_live_house_plan(source, house_profile, matrix, horizon_h),
+    )
+
+
+def _build_live_house_plan(
+    source: dict, house_profile: dict, matrix: list, horizon_h: int
+) -> LiveHousePlan:
+    from optimizer.charging_context import matrix_slot_datetime
+    from optimizer.thermal_live_gains import live_gain_kw_by_hour, matrix_hourly_kw
+
+    start = matrix_slot_datetime(matrix, 0)
+    thermal = source.get("thermal") or source
+    gains: list[float] | None = None
+    source_label = SOLAR_SOURCE_NONE
+    if float(thermal.get("living_area_m2", 0.0) or 0.0) > 0.0:
+        gains, source_label = live_gain_kw_by_hour(
             source,
-            house_profile=house_profile,
-            ambient_forecast_c=_live_ambient_forecast(horizon_h),
-        ),
+            house_profile,
+            start=start,
+            horizon=horizon_h,
+            baseload_kw_by_hour=matrix_hourly_kw(matrix, "expected_p_act", horizon_h),
+        )
+    return plan_live_house_horizon(
+        source,
+        house_profile=house_profile,
+        ambient_forecast_c=_live_ambient_forecast(horizon_h),
+        gain_kw_by_hour=gains,
+        gain_source=source_label,
     )
 
 
@@ -486,6 +556,9 @@ def build_heat_storage_observability(
             "band_min": plan.band.min_c,
             "band_max": plan.band.max_c,
         },
+        # "backend": Live planned with the band the backend reports, not the configured one.
+        "band_source": plan.band_source,
+        "feedback": dict(plan.feedback),
         "heat_content_kwh": {
             "q_meas": round(q_meas, 3),
             "q_sim": round(q_sim, 3),

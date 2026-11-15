@@ -15,9 +15,13 @@ from simulation.engine import (
 )
 from optimizer.slot_duration import DEFAULT_DT_H
 from simulation.booked_consumption import BOOKED_CONSUMPTION_KEY
+from simulation.capacity_charge import CAPACITY_KEY, SE_CAUSE_LABELS_DE
+from simulation.reference_costs import LADDER_L2
 from simulation.jahres_verbrauch import jahres_standby_kwh, jahres_verbrauch_kwh
 from ui.consumption_validation_charts import cons_data_monthly_kwh
 from house_config.currency_display import active_units
+from ui.number_format import format_decimal, format_euro
+from ui.saving_text import saving_text, soc_correction_text
 
 _DASH = "—"
 _TIMING_SHIFT_NOTE = "Zeitliche Lastverschiebung (Energie ≈ Spec)"
@@ -122,13 +126,13 @@ def scenario_consumption_subheader(period: dict) -> str:
 def _format_kwh(value: float | None) -> str:
     if value is None:
         return _DASH
-    return f"{value:.1f}"
+    return format_decimal(value, 1)
 
 
 def _format_delta_kwh(value: float | None) -> str:
     if value is None:
         return _DASH
-    return f"{value:+.1f}"
+    return format_decimal(value, 1, signed=True)
 
 
 def _format_plausibility_cell(block: dict | None) -> str:
@@ -191,15 +195,42 @@ def _booked(meta: dict) -> dict:
     return meta.get(BOOKED_CONSUMPTION_KEY) or {}
 
 
-def _live_reference_kwh(meta: dict) -> float | None:
-    """Booked consumption of the Live scenario's reference series."""
+def _live_reference_id(meta: dict) -> str | None:
+    """Result id of the Live scenario's reference series."""
     live_id = _resolve_live_scenario_id(meta)
     if not live_id:
         return None
-    ref_id = (meta.get("reference_by_scenario") or {}).get(live_id)
+    return (meta.get("reference_by_scenario") or {}).get(live_id)
+
+
+def _live_reference_kwh(meta: dict) -> float | None:
+    """Booked consumption of the Live scenario's reference series."""
+    ref_id = _live_reference_id(meta)
     if not ref_id:
         return None
     return jahres_verbrauch_kwh(ref_id, booked_consumption=_booked(meta))
+
+
+def _consumption_vs_live_reference(
+    meta: dict,
+    scenario_id: str,
+    kwh_value: float | None,
+) -> float | None:
+    """Consumption of a scenario to compare with the Live reference; None = not comparable.
+
+    Another heating system than the Live reference (heat pump ↔ gas) changes the
+    electricity on purpose, so there is nothing to compare. The heating rod's electricity
+    replaces heat, so it comes off before the comparison. Both come from the ``heat_fuel``
+    block of each result; logs without it compare the plain consumption.
+    """
+    if kwh_value is None:
+        return None
+    heat_fuel = meta.get("heat_fuel") or {}
+    block = heat_fuel.get(scenario_id) or {}
+    reference_block = heat_fuel.get(_live_reference_id(meta)) or {}
+    if block.get("heating_systems") != reference_block.get("heating_systems"):
+        return None
+    return float(kwh_value) - float(block.get("rod_kwh") or 0.0)
 
 
 def build_scenario_consumption_rows(
@@ -356,28 +387,181 @@ def _booked_series_hints(scenario_id: str, booked: dict) -> list[str]:
     return hints
 
 
+def _ladder_report_hints(report: dict | None) -> list[str]:
+    """What an L1 / L2 run reports about its own quality."""
+    if not report:
+        return []
+    hints: list[str] = []
+    failed = int(report.get("plausibility_failed_windows") or 0)
+    if failed:
+        hints.append(f"{failed} Fenster mit abweichender Energie, Vergleich unsicher")
+    for key, text in (
+        ("no_shape_windows", "ohne Lastprofil, läuft ab Fensterbeginn mit Nennleistung"),
+        ("no_published_block_windows", "ohne veröffentlichte Preise, behält seine Startzeit"),
+    ):
+        windows = report.get(key) or {}
+        if windows:
+            parts = ", ".join(f"{cid}: {count} Fenster" for cid, count in sorted(windows.items()))
+            hints.append(f"{parts} {text}")
+    truncated = int(report.get("truncated_lock_slots") or 0)
+    if truncated:
+        hints.append(f"{_slot_hours(truncated)} Preissperre mit kürzerem Horizont (Preisdaten enden)")
+    return hints
+
+
+def _soc_correction_block(meta: dict, scenario_id: str) -> dict | None:
+    return (meta.get("ladder_soc_correction") or {}).get(scenario_id)
+
+
+def _standard_rules_saving_cell(meta: dict, scenario_id: str, totals: dict) -> str:
+    """L2 − L3 of a scenario with the end-SoC term; logs without a ladder have no value."""
+    steps = (meta.get("ladder_by_scenario") or {}).get(scenario_id)
+    if not steps:
+        return _DASH
+    saving = float(totals[steps[LADDER_L2]]) - float(totals[scenario_id])
+    block = _soc_correction_block(meta, scenario_id)
+    if block:
+        saving += float(block["steps"][LADDER_L2]["correction_eur"])
+    return saving_text(saving)
+
+
+def _soc_correction_hint(meta: dict, scenario_id: str) -> list[str]:
+    """How the saving column values the SoC at the end of the period."""
+    if scenario_id not in (meta.get("ladder_by_scenario") or {}):
+        return []
+    block = _soc_correction_block(meta, scenario_id)
+    if not block:
+        return ["SoC am Periodenende nicht bewertet (Log vor dieser Auswertung)"]
+    step = block["steps"][LADDER_L2]
+    if not round(float(step["correction_eur"]), 2):
+        return []
+    return [
+        f"Ersparnis mit SoC am Periodenende: {soc_correction_text(step['correction_eur'])} "
+        f"({block['soc_end_percent']:.0f} % gegen {step['soc_end_percent']:.0f} %)"
+    ]
+
+
 def _annual_cost_hinweis(
     scenario_id: str,
     *,
     live_id: str | None,
     ref_id: str,
-    kwh_value: float | None,
+    compare_kwh: float | None,
     live_ref_kwh: float | None,
     booked: dict,
+    ladder_report: dict | None = None,
+    soc_hint: list[str] | None = None,
 ) -> str:
-    hints = _booked_series_hints(scenario_id, booked)
+    hints = (
+        _booked_series_hints(scenario_id, booked)
+        + _ladder_report_hints(ladder_report)
+        + (soc_hint or [])
+    )
     # Live-Referenz and Historisch (Ist-Zähler) are baselines, not optimized runs.
     # Historisch vs model Live-ref often differs when meter ≠ Hausprofil — not a sim bug.
     is_baseline = _is_live_reference_row(scenario_id, live_id) or scenario_id == ref_id
-    if not is_baseline and exceeds_live_reference_rel(kwh_value, live_ref_kwh):
+    if not is_baseline and exceeds_live_reference_rel(compare_kwh, live_ref_kwh):
         hints.append(_CONSUMPTION_DEVIATION_HINT)
     return " · ".join(hints) if hints else _DASH
+
+
+def _heat_fuel_cells(meta: dict, scenario_id: str, *, show_fuel: bool) -> dict:
+    """Brennstoff / CO2 cells (SUSI P1); empty when the log has no ``heat_fuel`` block."""
+    block = (meta.get("heat_fuel") or {}).get(scenario_id)
+    if not meta.get("heat_fuel"):
+        return {}
+    cells: dict = {}
+    if show_fuel:
+        fuel_kwh = float((block or {}).get("fuel_kwh") or 0.0)
+        cells["Brennstoff [kWh]"] = _format_kwh(fuel_kwh) if fuel_kwh else _DASH
+        cells["Brennstoffkosten [€]"] = (
+            format_euro(float(block["fuel_eur"])) if fuel_kwh else _DASH
+        )
+    cells["CO2 [kg]"] = f"{float(block['co2_kg']):.0f}" if block else _DASH
+    return cells
+
+
+def _totals_with_fuel(meta: dict, totals: dict) -> dict:
+    """Jahres Kosten = Strom (``summary.total_eur``) + Brennstoff (``heat_fuel``)."""
+    fuel = meta.get("heat_fuel") or {}
+    return {
+        sid: float(total) + float((fuel.get(sid) or {}).get("fuel_eur") or 0.0)
+        for sid, total in totals.items()
+    }
+
+
+def build_capacity_rows(meta: dict) -> list[dict]:
+    """One row per result with a capacity charge: highest month peak and the sum over the period."""
+    capacity = meta.get(CAPACITY_KEY) or {}
+    labels = meta.get("labels", {})
+    totals = meta.get("summary", {}).get("total_eur", {})
+    rows: list[dict] = []
+    for scenario_id in _annual_cost_row_order(meta, totals):
+        months = (capacity.get(scenario_id) or {}).get("months") or []
+        if not months:
+            continue
+        highest = max(months, key=lambda month: float(month["peak_kw"]))
+        rows.append(
+            {
+                "Szenario": labels.get(scenario_id, scenario_id),
+                "Höchste Monatsspitze [kW]": format_decimal(float(highest["peak_kw"])),
+                "Monat": highest["month"],
+                "Ø abgerechnet [kW]": format_decimal(
+                    sum(float(month["billed_kw"]) for month in months) / len(months)
+                ),
+                "Leistungspreis [€]": format_euro(
+                    sum(float(month["gross_eur"]) for month in months)
+                ),
+                "Bezugsgrenze [kW]": (
+                    format_decimal(float(highest["import_cap_kw"]))
+                    if highest.get("import_cap_kw") is not None
+                    else "–"
+                ),
+                "Viertelstunden über der Grenze": sum(
+                    int(month.get("slots_over_cap", 0)) for month in months
+                ),
+                **_over_cap_cells(months),
+            }
+        )
+    return rows
+
+
+def _over_cap_cells(months: list[dict]) -> dict[str, object]:
+    """Days and main causes over the cap; logs before P6c have neither and show a dash."""
+    if any(int(month.get("slots_over_cap", 0)) and "days_over_cap" not in month for month in months):
+        return {"Tage über der Grenze": _DASH, "Hauptursachen": _DASH}
+    causes: dict[str, int] = {}
+    for month in months:
+        for cause, slots in (month.get("causes_over_cap") or {}).items():
+            causes[cause] = causes.get(cause, 0) + int(slots)
+    ranked = sorted(causes.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "Tage über der Grenze": sum(int(month.get("days_over_cap", 0)) for month in months),
+        "Hauptursachen": (
+            "; ".join(f"{SE_CAUSE_LABELS_DE.get(cause, cause)}: {slots}" for cause, slots in ranked)
+            or _DASH
+        ),
+    }
+
+
+def capacity_skipped_text(meta: dict) -> str | None:
+    """Entries left out by status, for the notice under the table; ``None`` without any."""
+    skipped: dict[str, str] = {}
+    for block in (meta.get(CAPACITY_KEY) or {}).values():
+        skipped.update(block.get("skipped") or {})
+    if not skipped:
+        return None
+    return ", ".join(f"{cid} (Status {status})" for cid, status in sorted(skipped.items()))
 
 
 def build_annual_cost_rows(meta: dict) -> list[dict]:
     """Gesamtkosten rows; Jahres Verbrauch / Standby from the booked series of every row."""
     summary = meta.get("summary", {})
-    totals = summary.get("total_eur", {})
+    totals = _totals_with_fuel(meta, summary.get("total_eur", {}))
+    show_fuel = any(
+        float((block or {}).get("fuel_kwh") or 0.0) > 0.0
+        for block in (meta.get("heat_fuel") or {}).values()
+    )
     labels = meta.get("labels", {})
     ref_id = meta.get("reference_id", HISTORICAL_REFERENCE_ID)
     booked = _booked(meta)
@@ -401,9 +585,11 @@ def build_annual_cost_rows(meta: dict) -> list[dict]:
             scenario_id,
             live_id=live_id,
             ref_id=ref_id,
-            kwh_value=kwh_value,
+            compare_kwh=_consumption_vs_live_reference(meta, scenario_id, kwh_value),
             live_ref_kwh=live_ref_kwh,
             booked=booked,
+            ladder_report=(meta.get("ladder_report") or {}).get(scenario_id),
+            soc_hint=_soc_correction_hint(meta, scenario_id),
         )
         is_reference = scenario_id == ref_id or is_scenario_reference_id(scenario_id)
         if is_reference:
@@ -413,7 +599,9 @@ def build_annual_cost_rows(meta: dict) -> list[dict]:
                     "Jahres Verbrauch [kWh]": kwh_cell,
                     "Speicher-Standby [kWh]": standby_cell,
                     "Gesamtverbrauch [kWh]": total_cell,
-                    f"Jahres Kosten [{units.major}]": units.amount(total_eur),
+                    **_heat_fuel_cells(meta, scenario_id, show_fuel=show_fuel),
+                    f"Jahres Kosten [{units.major}]": format_euro(total_eur),
+                    f"Ersparnis vs. Standard-Regeln [{units.major}]": _DASH,
                     f"Δ vs Referenz [{units.major}]": _DASH,
                     "Hinweis": hinweis,
                 }
@@ -422,14 +610,18 @@ def build_annual_cost_rows(meta: dict) -> list[dict]:
 
         delta_cell = _DASH
         if live_ref_total is not None:
-            delta_cell = units.amount(total_eur - live_ref_total, "+.2f")
+            delta_cell = format_euro(total_eur - live_ref_total, signed=True)
         rows.append(
             {
                 "Szenario": label,
                 "Jahres Verbrauch [kWh]": kwh_cell,
                 "Speicher-Standby [kWh]": standby_cell,
                 "Gesamtverbrauch [kWh]": total_cell,
-                f"Jahres Kosten [{units.major}]": units.amount(total_eur),
+                **_heat_fuel_cells(meta, scenario_id, show_fuel=show_fuel),
+                f"Jahres Kosten [{units.major}]": format_euro(total_eur),
+                f"Ersparnis vs. Standard-Regeln [{units.major}]": _standard_rules_saving_cell(
+                    meta, scenario_id, totals
+                ),
                 f"Δ vs Referenz [{units.major}]": delta_cell,
                 "Hinweis": hinweis,
             }

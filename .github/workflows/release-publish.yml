@@ -3,7 +3,7 @@
 #   (e.g. v2.0.0, v2.2.0-alpha.1).
 # Prerequisite: version.py __version__ must equal the tag without the leading "v".
 # Pre-releases (version contains "-"): GitHub --prerelease, no --latest, no Docker :latest.
-# Dev builds (X.Y.Z-dev.N): candidate only — images :<version> + smoke/lint, then stop.
+# Dev builds (X.Y.Z-dev.N, fork: X.Y.Z-stoeff.N): candidate only — images :<version> + smoke/lint, then stop.
 #   No release notes, no GitHub Release, no promote (:next), no HA add-on pin; never released.
 #
 # Candidate → approve → publish:
@@ -114,10 +114,11 @@ jobs:
           else
             PRERELEASE=false
           fi
-          if [[ "$ACTUAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]]; then
+          # Fork builds X.Y.Z-stoeff.N take the same dev path as X.Y.Z-dev.N.
+          if [[ "$ACTUAL" =~ ^[0-9]+\.[0-9]+\.[0-9]+-(dev|stoeff)\.[0-9]+$ ]]; then
             DEV=true
-          elif [[ "$ACTUAL" == *-dev* ]]; then
-            echo "::error::Dev version '${ACTUAL}' must be X.Y.Z-dev.N (no debug suffix in a tag)"
+          elif [[ "$ACTUAL" == *-dev* || "$ACTUAL" == *-stoeff* ]]; then
+            echo "::error::Dev version '${ACTUAL}' must be X.Y.Z-dev.N or X.Y.Z-stoeff.N (no debug suffix in a tag)"
             exit 1
           else
             DEV=false
@@ -317,8 +318,9 @@ jobs:
           --timeout "${{ matrix.timeout }}"
 
   # Pre-gate: the pin bump + addon-linter that publish_ha_addon runs after
-  # approval, dry (workspace only, no commit/push). Lints the tagged candidate,
-  # not main — main may have moved on since the tag.
+  # approval, dry (workspace only, no commit/push). Lints main, the same source
+  # publish_ha_addon bumps and copies to ha-addon-earnie — the add-on manifests of
+  # the tag are never published (the add-on images are covered by addon_smoke).
   addon_lint:
     needs: release
     if: needs.release.outputs.targets != 'docker'
@@ -326,10 +328,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout tag
+      - name: Checkout main
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ needs.release.outputs.tag }}
+          ref: main
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5

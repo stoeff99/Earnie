@@ -6,6 +6,8 @@ Alle Container-Artefakte liegen unter `docker/`. Der **Build-Kontext bleibt das 
 
 Die Ignore-Datei **bleibt** in der Projektwurzel (`.dockerignore`). Docker wertet sie relativ zum Build-Kontext aus, nicht relativ zum Dockerfile.
 
+Sie lässt auch Entwickler-Code aus dem Image weg: die Offline-Replay- und Regressions-Werkzeuge und den Shadow-Client. Ein Image ohne Shadow-Client bricht im Shadow-Modus (Umgebungsvariable `EARNIE_SHADOW`) beim Start ab. Nur `scripts/build_container.py` nimmt den Shadow-Client bei einer `-dev`-Version in `version.py` mit ins Image. Details: `DEVELOPER.md`, Abschnitt „Shadow client is not in the release image“.
+
 ## Build
 
 ```powershell
@@ -15,6 +17,8 @@ python -m scripts.build_container --target all --push
 ```
 
 Dockerfile: `docker/Dockerfile` · Entrypoint: `docker/entrypoint.sh`
+
+Dev-Image bauen und per SSH auf die NAS laden (VS-Code-Tasks und einmalige Einrichtung): [`DEVELOPER.md`](../DEVELOPER.md), Abschnitt „Dev build and transfer to the NAS“.
 
 ## Compose-Stacks
 

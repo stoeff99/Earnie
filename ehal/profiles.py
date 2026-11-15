@@ -12,6 +12,7 @@ from typing import Any
 
 import jsonschema
 
+from ehal.heat_fields import HEAT_FIELD_LABELS_DE
 from ehal.validate import EhalValidationError
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -36,6 +37,8 @@ M1_EHAL_FIELDS: frozenset[str] = frozenset(
         "sens_power_consumers",
         "sens_evcs_connected",
         "sens_evcs_soc_act",
+        "sens_ev_connected",
+        "sens_ev_charge_power",
         "sens_evcs_bat_capacity",
         "get_evcs_nominal_current",
         "get_evcs_ready_by_time",
@@ -51,6 +54,7 @@ M1_EHAL_FIELDS: frozenset[str] = frozenset(
         "set_ess_discharge_power_limit",
         "set_ess_mode",
         "set_ess_source_select",
+        "set_ess_target_soc",
         "set_evcs_max_current",
         "set_evcs_mode",
         "set_grid_export_power_limit",
@@ -82,6 +86,8 @@ _FIELD_LABELS_DE: dict[str, str] = {
     "sens_energy_total": "Verbraucher-Energiezähler (kWh)",
     "sens_evcs_connected": "EV angeschlossen",
     "sens_evcs_soc_act": "EV Ist-SOC (%)",
+    "sens_ev_connected": "Auto meldet angesteckt",
+    "sens_ev_charge_power": "Auto-Ladeleistung (W)",
     "sens_evcs_bat_capacity": "EV Batteriekapazität (kWh)",
     "get_evcs_nominal_current": "EV Nennstrom (A)",
     "get_evcs_ready_by_time": "EV FertigUm",
@@ -97,6 +103,7 @@ _FIELD_LABELS_DE: dict[str, str] = {
     "set_ess_discharge_power_limit": "Setpoint Entladegrenze (W)",
     "set_ess_mode": "Setpoint ESS-Modus / Steuerbefehl (Hinweis)",
     "set_ess_source_select": "Setpoint Quellenwahl (0=Netz / 1=Batterie-Insel)",
+    "set_ess_target_soc": "Setpoint Ziel-SoC (%)",
     "set_evcs_max_current": "Setpoint Wallbox-Sollstrom (A)",
     "set_evcs_mode": "Setpoint Wallbox-Modus (off|pv|now)",
     "set_grid_export_power_limit": "Setpoint Einspeisegrenze (W; ≥ 0, frei = PV + Entladeleistung)",
@@ -122,8 +129,7 @@ _FIELD_LABELS_DE: dict[str, str] = {
     "get_temperature_water_setpoint": "Pool Soll-Temperatur (°C)",
     "get_temperature_tolerance_c": "Temperatur-Toleranz (°C)",
     "sens_heating_active": "Heizung aktiv",
-    "sens_temperature_heat_storage": "Wärmespeicher T_eq (°C)",
-    "sens_temperature_heat_storage_low": "Wärmespeicher T_low (°C)",
+    **HEAT_FIELD_LABELS_DE,
 }
 
 # Field → device role_id for HITL grouping (M1 plant roles only).
@@ -149,6 +155,7 @@ _FIELD_ROLE: dict[str, str] = {
     "set_ess_discharge_power_limit": "ess",
     "set_ess_mode": "ess",
     "set_ess_source_select": "ess",
+    "set_ess_target_soc": "ess",
     "sens_inv_power_ac": "inverter",
     "sens_inv_power_pv": "inverter",
     "get_inv_max_ac_power": "inverter",

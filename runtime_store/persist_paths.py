@@ -30,6 +30,10 @@ from runtime_store.persist_paths_base import (  # noqa: F401  (re-exported)
     default_config_dir,
     env_root,
     flexible_consumer_profiles_file,
+    capacity_observe_baseline_file,
+    capacity_observe_peak_file,
+    capacity_peak_store_file,
+    import_cap_report_file,
     log_file,
     power_interval_sampler_state_file,
     pv_counter_state_file,
@@ -42,6 +46,7 @@ from runtime_store.persist_paths_base import (  # noqa: F401  (re-exported)
     total_consumption_profiles_file,
     usage_ping_state_file,
     feature_reviews_state_file,
+    tariff_share_state_file,
 )
 from runtime_store.persist_paths_base import (  # noqa: F401  (re-exported)
     _config_directory_from_env,
@@ -209,20 +214,6 @@ def resolve_config_minimal_template_path() -> str:
     if os.path.isfile(preferred):
         return preferred
     bundled = bundled_config_minimal_file()
-    if os.path.isfile(bundled):
-        return bundled
-    return preferred
-
-
-def config_example_file() -> str:
-    """Pfad zur Config-Vorlage im Persistenz-Ordner (für Drift-Vergleich)."""
-    preferred = _preferred_or_legacy_file("config.example.json")
-    legacy = "config.example.json"
-    if os.path.isfile(preferred):
-        return preferred
-    if os.path.isfile(legacy):
-        return legacy
-    bundled = bundled_config_example_file()
     if os.path.isfile(bundled):
         return bundled
     return preferred

@@ -222,27 +222,20 @@ def test_boost_field_is_offered_for_heat_pumps_only():
 
 def test_lock_settings_survive_save_and_milp_conversion():
     from house_config.planning_flex_bridge import planning_thermal_to_milp
-    from house_config.profiles_store import _normalize_consumer, _serialize_consumer
+    from tests.heatpump_fixtures import save_roundtrip
 
-    raw = {
-        "id": "waermepumpe",
-        "label": "Waermepumpe",
-        "type": "thermal_annual",
-        "nominal_power_kw": 3.0,
-        "living_area_m2": 145.0,
-        "building_class": 3,
-        "min_off_quarterhours": 4,
-        "heat_lock_margin_cent": 7.5,
-        "heat_lock_max_quarterhours": 6,
-        "heat_boost_pv_percent": 120,
-        "heat_boost_mixed_pv_percent": 40,
-        "heat_boost_mixed_margin_cent": 4,
-        "heat_boost_grid_margin_cent": 1.5,
-    }
-    saved = _serialize_consumer(_normalize_consumer(raw, 0, "house"))
+    saved, again = save_roundtrip(
+        min_off_quarterhours=4,
+        heat_lock_margin_cent=7.5,
+        heat_lock_max_quarterhours=6,
+        heat_boost_pv_percent=120,
+        heat_boost_mixed_pv_percent=40,
+        heat_boost_mixed_margin_cent=4,
+        heat_boost_grid_margin_cent=1.5,
+    )
     assert saved["heat_lock_margin_cent"] == 7.5
     assert saved["heat_lock_max_quarterhours"] == 6
-    milp = planning_thermal_to_milp(saved)
+    milp = planning_thermal_to_milp(again)
     assert heat_control.lock_margin_cent(milp) == 7.5
     assert heat_control.max_lock_slots(milp) == 6
     assert heat_control.boost_rule(milp) == heat_control.BoostRule(120.0, 40.0, 4.0, 1.5)

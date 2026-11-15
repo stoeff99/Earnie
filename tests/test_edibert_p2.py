@@ -45,13 +45,27 @@ def _json(path: Path) -> dict:
 def test_tracks_match_edibert() -> None:
     assert CURRENT_TARIFF_FORMAT == EDIBERT_TARIFF_FORMAT
     assert TARIFF_TRACK_FILES == frozenset(EDIBERT_TARIFF_TRACK_FILES)
-    assert CURRENT_DATA_MODEL == 5
+    assert CURRENT_DATA_MODEL == 6
 
 
 def test_plan_lists_both_steps_and_all_questions(tmp_path: Path) -> None:
     plan = plan_migration(_copy(tmp_path))
     assert plan.can_run, plan.blockers
-    assert plan.pending_step_ids == ("dm5.netznutzung_split", "tf1.tariff_format")
+    assert plan.pending_step_ids == (
+        "dm4.deviation_energy_shortfall",
+        "dm5.netznutzung_split",
+        "dm5.heat_source",
+        "dm5.heating_systems",
+        "dm5.house_thermal",
+        "dm5.heating_power",
+        "dm5.vat_deductible",
+        "dm5.house_gains",
+        "dm5.house_cooling",
+        "dm6.wallboxes",
+        "dm6.debug_dump_flag_removal",
+        "tf1.tariff_format",
+        "tf1.grid_area_levies",
+    )
     by_id = {q.id: q for q in plan.questions}
     assert set(by_id) == set(ANSWERS)
     assert all(q.required for q in by_id.values())
@@ -68,9 +82,23 @@ def test_plan_lists_both_steps_and_all_questions(tmp_path: Path) -> None:
 def test_one_run_one_backup_matches_golden_and_is_idempotent(tmp_path: Path) -> None:
     config_dir = _copy(tmp_path)
     report = run_migration(config_dir, ANSWERS)
-    assert report.applied_step_ids == ("dm5.netznutzung_split", "tf1.tariff_format")
+    assert report.applied_step_ids == (
+        "dm4.deviation_energy_shortfall",
+        "dm5.netznutzung_split",
+        "dm5.heat_source",
+        "dm5.heating_systems",
+        "dm5.house_thermal",
+        "dm5.heating_power",
+        "dm5.vat_deductible",
+        "dm5.house_gains",
+        "dm5.house_cooling",
+        "dm6.wallboxes",
+        "dm6.debug_dump_flag_removal",
+        "tf1.tariff_format",
+        "tf1.grid_area_levies",
+    )
     backups = list((config_dir / "backups").iterdir())
-    assert len(backups) == 1 and backups[0].name.startswith("pre-migration-dm4-dm5-")
+    assert len(backups) == 1 and backups[0].name.startswith("pre-migration-dm4-dm6-")
     golden = FIXTURES / "goldens" / NAME
     for path in sorted(golden.glob("*.json")):
         assert _json(config_dir / path.name) == _json(path), path.name
@@ -85,7 +113,7 @@ def test_migrated_files_carry_the_right_tracks(tmp_path: Path) -> None:
         doc = _json(config_dir / name)
         assert doc["tariff_format"] == 1 and "earnie_data_model" not in doc, name
     house = _json(config_dir / "house_profiles.json")
-    assert house["earnie_data_model"] == 5
+    assert house["earnie_data_model"] == 6
     netz = {p["id"]: p["netznutzung"] for p in house["profiles"]}
     assert netz["profile_a"]["area_id"] == "user_profile_a"
     assert netz["profile_b"]["area_id"] == "AT-VBG"
@@ -223,6 +251,66 @@ def test_own_grid_fee_writes_user_area(tmp_path: Path) -> None:
     assert areas[0]["base_cent_kwh"]["unmetered_power"] == 0.0
 
 
+def test_own_grid_fee_keeps_what_the_form_does_not_edit(tmp_path: Path) -> None:
+    """A migrated grid base fee and time rules survive saving the house profile."""
+    from house_config.edibert_tariffs import load_grid_fees, profile_grid_fee
+    from house_config.own_grid_fee import OWN_AREA, OWN_BASE_KEY, persist_own_grid_fee
+
+    shutil.copy(Path("share/config/grid_fees.json"), tmp_path / "grid_fees.json")
+    user_path = tmp_path / "user_grid_fees.json"
+    user_path.write_text(
+        json.dumps(
+            {
+                "tariff_format": 1,
+                "rule_sets": {
+                    "user_night": [
+                        {
+                            "id": "night",
+                            "label": "Nacht",
+                            "status": "verordnet",
+                            "time": {"from": "22:00", "to": "06:00"},
+                            "effect": {"mode": "absolute_cent", "value": 1.0},
+                        }
+                    ]
+                },
+                "areas": [
+                    {
+                        "id": "user_home",
+                        "label": "Alt",
+                        "base_cent_kwh": {"unmetered_power": 4.2, "metered_power": 4.2},
+                        "rule_set": "user_night",
+                        "fixed_eur_year": [
+                            {"id": "grid_base_fee", "label": "Grundgebühr", "eur_year": 36.0}
+                        ],
+                    },
+                    {"id": "user_other", "base_cent_kwh": {"unmetered_power": 1.0, "metered_power": 1.0}},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    out = persist_own_grid_fee(
+        {
+            "area_id": OWN_AREA,
+            OWN_BASE_KEY: 5.0,
+            "power_metering": "unmetered_power",
+            "quarter_hour_meter": True,
+            "include_status": ["verordnet"],
+        },
+        profile_id="home",
+        profile_label="Haus",
+        land="AT",
+        grid_fees_path=str(tmp_path / "grid_fees.json"),
+    )
+    catalog = load_grid_fees(str(tmp_path / "grid_fees.json"), str(user_path))
+    fee = profile_grid_fee("home", {"netznutzung": out}, catalog)
+    assert fee.base_cent_kwh == pytest.approx(5.0)
+    assert fee.fixed_eur_year == pytest.approx(36.0)
+    assert [rule.id for rule in fee.rules] == ["night"]
+    assert catalog.areas["user_home"].label == "Eigener Arbeitspreis – Haus"
+    assert "user_other" in catalog.areas
+
+
 def test_catalog_area_is_passed_through_unchanged(tmp_path: Path) -> None:
     from house_config.own_grid_fee import persist_own_grid_fee
 
@@ -232,3 +320,43 @@ def test_catalog_area_is_passed_through_unchanged(tmp_path: Path) -> None:
         grid_fees_path=str(tmp_path / "grid_fees.json"),
     ) == netznutzung  # fmt: skip
     assert not (tmp_path / "user_grid_fees.json").exists()
+
+
+def _migrated_with_monthly_fee(tmp_path: Path, area_ids: dict[str, str]) -> Path:
+    """Migrated golden config, one user tariff with the pre-v0.1.12 ``grid_monthly_fee_eur``."""
+    config_dir = tmp_path / NAME
+    shutil.copytree(FIXTURES / "goldens" / NAME, config_dir)
+    house_path = config_dir / "house_profiles.json"
+    house = _json(house_path)
+    for profile in house["profiles"]:
+        profile["netznutzung"]["area_id"] = area_ids[profile["id"]]
+    house_path.write_text(json.dumps(house), encoding="utf-8")
+    user_path = config_dir / "user_tariffs.json"
+    user = _json(user_path)
+    user["import_tariffs"][0]["grid_monthly_fee_eur"] = 3.0
+    user_path.write_text(json.dumps(user), encoding="utf-8")
+    return config_dir
+
+
+def test_monthly_grid_fee_moves_into_the_shared_user_area(tmp_path: Path) -> None:
+    """Edibert v0.1.12 pin: the fee becomes the fixed amount of the area all profiles use."""
+    same = {"profile_a": "user_profile_a", "profile_b": "user_profile_a", "profile_c": "user_profile_a"}
+    config_dir = _migrated_with_monthly_fee(tmp_path, same)
+    plan = plan_migration(config_dir)
+    assert plan.pending_step_ids == ("tf1.tariff_format",) and plan.can_run, plan.blockers
+    run_migration(config_dir, {})
+    tariff = _json(config_dir / "user_tariffs.json")["import_tariffs"][0]
+    assert "grid_monthly_fee_eur" not in tariff
+    areas = {a["id"]: a for a in _json(config_dir / "user_grid_fees.json")["areas"]}
+    assert "grid_base_fee" in json.dumps(areas["user_profile_a"])
+    assert plan_migration(config_dir).pending_step_ids == ()
+
+
+def test_monthly_grid_fee_without_one_shared_area_blocks(tmp_path: Path) -> None:
+    """Profiles on different areas: no target is guessed, the gate shows the blocker."""
+    mixed = {"profile_a": "user_profile_a", "profile_b": "AT-VBG", "profile_c": "user_profile_c"}
+    config_dir = _migrated_with_monthly_fee(tmp_path, mixed)
+    plan = plan_migration(config_dir)
+    assert not plan.can_run
+    assert any("GRID_MONTHLY_FEE_NO_TARGET" in b.message_de for b in plan.blockers)
+    assert any("kein eigener Netzbereich" in b.message_de for b in plan.blockers)

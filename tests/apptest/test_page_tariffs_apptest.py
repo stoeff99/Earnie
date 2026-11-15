@@ -7,6 +7,8 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from tests.apptest.helpers import select_table_rows
+
 _SCRIPT = Path(__file__).parent / "scripts" / "run_page_tariffs.py"
 _SCENARIO_SCRIPT = Path(__file__).parent / "scripts" / "run_page_scenario_editor.py"
 _PREFIX = "earnie.tariffs."
@@ -133,25 +135,80 @@ def _use_in_scenario(scenario_id: str, tariff_id: str) -> None:
     path.write_text(json.dumps(doc), encoding="utf-8")
 
 
-def _open(tariff_id: str = "user_offen") -> AppTest:
-    from ui.pages.page_tariffs import REQUEST_KEY
-
-    at = AppTest.from_file(str(_SCRIPT), default_timeout=60)
-    at.session_state[REQUEST_KEY] = {"profile_id": None, "open": ("import", tariff_id)}
-    at.run()
-    assert not at.exception
-    return at
-
-
 def _user_ids() -> list[str]:
     doc = json.loads((_config_dir() / "user_tariffs.json").read_text(encoding="utf-8"))
     return [t["id"] for t in doc["import_tariffs"]]
 
 
+def _consent_file() -> Path:
+    from runtime_store.persist_paths import tariff_share_state_file
+
+    return Path(tariff_share_state_file())
+
+
+def test_share_section_is_off_and_opt_in_without_consent():
+    _write_user_tariff()
+    at = _start()
+    assert at.toggle(key="tariffs_page_share_consent").value is False
+    assert not _consent_file().exists()
+    captions = " ".join(c.value for c in at.caption)
+    assert "Es wird nichts geteilt, bevor du einen Tarif auswählst." in captions
+    assert "Teilen ist aus:" in captions
+    assert "Ohne Zustimmung sendet und fragt der Editor nichts" in captions
+    assert at.checkbox(key=_PREFIX + "share.import.user_offen").value is False
+    assert at.button(key=_PREFIX + "share.send").disabled
+
+
+def test_consent_turns_the_transport_on_and_revoking_turns_it_off(monkeypatch):
+    # A closed local port: nothing in this test may reach the real tariff database.
+    monkeypatch.setenv("EDIBERT_EXCHANGE_URL", "http://127.0.0.1:9")
+    monkeypatch.delenv("EDIBERT_EXCHANGE_OFF", raising=False)
+    monkeypatch.delenv("EARNIE_OFFLINE", raising=False)
+    _write_user_tariff()
+    at = _start()
+    at.toggle(key="tariffs_page_share_consent").set_value(True).run()
+    assert not at.exception
+    assert json.loads(_consent_file().read_text(encoding="utf-8"))["consent"] == "on"
+    captions = " ".join(c.value for c in at.caption)
+    assert "Teilen ist aus:" not in captions
+    # Still opt-in: consent alone selects nothing.
+    assert at.checkbox(key=_PREFIX + "share.import.user_offen").value is False
+    at.checkbox(key=_PREFIX + "share.import.user_offen").check().run()
+    assert not at.button(key=_PREFIX + "share.send").disabled
+
+    at.toggle(key="tariffs_page_share_consent").set_value(False).run()
+    assert not at.exception
+    assert json.loads(_consent_file().read_text(encoding="utf-8"))["consent"] == "off"
+    assert "Teilen ist aus:" in " ".join(c.value for c in at.caption)
+    assert at.button(key=_PREFIX + "share.send").disabled
+
+
+def test_edibert_off_switch_wins_over_consent(monkeypatch):
+    from runtime_store.tariff_share_consent import set_consent
+
+    monkeypatch.setenv("EDIBERT_EXCHANGE_OFF", "1")
+    set_consent("on")
+    _write_user_tariff()
+    at = _start()
+    assert at.toggle(key="tariffs_page_share_consent").value is True
+    captions = " ".join(c.value for c in at.caption)
+    assert "EDIBERT_EXCHANGE_OFF=1" in captions
+    assert "Teilen ist aus:" in captions
+
+
+def _delete_in_overview(at: AppTest, tariff_id: str = "user_offen") -> None:
+    """Delete route of the tariff overview: switch to it, select the row, click delete."""
+    at.segmented_control(key=_PREFIX + "view.switch").set_value("overview").run()
+    select_table_rows(at, _PREFIX + "ov.import.table.", [f"own:{tariff_id}"])
+    button = at.button(key=_PREFIX + "ov.import.delete")
+    assert not button.disabled, button.help
+    button.click().run()
+
+
 def test_unused_user_tariff_is_deleted_without_asking():
     _write_user_tariff()
-    at = _open()
-    at.button(key=_PREFIX + "delete").click().run()
+    at = _start()
+    _delete_in_overview(at)
     assert not at.exception
     assert _user_ids() == []
     assert not at.error, [e.value for e in at.error]
@@ -160,8 +217,8 @@ def test_unused_user_tariff_is_deleted_without_asking():
 def test_delete_of_a_used_user_tariff_names_the_scenarios_and_waits():
     _write_user_tariff()
     _use_in_scenario("entity_test", "user_offen")
-    at = _open()
-    at.button(key=_PREFIX + "delete").click().run()
+    at = _start()
+    _delete_in_overview(at)
     assert not at.exception
     assert _user_ids() == ["user_offen"]
     (warning,) = [w.value for w in at.warning if "user_offen" in w.value]
@@ -173,8 +230,8 @@ def test_delete_of_a_used_user_tariff_names_the_scenarios_and_waits():
 def test_confirmed_delete_reports_the_scenario_in_the_plausibility_check():
     _write_user_tariff()
     _use_in_scenario("entity_test", "user_offen")
-    at = _open()
-    at.button(key=_PREFIX + "delete").click().run()
+    at = _start()
+    _delete_in_overview(at)
     at.button(key=_PREFIX + "delete.confirm").click().run()
     assert not at.exception
     assert _user_ids() == []

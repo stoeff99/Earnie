@@ -84,6 +84,15 @@ EHAL_FUNCTIONS: tuple[EhalFunction, ...] = (
         ("set_ess_source_select",),
         "Ohne Quellenwahl kann Earnie angeschlossene Dauerläufer nicht zwischen Netz und Powerstation umschalten.",
     ),
+    EhalFunction(
+        "heat_storage_band",
+        "Speicherband der Regelung (Live plant mit Soll und Toleranz des Backends)",
+        (
+            "get_temperature_heat_storage_setpoint",
+            "get_temperature_heat_storage_tolerance",
+        ),
+        "Mit nur einem der beiden Werte plant Live weiter mit dem konfigurierten Speicherband.",
+    ),
 )
 
 FUNCTIONS_BY_ID = {f.id: f for f in EHAL_FUNCTIONS}
@@ -101,7 +110,7 @@ def _mapped_fields(
     *,
     require_nonempty_value: bool = True,
 ) -> set[str]:
-    """Flat keys plus entity-scoped ESS/inverter kinds (``ess.|inv.{slug}.*`` → kind).
+    """Flat keys plus entity-scoped kinds (``ess|inv|pv|evcs.{slug}.*`` → kind).
 
     ``require_nonempty_value``: HA needs a real ``entity_id``. Loxone Q8 uses empty
     strings as activation flags — pass ``False`` so key presence counts.
@@ -109,6 +118,7 @@ def _mapped_fields(
     from ehal.ess_fields import ess_field_kind
     from ehal.inverter_fields import inv_field_kind
     from ehal.pv_fields import pv_field_kind
+    from ehal.qualified_ids import evcs_field_kind
 
     if isinstance(mapped, Mapping):
         if require_nonempty_value:
@@ -119,7 +129,12 @@ def _mapped_fields(
         keys = {str(k) for k in mapped}
     out = set(keys)
     for key in keys:
-        kind = ess_field_kind(key) or inv_field_kind(key) or pv_field_kind(key)
+        kind = (
+            ess_field_kind(key)
+            or inv_field_kind(key)
+            or pv_field_kind(key)
+            or evcs_field_kind(key)
+        )
         if kind:
             out.add(kind)
     return out

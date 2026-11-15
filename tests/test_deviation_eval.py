@@ -29,6 +29,17 @@ def rules_doc() -> dict:
     return load_deviation_rules(str(RULES_PATH))
 
 
+def _closed_battery_mean(slot: datetime, battery_kw: float) -> dict:
+    from optimizer.schedule import quarter_hour_slot_start
+
+    return {
+        quarter_hour_slot_start(slot): {
+            "sample_count": 10,
+            "battery_kw": battery_kw,
+        }
+    }
+
+
 def _entry(**extra) -> dict:
     base = {
         "completed_at": "2026-07-05T10:00:00",
@@ -104,17 +115,25 @@ class TestScenarioCatalog:
         assert "3.50" in events[0].message
 
     def test_s3_forced_charge_error(self, rules_doc):
+        slot = datetime(2026, 10, 30, 1, 15)
         entry = _entry(
             mode=bat.MODE_ZWANGS_LADEN,
             target_power_kw=2.5,
             battery_plan_kw=2.5,
             consumption_snapshot={"flex_kw": {}, "battery_kw": 0.0},
         )
-        events = evaluate_entry_deviations(entry, rules_doc=rules_doc)
+        events = evaluate_entry_deviations(
+            entry,
+            rules_doc=rules_doc,
+            slot_start=slot,
+            closed_by_interval=_closed_battery_mean(slot, 0.0),
+        )
         assert len(events) == 1
         assert events[0].category == "error"
         assert events[0].scope == "battery"
         assert events[0].rule_id == "battery_forced_charge_missing"
+        assert "0 %" in events[0].message
+        assert "0.62 kWh" in events[0].message
 
     def test_s3b_forced_discharge_error(self, rules_doc):
         entry = _entry(
@@ -140,16 +159,95 @@ class TestScenarioCatalog:
         events = evaluate_entry_deviations(entry, rules_doc=rules_doc)
         assert events == []
 
-    def test_forced_charge_partial_delivery_not_missing(self, rules_doc):
+    @staticmethod
+    def _forced_charge_events(rules_doc, mean_battery_kw, *, soll_kw=2.0):
+        slot = datetime(2026, 10, 30, 1, 15)
+        entry = _entry(
+            mode=bat.MODE_ZWANGS_LADEN,
+            target_power_kw=soll_kw,
+            battery_plan_kw=soll_kw,
+            consumption_snapshot={"flex_kw": {}, "battery_kw": 2.25},
+            completed_at="2026-10-30T01:15:02",
+        )
+        return evaluate_entry_deviations(
+            entry,
+            rules_doc=rules_doc,
+            slot_start=slot,
+            closed_by_interval=_closed_battery_mean(slot, mean_battery_kw),
+        )
+
+    def test_forced_charge_energy_below_80_percent_is_yellow_warning(self, rules_doc):
+        # Loxone: negative = charge; 1.4 of 2.0 kW over the slot = 70 % energy.
+        events = self._forced_charge_events(rules_doc, -1.4)
+        assert len(events) == 1
+        assert events[0].category == "warning"
+        assert events[0].rule_id == "battery_forced_charge_target_missed"
+        assert events[0].color == "#f1c40f"
+        assert "70 %" in events[0].message
+        assert "Soll 0.50 kWh" in events[0].message
+        assert "Ist 0.35 kWh" in events[0].message
+
+    def test_forced_charge_energy_at_80_percent_is_ok(self, rules_doc):
+        assert self._forced_charge_events(rules_doc, -1.6) == []
+
+    def test_forced_charge_energy_at_60_percent_is_warning(self, rules_doc):
+        events = self._forced_charge_events(rules_doc, -1.2)
+        assert [e.rule_id for e in events] == ["battery_forced_charge_target_missed"]
+
+    def test_forced_charge_energy_below_60_percent_is_error(self, rules_doc):
+        events = self._forced_charge_events(rules_doc, -1.0)
+        assert [e.category for e in events] == ["error"]
+        assert events[0].rule_id == "battery_forced_charge_missing"
+        assert "50 %" in events[0].message
+
+    def test_forced_charge_discharging_slot_mean_is_error(self, rules_doc):
+        events = self._forced_charge_events(rules_doc, 0.266, soll_kw=1.0)
+        assert [e.rule_id for e in events] == ["battery_forced_charge_missing"]
+
+    def test_forced_charge_small_shortfall_is_ok(self, rules_doc):
+        """Dump 30.10. 01:15: 0.213 kW Soll, slot mean discharging — 0 % but only
+        0.053 kWh short, below min_shortfall_kwh (0.1)."""
+        assert self._forced_charge_events(rules_doc, 0.266, soll_kw=0.213) == []
+
+    def test_forced_charge_shortfall_just_above_limit_fires(self, rules_doc):
+        # Soll 0.5 kW, Ist 0.0: 0 %, 0.125 kWh short.
+        events = self._forced_charge_events(rules_doc, 0.0, soll_kw=0.5)
+        assert [e.rule_id for e in events] == ["battery_forced_charge_missing"]
+
+    def test_forced_charge_shortfall_threshold_is_per_rule(self, rules_doc):
+        doc = json.loads(json.dumps(rules_doc))
+        for rule in doc["rules"]:
+            if rule["id"] == "battery_forced_charge_missing":
+                rule["params"]["min_shortfall_kwh"] = 0.2
+        # 0.125 kWh short: red rule needs 0.2 now, yellow rule (0.1) catches it.
+        events = self._forced_charge_events(doc, 0.0, soll_kw=0.5)
+        assert [e.rule_id for e in events] == ["battery_forced_charge_target_missed"]
+
+    def test_forced_charge_without_slot_mean_has_no_energy_verdict(self, rules_doc):
+        """A decision-time sample is not slot energy — no forced-charge marker."""
         entry = _entry(
             mode=bat.MODE_ZWANGS_LADEN,
             target_power_kw=2.5,
             battery_plan_kw=2.5,
-            # Loxone: negative = charge
-            consumption_snapshot={"flex_kw": {}, "battery_kw": -2.0},
+            consumption_snapshot={"flex_kw": {}, "battery_kw": 0.0},
         )
-        events = evaluate_entry_deviations(entry, rules_doc=rules_doc)
-        assert events == []
+        assert evaluate_entry_deviations(entry, rules_doc=rules_doc) == []
+
+    def test_energy_ratio_predicate_requires_max_ratio(self, rules_doc):
+        doc = json.loads(json.dumps(rules_doc))
+        for rule in doc["rules"]:
+            if rule["id"] == "battery_forced_charge_missing":
+                del rule["params"]
+        with pytest.raises(ValueError, match="max_ratio"):
+            self._forced_charge_events(doc, 0.0)
+
+    def test_energy_ratio_predicate_requires_min_shortfall(self, rules_doc):
+        doc = json.loads(json.dumps(rules_doc))
+        for rule in doc["rules"]:
+            if rule["id"] == "battery_forced_charge_missing":
+                del rule["params"]["min_shortfall_kwh"]
+        with pytest.raises(ValueError, match="min_shortfall_kwh"):
+            self._forced_charge_events(doc, 0.0)
 
     def test_s2b_ev_pv_follow_error(self, rules_doc, monkeypatch):
         ev_consumer = {
@@ -185,16 +283,73 @@ class TestScenarioCatalog:
         events = evaluate_entry_deviations(entry, rules_doc=rules_doc)
         assert events == []
 
+    @staticmethod
+    def _wp_events(rules_doc, mean_kw, *, soll_kw=1.5, mean_flex=None):
+        from optimizer.schedule import quarter_hour_slot_start
+
+        slot = datetime(2026, 10, 30, 1, 15)
+        entry = _entry(
+            consumer_powers_kw={"wp_heating": soll_kw},
+            consumption_snapshot={"flex_kw": {"wp_heating": soll_kw}, "battery_kw": 0.0},
+            completed_at="2026-10-30T01:15:02",
+        )
+        flex = {"wp_heating": mean_kw} if mean_flex is None else mean_flex
+        closed = {
+            quarter_hour_slot_start(slot): {
+                "sample_count": 10,
+                "battery_kw": 0.0,
+                "flex_kw": flex,
+            }
+        }
+        return evaluate_entry_deviations(
+            entry, rules_doc=rules_doc, slot_start=slot, closed_by_interval=closed
+        )
+
     def test_s5_wp_heating_hint(self, rules_doc):
+        events = self._wp_events(rules_doc, 0.0)
+        assert len(events) == 1
+        assert events[0].category == "hint"
+        assert events[0].rule_id == "wp_heating_enable_no_start"
+        assert "0 %" in events[0].message
+        assert "Soll 0.38 kWh" in events[0].message
+        assert "Ist 0.00 kWh" in events[0].message
+
+    def test_wp_running_below_soll_but_above_ratio_is_ok(self, rules_doc):
+        # 1.0 of 1.5 kW = 67 % >= 50 %: the heat pump started.
+        assert self._wp_events(rules_doc, 1.0) == []
+
+    def test_wp_below_ratio_but_small_shortfall_is_ok(self, rules_doc):
+        # Soll 0.3 kW, Ist 0.0: 0 %, but only 0.075 kWh short.
+        assert self._wp_events(rules_doc, 0.0, soll_kw=0.3) == []
+
+    def test_wp_thresholds_are_per_rule(self, rules_doc):
+        doc = json.loads(json.dumps(rules_doc))
+        for rule in doc["rules"]:
+            if rule["id"] == "wp_heating_enable_no_start":
+                rule["params"] = {"max_ratio": 0.8, "min_shortfall_kwh": 0.05}
+        # 1.0 of 1.5 kW = 67 % < 80 %, 0.125 kWh short > 0.05.
+        assert [e.rule_id for e in self._wp_events(doc, 1.0)] == [
+            "wp_heating_enable_no_start"
+        ]
+
+    def test_wp_without_slot_mean_has_no_verdict(self, rules_doc):
         entry = _entry(
             consumer_powers_kw={"wp_heating": 1.5},
             consumption_snapshot={"flex_kw": {"wp_heating": 0.0}, "battery_kw": 0.0},
         )
-        events = evaluate_entry_deviations(entry, rules_doc=rules_doc)
-        assert len(events) == 1
-        assert events[0].category == "hint"
-        assert events[0].rule_id == "wp_heating_enable_no_start"
-        assert "1.50" in events[0].message
+        assert evaluate_entry_deviations(entry, rules_doc=rules_doc) == []
+
+    def test_wp_missing_from_slot_mean_has_no_verdict(self, rules_doc):
+        """Slot mean without this consumer would fall back to a live sample."""
+        assert self._wp_events(rules_doc, 0.0, mean_flex={"swimspa": 0.0}) == []
+
+    def test_wp_predicate_requires_params(self, rules_doc):
+        doc = json.loads(json.dumps(rules_doc))
+        for rule in doc["rules"]:
+            if rule["id"] == "wp_heating_enable_no_start":
+                del rule["params"]
+        with pytest.raises(ValueError, match="power_energy_below_ratio"):
+            self._wp_events(doc, 0.0)
 
     def test_missing_slot_quality_skips_evaluation(self, rules_doc):
         entry = _entry(
