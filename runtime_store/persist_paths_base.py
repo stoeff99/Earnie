@@ -214,6 +214,10 @@ def usage_ping_state_file() -> str:
     return runtime_path("usage_ping.json")
 
 
+def tariff_share_state_file() -> str:
+    return runtime_path("tariff_share.json")
+
+
 def feature_reviews_state_file() -> str:
     return runtime_path("feature_reviews.json")
 
@@ -224,6 +228,36 @@ def pv_counter_state_file() -> str:
 
 def power_interval_sampler_state_file() -> str:
     return runtime_path("power_interval_sampler_state.json")
+
+
+def capacity_peak_store_file() -> str:
+    return runtime_path("capacity_peaks.json")
+
+
+def import_cap_report_file() -> str:
+    return runtime_path("import_cap_report.json")
+
+
+def capacity_observe_peak_file() -> str:
+    """Hypothetical month peak of the import cap's observe mode (max-power plan P6d)."""
+    return runtime_path("capacity_peaks_observe.json")
+
+
+def capacity_observe_baseline_file() -> str:
+    """Measured month peak over the same quarter hours as the hypothetical one (P6d)."""
+    return runtime_path("capacity_peaks_observe_measured.json")
+
+
+def savings_ledger_file() -> str:
+    return runtime_path("savings_ledger.jsonl")
+
+
+def savings_ledger_slots_file() -> str:
+    return runtime_path("savings_ledger_slots.jsonl")
+
+
+def savings_ledger_state_file() -> str:
+    return runtime_path("savings_ledger_state.json")
 
 
 def cons_data_pending_file() -> str:

@@ -65,6 +65,9 @@ def _comp(tab, entity, collection, kind, suffix, key, valid, boundaries=(), reje
 _INV = ("Wechselrichter", "wr_main", "inverters")
 _PV = ("PV-Felder", "test_pv", "pv_systems")
 _BAT = ("Batterien", "test_battery", "batteries")
+# The components apptest adds this wallbox (tests/fixtures/ev_wallbox.wallbox_entry).
+WALLBOX_ID = "test_wallbox"
+_WB = ("Wallboxen", WALLBOX_ID, "wallboxes")
 
 COMPONENT_FIELDS = [
     # Wechselrichter
@@ -105,6 +108,38 @@ COMPONENT_FIELDS = [
     _comp(*_BAT, "number_input", "planning_battery_threshold", "threshold_power", 5.0,
           boundaries=(1.0, 100.0), to_stored=lambda percent: percent / 100.0),
     _comp(*_BAT, "checkbox", "planning_battery_limits_from_live", "limits_from_live", True),
+    # Wallboxen
+    _comp(*_WB, "text_input", "planning_wb_label", "label", "Wallbox Garage – Ünï",
+          boundaries=("G",)),
+    _comp(*_WB, "number_input", "planning_wb_voltage", "voltage_v", 240.0,
+          boundaries=(100.0, 500.0)),
+    _comp(*_WB, "number_input", "planning_wb_phases", "phases", 1,
+          boundaries=(1, 3)),
+    _comp(*_WB, "number_input", "planning_wb_min_a", "min_current_a", 8.0,
+          boundaries=(0.0, 16.0)),
+    _comp(*_WB, "number_input", "planning_wb_max_a", "max_current_a", 20.0,
+          boundaries=(6.0, 63.0)),
+]
+
+
+# --- Abschnitt „Gebäude / Wärmebedarf“ (Hausebene) ----------------------------
+# ``profile_key`` = Pfad im Rohprofil (Punkt-getrennt), Widget-Key ``test_home__<suffix>``.
+# Das Fixture-Haus hat „Heizung betrachten“ an.
+
+HOUSE_THERMAL_FIELDS = [
+    Field("number_input", "house_thermal_area", "thermal.living_area_m2", 150.0,
+          boundaries=(0.0, 400.0)),
+    Field("selectbox", "house_thermal_class", "thermal.building_class", 2),
+    Field("selectbox", "house_thermal_mass", "thermal.building_mass", "schwer"),
+    # Rendered next to the Jahresverbrauch since SUSI P6, stored at profile level as before.
+    Field("number_input", "house_persons", "persons", 4, boundaries=(1, 2)),
+    Field("number_input", "house_thermal_target_temp", "thermal.target_temp_c", 22.5),
+    Field("number_input", "house_thermal_tolerance", "thermal.house_tolerance_c", 1.5),
+    Field("number_input", "house_thermal_heating_limit", "thermal.heating_limit_c", 14.0),
+    Field("number_input", "house_thermal_h", "thermal.house_heat_loss_kw_per_k", 0.2),
+    Field("checkbox", "house_thermal_absent_use", "thermal.absent_mode_enabled", True),
+    Field("number_input", "house_thermal_absent_reduction", "thermal.absent_temp_reduction_c",
+          8.0),
 ]
 
 
@@ -119,19 +154,12 @@ def _cons(entity, kind, suffix, key, valid, boundaries=()):
 
 CONSUMER_FIELDS = [
     # Haus Wärme (thermal_annual)
-    _cons("wp", "number_input", "nom_0", "nominal_power_kw", 4.5),
+    _cons("wp", "number_input", "heat_power_0", "heating_power_kw", 12.5),
     _cons("wp", "number_input", "ta_min_qh_0", "min_on_quarterhours", 6),
-    _cons("wp", "number_input", "area_0", "living_area_m2", 150.0),
-    _cons("wp", "number_input", "persons_0", "persons", 4, boundaries=(1, 2)),
-    _cons("wp", "number_input", "target_temp_0", "target_temp_c", 22.5),
-    _cons("wp", "number_input", "house_tol_0", "house_tolerance_c", 1.5),
-    _cons("wp", "number_input", "house_h_0", "house_heat_loss_kw_per_k", 0.2),
-    _cons("wp", "number_input", "absent_temp_red_0", "absent_temp_reduction_c", 8.0),
     _cons("wp", "number_input", "solar_area_0", "solar_thermal_area_m2", 5.0),
     _cons("wp", "number_input", "solar_tilt_0", "solar_thermal_tilt_deg", 30, boundaries=(0,)),
     _cons("wp", "number_input", "solar_azimuth_0", "solar_thermal_azimuth_deg", 15),
     _cons("wp", "number_input", "storage_vol_0", "heat_storage.volume_liters", 200.0),
-    _cons("wp", "checkbox", "absent_opt_in_0", "absent_mode_enabled", True),
     # Allgemein (generic) mit Zeitplan
     _cons("wasch", "number_input", "nom_1", "nominal_power_kw", 3.0),
     _cons("wasch", "number_input", "runs_1", "schedule.runs_per_week", 4, boundaries=(1, 7)),
@@ -140,14 +168,15 @@ CONSUMER_FIELDS = [
     _cons("wasch", "number_input", "shift_1", "schedule.start_shift_h", 2.0),
     _cons("wasch", "checkbox", "absent_opt_in_1", "absent_mode_enabled", True),
     # E-Auto (ev)
-    _cons("ev1", "number_input", "nom_2", "nominal_power_kw", 12.0),
-    _cons("ev1", "number_input", "ev_min_2", "min_power_kw", 1.0),
+    # Data model 6: the car limits as current; voltage and wallbox limits on the Wallboxen tab.
+    _cons("ev1", "number_input", "ev_phases_2", "phases", 1),
+    _cons("ev1", "number_input", "ev_min_a_2", "min_current_a", 7.0),
+    _cons("ev1", "number_input", "ev_max_a_2", "max_current_a", 15.0),
+    _cons("ev1", "selectbox", "ev_wallbox_2", "wallbox_assignment.wallbox_id", "wb_garage"),
     _cons("ev1", "number_input", "ev_min_qh_2", "min_on_quarterhours", 5),
     _cons("ev1", "number_input", "ev_cap_2", "battery_capacity_kwh", 55.0),
     _cons("ev1", "number_input", "ev_target_soc_2", "charging_schedule.target_soc_percent", 80.0),
     _cons("ev1", "number_input", "ev_eff_2", "charging_schedule.charging_efficiency", 0.9),
-    _cons("ev1", "number_input", "ev_voltage_2", "charging_schedule.nominal_power_voltage_v", 235.0),
-    _cons("ev1", "number_input", "ev_phases_2", "charging_schedule.nominal_power_phases", 3),
     _cons("ev1", "number_input", "ev_Werktag_from_2", "charging_schedule.weekday.car_available_from_hour", 16),
     _cons("ev1", "number_input", "ev_Werktag_ready_2", "charging_schedule.weekday.ready_by_hour", 8),
     _cons("ev1", "number_input", "ev_Werktag_soc_2", "charging_schedule.weekday.daily_rest_soc", 21.0),

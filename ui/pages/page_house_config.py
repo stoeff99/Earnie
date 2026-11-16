@@ -1,22 +1,32 @@
-"""Hauskonfigurator: Verbraucher, PV, Batterien und Wechselrichter."""
+"""Hauskonfigurator: Verbraucher, PV, Batterien, Wechselrichter und Wallboxen."""
 from __future__ import annotations
 
 import streamlit as st
 
 from runtime_store.persist_paths import resolve_house_profiles_json_path
 from ui.help_hint import render_page_title_with_help
+from ui.heating_variants_editor import render_heating_variants_editor
 from ui.house_config_profile_form import render_house_profile_tab
 from ui.planning_battery_form import render_battery_planning_tab
 from ui.planning_inverter_form import render_inverter_planning_tab
 from ui.planning_pv_form import render_pv_planning_tab
+from ui.planning_wallbox_form import render_wallbox_planning_tab
 
 _HOUSE_CONFIG_TAB_KEY = "house_config_active_tab"
-_HOUSE_CONFIG_TABS = ("Hausprofil", "Wechselrichter", "PV-Felder", "Batterien")
+_HOUSE_CONFIG_TABS = (
+    "Hausprofil",
+    "Heizsysteme",
+    "Wechselrichter",
+    "PV-Felder",
+    "Batterien",
+    "Wallboxen",
+)
 
 
 def _help_text() -> str:
     return (
-        "Backtesting-Planung: Hausprofil, Wechselrichter, PV-Felder und Batterien. "
+        "Backtesting-Planung: Hausprofil, Heizsysteme, Wechselrichter, PV-Felder, Batterien "
+        "und Wallboxen. "
         "Szenarien und Live-Zuordnung (Tarife, Entitäts-Referenzen) im Szenarienkonfigurator. "
         "Grundlast = max(2 % Jahresverbrauch, Jahresverbrauch − Summe Verbraucher)."
     )
@@ -72,9 +82,13 @@ def _render_body() -> None:
 
     if active == "Hausprofil":
         render_house_profile_tab()
+    elif active == "Heizsysteme":
+        render_heating_variants_editor()
     elif active == "PV-Felder":
         render_pv_planning_tab()
     elif active == "Batterien":
         render_battery_planning_tab()
+    elif active == "Wallboxen":
+        render_wallbox_planning_tab()
     else:
         render_inverter_planning_tab()

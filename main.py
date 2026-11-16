@@ -11,12 +11,14 @@ from runtime_store import power_interval_sampler
 config = load_config_or_exit()
 import logger_config
 from integrations import ehal_live
+from integrations import ev_assignment_live
 from integrations.loxone_comm_trace import serialize_write_records
 from data import profile_manager, consumer_targets, pv_tuner, cons_data_store, live_consumption, pv_forecast
 from data.edibert_live_market import fetch_live_day_ahead_prices
 from data.feed_in_prices import k_push_act_for_matrix_row
 from runtime_store import run_state, optimization_history
 from runtime_store import cycle_recorder
+from runtime_store import savings_ledger_daemon
 from runtime_store.soc_plausibility import (
     closed_interval_confirms_reported,
     count_consecutive_reported_soc,
@@ -26,6 +28,7 @@ from runtime_store import live_optimization_debug
 from runtime_store import cycle_duration_stats
 from runtime_store.cycle_timing import CycleTimer
 from optimizer.live_cycle_scope import live_cycle_scope
+from optimizer.cbc_solver import begin_solve_log, take_solve_log
 from runtime_store.live_display_loader import serialize_planning_window
 from runtime_store.single_instance import SingleInstanceError, ensure_single_instance
 from optimizer import schedule as optimization_schedule
@@ -110,7 +113,65 @@ def _finalize_previous_interval() -> dict | None:
         minutes=optimization_schedule.QUARTER_HOUR_MINUTES
     )
     _last_closed_interval = power_interval_sampler.finalize_closed_interval(previous_slot)
+    if _last_closed_interval is not None:
+        _record_month_peak(_last_closed_interval)
     return _last_closed_interval
+
+
+def _record_month_peak(closed: dict) -> None:
+    """Month peak for the capacity charge and the measured cap check (P6a).
+
+    In the cap's observe mode (P6d) the check runs on the hypothetical quarter hour, measured
+    import plus what the plan with the cap would have changed. A failure is logged and never
+    stops the cycle.
+    """
+    from house_config.import_cap import MODE_OBSERVE, parse_import_cap_mode
+    from runtime_store import capacity_peak_store, import_cap_report_store
+
+    try:
+        slot = datetime.fromisoformat(str(closed["interval_start"]))
+        before = capacity_peak_store.month_peak(f"{slot:%Y-%m}")
+        capacity_peak_store.record_closed_interval(closed)
+    except Exception as exc:  # noqa: BLE001 — the cycle must still plan and write
+        logger.warning("capacity_peak_store: %s not recorded: %s", closed.get("interval_start"), exc)
+        return
+    try:
+        params = config.get_resolved_runtime_settings()
+        measured_kw = capacity_peak_store.measured_import_kw(closed)
+        if parse_import_cap_mode(params, required=True) == MODE_OBSERVE:
+            event = import_cap_report_store.record_observed(
+                closed["interval_start"], measured_kw, params=params
+            )
+        else:
+            event = import_cap_report_store.record_measured(
+                closed["interval_start"],
+                measured_kw,
+                params=params,
+                peak_before_kw=None if before is None else before.peak_kw,
+            )
+    except Exception as exc:  # noqa: BLE001 — the cycle must still plan and write
+        logger.warning("import_cap_report: %s not checked: %s", closed.get("interval_start"), exc)
+        return
+    if event is not None and event.get("hypothetical"):
+        logger.warning(
+            "Bezugsgrenze (Beobachtung): Viertelstunde %s mit Earnie geschätzt %.2f kW "
+            "(gemessen %.2f kW), %.2f kW über %.2f kW (Ursache %s).",
+            event["slot"],
+            event["import_kw"],
+            event["measured_kw"],
+            event["over_kw"],
+            event["threshold_kw"],
+            event["cause"],
+        )
+    elif event is not None:
+        logger.warning(
+            "Bezugsgrenze: Viertelstunde %s gemessen %.2f kW, %.2f kW über %.2f kW (Ursache %s).",
+            event["slot"],
+            event["import_kw"],
+            event["over_kw"],
+            event["threshold_kw"],
+            event["cause"],
+        )
 
 
 def _daemon_wait_poll() -> None:
@@ -120,8 +181,10 @@ def _daemon_wait_poll() -> None:
 
     touch_daemon_heartbeat()
     spawn_maybe_send_ping()
+    # Dynamic EV assignment: plug events and the test charge between cycles (multi-EV M3).
+    ev_assignment_live.poll()
     if power_interval_sampler.tick():
-        from runtime_store.shadow import maybe_flush_after_sampler
+        from runtime_store.shadow.hooks import maybe_flush_after_sampler
 
         maybe_flush_after_sampler()
 
@@ -132,7 +195,7 @@ def _wait_after_aborted_cycle() -> str:
     Without it the scheduler restarts at once inside the lead window (L12). An
     ``Earnie_Request_Optimize`` wake ends the wait early.
     """
-    from runtime_store.shadow import resolve_next_trigger
+    from runtime_store.shadow.hooks import resolve_next_trigger
 
     early = wait_until_next_run(
         total_wait_sec=ABORTED_CYCLE_RETRY_SEC,
@@ -246,6 +309,40 @@ def _read_pv_delta(out_of_band: bool) -> float:
     return pv_delta
 
 
+def _save_import_cap_report(report: dict | None) -> None:
+    """Latest plan's cap report for the Monitor page; a failure is logged, never fatal."""
+    from runtime_store import import_cap_report_store
+
+    try:
+        import_cap_report_store.save_plan_report(report)
+    except Exception as exc:  # noqa: BLE001 — the cycle has already written its setpoints
+        logger.warning("import_cap_report: plan report not saved: %s", exc)
+        return
+    observe = bool(report) and report.get("mode") == "observe"
+    if observe and report.get("observe"):
+        block = report["observe"]
+        if block["delta_import_kw"] is not None and abs(block["delta_import_kw"]) > 0.01:
+            logger.info(
+                "Bezugsgrenze (Beobachtung): mit Grenze würde Earnie ab %s %.2f kW statt %.2f kW "
+                "beziehen (Mehrkosten Energie im Plan %.2f €).",
+                block["slot"],
+                block["shadow"]["import_kw"],
+                block["executed"]["import_kw"],
+                block["energy_cost_extra_eur"],
+            )
+    if report and report.get("slots"):
+        first = report["slots"][0]
+        logger.warning(
+            "Bezugsgrenze%s: Plan hält %d Viertelstunde(n) nicht, erste %s %.2f kW über %.2f kW (Ursache %s).",
+            " (Beobachtung)" if observe else "",
+            len(report["slots"]),
+            first["slot"],
+            first["over_kw"],
+            first["limit_kw"],
+            first["cause"],
+        )
+
+
 def _main_cycle(
     run_trigger: str, timing: CycleTimer, *, tick: datetime | None = None
 ) -> bool:
@@ -322,11 +419,16 @@ def _main_cycle(
             logger.error("Optimierung abgebrochen: Keine Day-Ahead-Preise empfangen.")
             return False
 
-        optimization_matrix = profile_manager.build_live_planning_matrix(
-            market_data, planning_window
-        )
+        try:
+            optimization_matrix = profile_manager.build_live_planning_matrix(
+                market_data, planning_window
+            )
+        except pv_forecast.PvForecastUnavailableError as exc:
+            logger.error("Optimierung abgebrochen: %s", exc)
+            return False
         cycle_duration_stats.set_horizon_slots(len(optimization_matrix))
         pv_api_status = pv_forecast.get_api_status()
+        pv_forecast_sources = pv_api_status["source_by_system"]
         if pv_api_status["retry_at"]:
             logger.warning(
                 "forecast.solar Rate-Limit (HTTP 429): Nächster API-Aufruf erlaubt ab %s "
@@ -335,9 +437,12 @@ def _main_cycle(
                 pv_api_status["source"],
                 "ja" if pv_api_status["cache_available"] else "nein",
             )
-        elif pv_api_status["using_synthetic_fallback"]:
+        if pv_api_status["open_meteo_systems"]:
             logger.warning(
-                "forecast.solar: Synthetischer PV-Fallback aktiv (keine API-Daten)."
+                "PV-Prognose aus Open-Meteo statt forecast.solar für: %s "
+                "(keine forecast.solar-Daten, PV-Quelle: %s).",
+                ", ".join(pv_api_status["open_meteo_systems"]),
+                pv_api_status["source"],
             )
         from data.planning_window import sunrise_anchor_slot_index
 
@@ -431,6 +536,9 @@ def _main_cycle(
             )
 
     current_hour = planning_now().hour
+    # Dynamic EV assignment before any consumer is read: assigned cars are planned with
+    # their wallbox, unassigned ones are not planned (multi-EV M3).
+    ev_assignment_live.tick()
     targets = consumer_targets.resolve_consumer_daily_targets(matrix=optimization_matrix)
     if ehal_live.is_ehal_network_backend():
         live_consumers = config.get_flexible_consumers()
@@ -594,6 +702,7 @@ def _main_cycle(
             battery_params = apply_effective_ess_limits(
                 config.get_battery_params(), telemetry=telemetry_for_export
             )
+        cycle_recorder.record_ess_limits(recorder_token, battery_params)
         from optimizer.powerstation_live import (
             advance_virtual_reserves_from_plan,
             apply_reserves_to_battery_params,
@@ -617,8 +726,9 @@ def _main_cycle(
         sync_triggers_from_telemetry(telemetry_for_export, active_reserves)
         # Re-load after trigger updates so MILP sees discharging state.
         active_reserves = load_active_reserves()
+        cycle_recorder.record_active_reserves(recorder_token, active_reserves)
         battery_params = apply_reserves_to_battery_params(
-            battery_params, active_reserves
+            battery_params, active_reserves, current_soc=float(current_soc)
         )
         battery_params = ehal_live.filter_planning_batteries_with_soc(
             battery_params, current_soc_by_id
@@ -649,6 +759,12 @@ def _main_cycle(
             matrix_row=optimization_matrix[0] if optimization_matrix else None,
             telemetry=telemetry_for_export,
         )
+        cycle_recorder.record_export_limits(recorder_token, export_ctx)
+        from optimizer.live_import_cap import resolve_live_import_caps
+
+        import_ctx = resolve_live_import_caps(optimization_matrix)
+        cycle_recorder.record_import_caps(recorder_token, import_ctx)
+    begin_solve_log()
     with timing.phase("milp_live"):
         mode, target_power, target_soc, consumer_powers, consumer_pv_follow, milp_plan, urgent_obs = optimizer.milp_optimizer(
             optimization_matrix,
@@ -666,8 +782,11 @@ def _main_cycle(
             hk_max_export_kw=export_ctx["hk_max_export_kw"],
             inbound_export_limit_kw=export_ctx["inbound_export_limit_kw"],
             current_soc_by_id=current_soc_by_id or None,
+            import_caps=import_ctx["import_caps"],
+            import_cap_observe=import_ctx["mode"] == "observe",
         )
     heat_controls = _live_heat_controls(live_consumers, milp_plan, optimization_matrix)
+    solve_log = take_solve_log()
     cycle_duration_stats.mark_ready()
     if early_start:
         with timing.phase("hold"):
@@ -698,6 +817,17 @@ def _main_cycle(
             dt_h=DEFAULT_DT_H,
             reserves=active_reserves,
         )
+        from optimizer.powerstation_reserve import reserve_floor_discharge_cap_kw
+
+        # Automatik must not drain the virtual reserve within the slot (refill ping-pong).
+        automatik_discharge_cap = reserve_floor_discharge_cap_kw(
+            battery_params, float(current_soc), dt_h=DEFAULT_DT_H
+        )
+        if automatik_discharge_cap is not None and mode == 0:
+            logger.info(
+                "Automatik discharge limit capped at %.2f kW (virtual reserve floor)",
+                automatik_discharge_cap,
+            )
         reserve_charges = physical_charge_setpoints_kw(active_reserves)
         standby_sources, standby_charges = live_source_and_charge(standby_plans, slot=0)
         # Hard clamp to effective pack max (HK ∩ live) — never write above resolve.
@@ -730,7 +860,7 @@ def _main_cycle(
         current_market_item = optimization_matrix[0]
 
         ehal_writes: list[dict] | None = None
-        from runtime_store.shadow.writes import should_invoke_setpoint_writes
+        from runtime_store.shadow.hooks import should_invoke_setpoint_writes
 
         if not should_invoke_setpoint_writes(silent=config.is_loxone_silent_mode()):
             if ehal_live.is_ehal_network_backend():
@@ -751,11 +881,16 @@ def _main_cycle(
                 target_power,
                 export_cap_kw=export_cap,
                 telemetry=telemetry_for_export,
+                automatik_discharge_cap_kw=automatik_discharge_cap,
+                target_soc=target_soc,
             )
             logger.info("Sende EHAL EVCS-Maxstrom an %s...", backend)
             err_evcs, evcs_records = ehal_live.write_evcs_max_current_from_consumers(
                 consumer_powers, charging_contexts, consumer_pv_follow
             )
+            err_unassigned, unassigned_records = ev_assignment_live.write_unassigned_wallboxes()
+            err_evcs = err_evcs or err_unassigned
+            evcs_records = list(evcs_records) + list(unassigned_records)
             logger.info("Sende EHAL WR-AC-Limits an %s...", backend)
             err_inv, inv_records = ehal_live.write_inv_ac_limits_from_plan(
                 plant_curtail_kw=plant_curtail_kw,
@@ -784,7 +919,11 @@ def _main_cycle(
         else:
             logger.info("📤 Sende gemappte Huawei-Modbus-Werte an Loxone...")
             huawei_writes = ehal_live.write_huawei_modbus_states(
-                mode, target_power, target_soc, export_cap_kw=export_cap
+                mode,
+                target_power,
+                target_soc,
+                export_cap_kw=export_cap,
+                automatik_discharge_cap_kw=automatik_discharge_cap,
             )
             logger.info("📤 Sende flexible Verbraucher-Sollwerte an Loxone...")
             flex_writes = ehal_live.write_flexible_consumer_states(
@@ -799,9 +938,10 @@ def _main_cycle(
                 matrix_row=optimization_matrix[0] if optimization_matrix else None,
                 milp_plan=milp_plan if isinstance(milp_plan, dict) else None,
             )
+            _err_unassigned, unassigned_rows = ev_assignment_live.write_unassigned_wallboxes()
             loxone_writes = serialize_write_records(
                 list(huawei_writes) + list(flex_writes) + list(powerstation_writes)
-            ) + list(inv_rows)
+            ) + list(inv_rows) + list(unassigned_rows)
 
         if live_power is None:
             live_power = ehal_live.read_live_power_kw()
@@ -838,6 +978,7 @@ def _main_cycle(
             consumer_pv_follow,
             export_cap_kw=export_cap,
             heat_controls=heat_controls,
+            automatik_discharge_cap_kw=automatik_discharge_cap,
         )
         loxone_sent.update(
             planned_powerstation_loxone_sent(phys_charge, standby_sources)
@@ -875,6 +1016,7 @@ def _main_cycle(
                 filter_contexts=filter_contexts,
                 consumers=live_consumers,
                 current_soc_by_id=current_soc_by_id or None,
+                baseline_initial_soc=savings_ledger_daemon.planning_shadow_soc(closed_interval),
             )
             savings_snapshot = optimizer.build_savings_snapshot(savings_info)
             from house_config.currency_display import active_units, display_label
@@ -964,6 +1106,7 @@ def _main_cycle(
                     4,
                 ),
                 "forecast_pv_kw": round(pv_forecast_kw_for_log, 3),
+                "pv_forecast_sources": pv_forecast_sources,
                 "forecast_consumption_kw": round(
                     float(optimization_matrix[0]["expected_p_act"]), 3
                 ),
@@ -981,6 +1124,7 @@ def _main_cycle(
                     charging_contexts
                 ),
                 "filter_contexts": optimizer.serialize_filter_contexts(filter_contexts),
+                "ev_assignments": ev_assignment_live.snapshot(),
                 "urgent_rule_observability": urgent_obs,
                 "consumer_pv_follow": {
                     k: int(v) for k, v in consumer_pv_follow.items()
@@ -1044,10 +1188,14 @@ def _main_cycle(
                 optimization_history.append_production_run(run_payload)
             except OSError as exc:
                 logger.warning("optimization_history: Anhängen fehlgeschlagen: %s", exc)
+            # Savings ledger (Ledger P5): books the slot closed by this cycle; never raises.
+            savings_ledger_daemon.on_cycle(closed_interval, run_payload)
             logger.info("run_state: Durchlauf in optimizer_run_state.json gespeichert.")
         except Exception as e:
             logger.warning("run_state: Zustand konnte nicht gespeichert werden: %s", e)
 
+        cap_report = milp_plan.get("import_cap_report") if isinstance(milp_plan, dict) else None
+        _save_import_cap_report(cap_report)
         try:
             immediate = any(
                 bool((ctx or {}).get("immediate_charge"))
@@ -1064,9 +1212,11 @@ def _main_cycle(
                 flags={
                     "override": bool(config.is_silent_mode()),
                     "immediate_charging": immediate,
-                    "outage": bool(out_of_band),
+                    "out_of_band": bool(out_of_band),
                     "manual_intervention": False,
                 },
+                solver=solve_log,
+                import_cap_report=cap_report,
             )
         except Exception as exc:  # noqa: BLE001 — never abort live run
             logger.warning("cycle_recorder: finish_cycle failed: %s", exc)
@@ -1082,7 +1232,7 @@ if __name__ == "__main__":
     reinit_config_or_exit(config)
     logger_config.setup_logging(log_file=log_file(), level=logging.INFO)
     log_config_drift(logging.getLogger("main"))
-    from runtime_store.shadow import refuse_shadow_startup_or_exit
+    from runtime_store.shadow.hooks import refuse_shadow_startup_or_exit
 
     refuse_shadow_startup_or_exit()
     try:
@@ -1125,6 +1275,8 @@ if __name__ == "__main__":
 
     prepare_loxone_push_inbox_for_startup(start_http_fn=_start_hub_carriers)
     run_loxone_verify_on_startup()
+    # Before the first write: no EV ↔ wallbox assignment survives a restart (D7).
+    ev_assignment_live.start()
     ehal_live.push_safe_setpoints_on_startup()
 
     from runtime_store.dotenv_io import (
@@ -1221,7 +1373,7 @@ if __name__ == "__main__":
         )
 
         if needs_loxone_auth_recovery():
-            from runtime_store.shadow import maybe_clear_auth_gate
+            from runtime_store.shadow.hooks import maybe_clear_auth_gate
 
             if not maybe_clear_auth_gate():
                 ok, detail = probe_current_loxone_credentials()
@@ -1252,7 +1404,7 @@ if __name__ == "__main__":
 
         _setup_gate_state.clear()
         try:
-            from runtime_store.shadow import (
+            from runtime_store.shadow.hooks import (
                 after_prod_cycle,
                 prepare_shadow_cycle,
                 resolve_next_trigger,

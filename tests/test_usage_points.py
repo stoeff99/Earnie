@@ -11,6 +11,10 @@ import pytest
 from house_config.components_store import clear_components_doc_cache
 from runtime_store import usage_ping as up
 from runtime_store import usage_points as pts
+from tests.fixtures.ev_wallbox import ev_fields, wallbox_entry
+
+# 16 A × 230 V × 3 phases ≈ 11 kW
+_WALLBOX = wallbox_entry("wallbox", max_current_a=16.0, phases=3)
 
 
 def _write(path: Path, doc: dict) -> None:
@@ -38,6 +42,7 @@ def _components() -> dict:
             {"id": "pv_main", "label": "Dach", "kwp": 8.0, "tilt": 30, "azimuth": 0, **wr},
             {"id": "pv_alt", "label": "Alternative", "kwp": 20.0, "tilt": 30, "azimuth": 0, **wr},
         ],
+        "wallboxes": [_WALLBOX],
         "batteries": [
             {
                 "id": "bat_main",
@@ -57,7 +62,7 @@ def _components() -> dict:
     }
 
 
-def _profiles(phases: int = 3) -> dict:
+def _profiles(bidirectional: bool = False) -> dict:
     return {
         "profiles": [
             {
@@ -72,10 +77,10 @@ def _profiles(phases: int = 3) -> dict:
                         "id": "wallbox",
                         "label": "Wallbox",
                         "type": "ev",
-                        "nominal_power_kw": 11.0,
+                        **ev_fields("wallbox", max_current_a=16.0),
                         "battery_capacity_kwh": 60.0,
+                        "bidirectional": bidirectional,
                         "charging_schedule": {
-                            "nominal_power_phases": phases,
                             "weekday": {
                                 "car_available_from_hour": 18,
                                 "ready_by_hour": 7,
@@ -138,8 +143,11 @@ def spawns(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 def test_compute_live_points_uses_live_scenario_selection_only(plant: Path) -> None:
     result = pts.compute_live_points()
-    # pv_main 8 kWp -> 2, bat_main 9 kWh -> 2, 3-phase wallbox -> 2; alternatives ignored.
-    assert result == {"total": 6, "pv": 2, "storage": 2, "wallbox": 2, "heat": 0, "other": 0}
+    # pv_main 8 kWp -> 1 (8/7), bat_main 9 kWh -> 2.25, floor 3 with a wallbox, wallbox -> 2;
+    # alternatives ignored.
+    assert result == {
+        "total": 6, "pv": 1, "storage": 3, "wallbox": 2, "heat": 0, "heating_rod": 0, "other": 0
+    }
 
 
 def test_powerstations_are_always_counted(plant: Path) -> None:
@@ -150,12 +158,12 @@ def test_powerstations_are_always_counted(plant: Path) -> None:
             "label": "Powerstation",
             "type": "powerstation",
             "backing": "virtual",
-            "battery_capacity_kwh": 2.0,
+            "battery_capacity_kwh": 5.0,
         }
     )
     _write(plant / "components.json", doc)
     clear_components_doc_cache()
-    assert pts.compute_live_points()["storage"] == 3  # 9 + 2 kWh -> 1 + ceil(6/5)
+    assert pts.compute_live_points()["storage"] == 4  # 9 + 5 = 14 kWh: 3.5
 
 
 def test_unknown_pv_reference_raises(plant: Path) -> None:
@@ -182,7 +190,7 @@ def test_set_consent_on_refreshes_points_without_live_cycle(
     """Opt-in computes Earnie-Points from config; no optimiser cycle required."""
     state = up.set_consent("on")
     assert state["points"] == 6
-    assert state["points_v"] == 1
+    assert state["points_v"] == 3
     assert state["stage"] == "explorer"
     assert state["points_stamp"] == pts.config_stamp()
     assert spawns == [1]
@@ -201,6 +209,7 @@ def test_set_consent_on_with_live_stage_yields_payload_v2(
     payload = up.build_payload(state)
     assert payload["v"] == 2
     assert payload["points"] == 6
+    assert payload["points_v"] == 3
     assert spawns == [1]
 
 
@@ -220,7 +229,7 @@ def test_refresh_stores_points_and_triggers_resend(plant: Path, spawns: list[int
     assert pts.refresh_points() is True
     state = up.load_state()
     assert state["points"] == 6
-    assert state["points_v"] == 1
+    assert state["points_v"] == 3
     assert state["points_stamp"] == pts.config_stamp()
     assert "last_sent_date" not in state
     assert "last_attempt_at" not in state
@@ -243,9 +252,10 @@ def test_refresh_skips_when_stamp_unchanged(
 
 def test_refresh_recomputes_on_config_change(plant: Path, spawns: list[int]) -> None:
     up.set_consent("on")
-    _write(plant / "house_profiles.json", _profiles(phases=1))
+    _write(plant / "house_profiles.json", _profiles(bidirectional=True))
     assert pts.refresh_points() is True
-    assert up.load_state()["points"] == 5
+    # Car 60 kWh at a quarter: 15 kWh -> 4 points more than without the car.
+    assert up.load_state()["points"] == 10
     assert spawns == [1, 1]
 
 
@@ -299,3 +309,45 @@ def test_note_live_cycle_success_skips_points_in_shadow(
     monkeypatch.setenv("EARNIE_SHADOW", "1")
     up.note_live_cycle_success()
     assert "points" not in up.load_state()
+
+
+def _with_heating(plant: Path) -> None:
+    doc = _components()
+    doc["heating_systems"] = [
+        {
+            "id": "heating_home",
+            "label": "Wärmepumpe",
+            "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
+            "heating_power_kw": 8.0,
+        },
+        {"id": "gas", "label": "Gas", "heat_source": {"type": "gas"}, "heating_power_kw": 3.0},
+    ]
+    _write(plant / "components.json", doc)
+    profiles = _profiles()
+    profiles["profiles"][0].update(
+        {
+            "heating_enabled": True,
+            "persons": 2,
+            "thermal": {"living_area_m2": 150.0, "building_class": 2, "hwb_kwh_m2": 40.0},
+        }
+    )
+    profiles["profiles"][0]["consumers"].append(
+        {
+            "id": "heizung",
+            "label": "Heizung",
+            "type": "thermal_annual",
+            "heating_system_id": "heating_home",
+        }
+    )
+    _write(plant / "house_profiles.json", profiles)
+    clear_components_doc_cache()
+
+
+def test_live_points_use_the_scenario_heating_variant(plant: Path) -> None:
+    _with_heating(plant)
+    assert pts.compute_live_points()["heat"] == 1  # reference: heat pump
+    _write(
+        plant / "backtesting_scenarios.json",
+        _scenarios(heating_system_ids={"heizung": "gas"}),
+    )
+    assert pts.compute_live_points()["heat"] == 0  # live variant: gas boiler

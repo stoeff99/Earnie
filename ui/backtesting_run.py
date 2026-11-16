@@ -24,12 +24,14 @@ from runtime_store.persist_paths import resolve_backtesting_log_dir
 from simulation import backtesting_log
 from simulation.backtesting_fingerprint import fingerprint_for_current_config
 from simulation.backtesting_progress import (
+    EXIT_CANCELLED,
     ProgressEtaTracker,
     build_progress_display_rows,
     format_progress_bar_caption,
     ordered_backtesting_result_ids,
 )
 from simulation.engine import HISTORICAL_REFERENCE_ID, plan_per_scenario_reference_tasks
+from simulation.reference_ladder import plan_ladder_reference_tasks
 from simulation.horizon_mode import DEFAULT_HORIZON_MODE, FIXED_24H, SUNRISE_WINDOW
 from ui.backtesting_charts import scenario_monthly_cost_chart
 from ui.backtesting_cons_data import render_cons_data_section
@@ -44,10 +46,14 @@ from ui.backtesting_results_helpers import (
     scenario_consumption_subheader,
 )
 from ui.backtesting_runner import (
+    BacktestingRun,
     auto_backtesting_workers,
+    cancel_backtesting_run,
     count_backtesting_parallel_tasks,
     default_progress_file_path,
-    run_backtesting_subprocess,
+    finish_backtesting_run,
+    poll_backtesting_progress,
+    start_backtesting_subprocess,
     suggest_test_month,
 )
 from ui.backtesting_time_ranges import render_time_range_help
@@ -77,6 +83,13 @@ _HORIZON_RESULTS_HIDDEN_INFO = (
     "wiederherstellen oder neu berechnen."
 )
 _BACKTESTING_LOG_ANCHOR_KEY = "_backtesting_log_anchor"
+# Running SE subprocess of this session: survives reruns and page changes, so the page
+# attaches to it again (progress, cancel) instead of losing it.
+_ACTIVE_RUN_KEY = "_backtesting_active_run"
+_CANCELLED_INFO = (
+    "Szenario-Explorer abgebrochen. Es wurde kein neues Ergebnis gespeichert; "
+    "die bisherigen Ergebnisse bleiben unverändert."
+)
 
 
 
@@ -151,6 +164,9 @@ def _prepare_backtesting_run_context() -> dict | None:
         scenario_labels=scenario_labels,
         own_reference_by_scenario=own_ref_flags,
     )
+    _, ladder_specs = plan_ladder_reference_tasks(
+        scenarios or {}, scenario_labels=scenario_labels
+    )
     return {
         "workers": auto_backtesting_workers(parallel_task_count),
         "progress_file": default_progress_file_path(),
@@ -158,11 +174,15 @@ def _prepare_backtesting_run_context() -> dict | None:
             HISTORICAL_REFERENCE_ID: HISTORICAL_REFERENCE_LABEL,
             **scenario_labels,
             **extra_ref_labels,
+            **{spec.ref_id: spec.label for spec in ladder_specs},
         },
         "preferred_progress_ids": ordered_backtesting_result_ids(
             scenarios or {},
             live_scenario_id=live_scenario_id,
-            extra_ref_ids=[ref_id for ref_id, _params, _label in extra_ref_specs],
+            extra_ref_ids=[
+                *(ref_id for ref_id, _params, _label in extra_ref_specs),
+                *(spec.ref_id for spec in ladder_specs),
+            ],
         ),
         "eta_tracker": ProgressEtaTracker(),
     }
@@ -225,40 +245,97 @@ def _execute_backtesting_run(
     ctx = _prepare_backtesting_run_context()
     if ctx is None:
         return
-    with st.status(status_label, expanded=True) as status:
-        progress_host = st.empty()
-
-        def _on_progress(snapshot: dict) -> None:
-            _render_backtesting_progress(snapshot, ctx, progress_host)
-
-        exit_code, output = run_backtesting_subprocess(
+    try:
+        run = start_backtesting_subprocess(
             start_month=start_month,
             end_month=end_month,
             progress_file=ctx["progress_file"],
             horizon_mode=horizon_mode,
             workers=ctx["workers"],
-            on_progress=_on_progress,
         )
-        if exit_code == 0:
-            status.update(label="Szenario-Explorer abgeschlossen", state="complete")
-            load_backtesting_data.clear()
-            if (
-                start_month is not None
-                and end_month is not None
-                and int(start_month) == int(end_month)
-            ):
-                st.session_state["backtesting_calendar_month"] = int(start_month)
-                st.session_state.pop("backtesting_calendar_date", None)
-            st.rerun()
-            return
-        status.update(label="Szenario-Explorer fehlgeschlagen", state="error")
-        hint = _format_backtesting_run_error(output)
-        if hint:
-            st.error(hint)
-        st.error(f"Exit-Code {exit_code}")
-        tail = output[-8000:] if len(output) > 8000 else output
-        if tail:
-            st.code(tail)
+    except FileNotFoundError as exc:
+        st.error(str(exc))
+        return
+    st.session_state[_ACTIVE_RUN_KEY] = {
+        "run": run,
+        "ctx": ctx,
+        "status_label": status_label,
+        "start_month": start_month,
+        "end_month": end_month,
+    }
+    follow_active_backtesting_run()
+
+
+def active_backtesting_run() -> dict | None:
+    return st.session_state.get(_ACTIVE_RUN_KEY)
+
+
+def _cancel_active_run() -> None:
+    active = active_backtesting_run()
+    if active is not None:
+        cancel_backtesting_run(active["run"])
+
+
+def follow_active_backtesting_run() -> bool:
+    """Show the session's running SE run (progress, cancel) until it ends. False without one.
+
+    A click elsewhere interrupts this script run (Streamlit rerun), not the subprocess: the
+    run stays in the session and the next page run attaches to it again.
+    """
+    active = active_backtesting_run()
+    if active is None:
+        return False
+    run: BacktestingRun = active["run"]
+    ctx = active["ctx"]
+    with st.status(active["status_label"], expanded=True) as status:
+        st.button(
+            "Abbrechen",
+            key="backtesting_cancel_btn",
+            on_click=_cancel_active_run,
+            disabled=run.cancel_requested,
+            help="Stoppt den Lauf nach der aktuell gerechneten Stunde; es wird nichts gespeichert.",
+        )
+        if run.cancel_requested:
+            st.caption("Abbruch angefordert – der Lauf stoppt nach der aktuellen Stunde…")
+        progress_host = st.empty()
+
+        def _on_progress(snapshot: dict) -> None:
+            _render_backtesting_progress(snapshot, ctx, progress_host)
+
+        poll_backtesting_progress(run, _on_progress)
+        st.session_state.pop(_ACTIVE_RUN_KEY, None)
+        exit_code, output = finish_backtesting_run(run)
+        _show_backtesting_run_result(status, exit_code, output, active)
+    return True
+
+
+def _show_backtesting_run_result(status, exit_code: int, output: str, active: dict) -> None:
+    start_month = active["start_month"]
+    end_month = active["end_month"]
+    if exit_code == 0:
+        status.update(label="Szenario-Explorer abgeschlossen", state="complete")
+        load_backtesting_data.clear()
+        if (
+            start_month is not None
+            and end_month is not None
+            and int(start_month) == int(end_month)
+        ):
+            st.session_state["backtesting_calendar_month"] = int(start_month)
+            st.session_state.pop("backtesting_calendar_date", None)
+        st.rerun()
+        return
+    if exit_code == EXIT_CANCELLED and active["run"].cancel_requested:
+        status.update(label="Szenario-Explorer abgebrochen", state="error")
+        st.info(_CANCELLED_INFO)
+        return
+    status.update(label="Szenario-Explorer fehlgeschlagen", state="error")
+    hint = _format_backtesting_run_error(output)
+    if hint:
+        st.error(hint)
+    st.error(f"Exit-Code {exit_code}")
+    tail = output[-8000:] if len(output) > 8000 else output
+    if tail:
+        st.code(tail)
 
 def _render_season_mirror_toggle() -> None:
     from data.cons_data_season_mirror import is_season_mirror_enabled
@@ -382,6 +459,26 @@ def _render_worker_and_pv_notice() -> None:
             f"({len(scenarios)} optimierte Szenarien + Referenzberechnungen)."
         )
     _render_imported_pv_run_notice(scenarios)
+    _render_dynamic_ev_notice(scenarios)
+
+
+def _render_dynamic_ev_notice(scenarios: dict[str, dict]) -> None:
+    """D9 (multi-EV M4): which car charges at which wallbox, per scenario."""
+    from simulation.engine_scenario import scenario_ev_wallbox_lines
+    from simulation.ev_wallbox_fcfs import RULE_TEXT
+
+    labels = scenario_labels_map()
+    for sid, params in scenarios.items():
+        try:
+            lines = scenario_ev_wallbox_lines(params)
+        except ValueError as exc:
+            st.error(f"{labels.get(sid, sid)}: {exc}")
+            continue
+        if lines:
+            st.info(
+                f"{labels.get(sid, sid)} — Wallbox-Zuordnung im Scenario Explorer. "
+                f"{RULE_TEXT}\n\n" + "\n".join(f"- {line}" for line in lines)
+            )
 
 
 def render_backtesting_run_controls(
@@ -395,6 +492,8 @@ def render_backtesting_run_controls(
     """Rendert Start-Steuerung. True wenn Horizont-Auswahl vom Log abweicht."""
     del stale_reason
     label = "Szenario-Explorer neu berechnen" if log_exists else "Szenario-Explorer starten"
+    # A run of this session that is still going (e.g. after a page change) comes first.
+    follow_active_backtesting_run()
     log_period = meta.get("period") if meta else None
     render_time_range_help(key="backtesting_time_ranges_run", log_period=log_period)
     test_month = suggest_test_month()

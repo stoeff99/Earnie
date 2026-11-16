@@ -26,7 +26,7 @@ def _wp_consumer() -> dict:
         "nominal_power_kw": 1.6,
         "living_area_m2": 157.0,
         "building_class": 2,
-        "heat_pump_type": "erde",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
         "persons": 2,
         "target_temp_c": 21.5,
         "heating_limit_c": 15.0,
@@ -354,6 +354,8 @@ def test_thermal_milp_chooses_cheaper_hours():
     from optimizer.thermal_flex_context import add_thermal_flex_constraints
 
     profile = _house_profile()
+    # A large store, so the SE band (optimizer.hp_store) leaves the shift free here.
+    profile["consumers"][0]["heat_storage"] = {"volume_liters": 5000.0, "tolerance_c": 20.0}
     consumer = planning_thermal_to_milp(_wp_consumer())
     day = date(2024, 1, 15)
     matrix = []
@@ -624,7 +626,7 @@ def test_resolve_thermal_flex_se_has_no_forced_indices(monkeypatch):
     profile["consumers"][0]["thermal"] = {
         "living_area_m2": 157.0,
         "building_class": 2,
-        "heat_pump_type": "erde",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
         "persons": 2,
         "target_temp_c": 21.5,
         "heating_limit_c": 15.0,

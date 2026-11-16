@@ -8,6 +8,7 @@ import streamlit as st
 
 from house_config.id_slug import slug_id
 from runtime_store.persist_paths import resolve_backtesting_scenarios_json_path
+from ui.number_format import format_decimal
 from ui.form_layout import labeled_multiselect, labeled_selectbox
 
 NONE_LABEL = "— keine —"
@@ -144,8 +145,8 @@ def render_profile_geo_caption(profile: dict) -> None:
         return
     st.caption(
         "Standort (Hausprofil): "
-        f"{float(profile.get('latitude', 0.0)):.4f}° N, "
-        f"{float(profile.get('longitude', 0.0)):.4f}° E · "
+        f"{format_decimal(float(profile.get('latitude', 0.0)), 4)}° N, "
+        f"{format_decimal(float(profile.get('longitude', 0.0)), 4)}° E · "
         f"Zeitzone: {profile.get('timezone_name', 'Europe/Vienna')}"
     )
 
@@ -324,7 +325,12 @@ def build_scenario_settings(
     use_imported_pv: bool = False,
     user_import_cent_kwh: float | None = None,
     user_export_cent_kwh: float | None = None,
+    heating_system_ids: dict[str, str] | None = None,
+    import_cap_kw: float | None = None,
+    import_cap_margin_kw: float | None = None,
+    import_cap_mode: str | None = None,
 ) -> dict:
+    from house_config.import_cap import IMPORT_CAP_KEY, IMPORT_CAP_MARGIN_KEY, IMPORT_CAP_MODE_KEY
     from house_config.tariffs_store import (
         USER_EXPORT_CENT_KEY,
         USER_IMPORT_CENT_KEY,
@@ -363,6 +369,15 @@ def build_scenario_settings(
         settings["house_profile_id"] = house_profile_id
     if use_imported_pv:
         settings["use_imported_pv"] = True
+    if heating_system_ids:
+        settings["heating_system_ids"] = dict(sorted(heating_system_ids.items()))
+    # Margin and mode fields keep their proposal while the cap is empty; only a set cap stores them.
+    if import_cap_kw is not None:
+        settings[IMPORT_CAP_KEY] = float(import_cap_kw)
+        if import_cap_margin_kw is not None:
+            settings[IMPORT_CAP_MARGIN_KEY] = float(import_cap_margin_kw)
+        if import_cap_mode is not None:
+            settings[IMPORT_CAP_MODE_KEY] = str(import_cap_mode)
     return settings
 
 
@@ -377,6 +392,7 @@ def normalize_scenario_form_snapshot(scenario: dict) -> dict:
         normalize_battery_ids,
         normalize_pv_system_ids,
     )
+    from house_config.import_cap import IMPORT_CAP_KEY, IMPORT_CAP_MARGIN_KEY, IMPORT_CAP_MODE_KEY
     from house_config.tariffs_store import USER_EXPORT_CENT_KEY, USER_IMPORT_CENT_KEY
 
     raw_settings = scenario.get("settings", {}) or {}
@@ -394,6 +410,10 @@ def normalize_scenario_form_snapshot(scenario: dict) -> dict:
         use_imported_pv=bool(raw_settings.get("use_imported_pv")),
         user_import_cent_kwh=_optional_user_cent(raw_settings, USER_IMPORT_CENT_KEY),
         user_export_cent_kwh=_optional_user_cent(raw_settings, USER_EXPORT_CENT_KEY),
+        heating_system_ids=raw_settings.get("heating_system_ids") or None,
+        import_cap_kw=_optional_user_cent(raw_settings, IMPORT_CAP_KEY),
+        import_cap_margin_kw=_optional_user_cent(raw_settings, IMPORT_CAP_MARGIN_KEY),
+        import_cap_mode=raw_settings.get(IMPORT_CAP_MODE_KEY),
     )
     out = {
         "label": str(scenario.get("label", "") or "").strip(),
@@ -445,6 +465,7 @@ def _scenario_settings_from_session(
     session_state,
     session_scope: str,
     *,
+    profiles: dict[str, dict],
     prof_map: dict,
     bat_map: dict,
     pv_map: dict,
@@ -471,12 +492,20 @@ def _scenario_settings_from_session(
     ]
     import_tariff_id = lookup_entity_id(imp_map, import_pick)
     export_tariff_id = lookup_entity_id(exp_map, export_pick)
+    house_profile_id = lookup_entity_id(prof_map, profile_pick)
+    from ui.scenario_heating_picks import heating_picks_from_session
+
+    # The baseline carries settings.heating_system_ids; without the picks every scenario
+    # with a variant looked edited and blocked switching to another scenario.
+    heating_system_ids = heating_picks_from_session(
+        session_state, session_scope, profiles.get(str(house_profile_id or "")) or {}
+    )
     return build_scenario_settings(
         battery_ids=battery_ids,
         pv_system_ids=pv_system_ids,
         import_tariff_id=import_tariff_id,
         export_tariff_id=export_tariff_id,
-        house_profile_id=lookup_entity_id(prof_map, profile_pick),
+        house_profile_id=house_profile_id,
         use_imported_pv=bool(
             session_state.get(scoped_widget_key(session_scope, "scenario_use_imported_pv"), False)
         ),
@@ -492,6 +521,12 @@ def _scenario_settings_from_session(
             tariff_id=export_tariff_id,
             widget_suffix="scenario_user_export_cent",
         ),
+        heating_system_ids=heating_system_ids or None,
+        import_cap_kw=session_state.get(scoped_widget_key(session_scope, "scenario_import_cap")),
+        import_cap_margin_kw=session_state.get(
+            scoped_widget_key(session_scope, "scenario_import_cap_margin")
+        ),
+        import_cap_mode=session_state.get(scoped_widget_key(session_scope, "scenario_import_cap_mode")),
     )
 
 
@@ -511,6 +546,7 @@ def read_scenario_form_snapshot(
     settings = _scenario_settings_from_session(
         session_state,
         session_scope,
+        profiles=profiles,
         prof_map=prof_map,
         bat_map=bat_map,
         pv_map=pv_map,

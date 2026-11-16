@@ -20,6 +20,11 @@ from house_config.generic_schedule import (
     generic_annual_kwh,
     normalize_generic_schedule,
 )
+from house_config.house_cooling import COOLING_KEY, serialize_cooling
+from house_config.house_gains import (
+    INTERNAL_GAIN_FACTOR_KEY,
+    normalize_consumer_gain_factor,
+)
 from house_config.profiles_thermal_annual import normalize_thermal_annual_consumer
 from settings.flexible_consumers import reject_legacy_id
 
@@ -39,12 +44,11 @@ _POOL_FILTER_MILP_KEYS = (
 
 
 _THERMAL_ANNUAL_PASSTHROUGH_KEYS = (
+    "optimizer_flex",
     "max_on_quarterhours",
     "min_off_quarterhours",
     "max_pulses_per_day",
     *HEAT_CONTROL_KEYS,
-    "optimizer_flex",
-    "thermal_flex_window",
 )
 
 
@@ -260,33 +264,47 @@ def _normalize_earnie_role(
     )
 
 
-def _normalize_ev_consumer(raw: dict, spec: dict, *, profile_id: str, index: int) -> None:
+def _normalize_ev_consumer(
+    raw: dict,
+    spec: dict,
+    *,
+    profile_id: str,
+    index: int,
+) -> None:
+    """EV with current limits; the pair view is added by ``_normalize_consumer`` (M1)."""
+    from house_config.wallboxes import normalize_ev_current_fields, reject_legacy_ev_fields
+
+    label = f"profiles '{profile_id}' consumers[{index}] '{spec['id']}'"
+    reject_legacy_ev_fields(raw, label=label)
     battery_capacity = float(raw.get("battery_capacity_kwh", 0.0) or 0.0)
     if battery_capacity <= 0:
         raise ValueError(
             f"profiles '{profile_id}' consumers[{index}]: "
             "battery_capacity_kwh muss > 0 sein."
         )
-    spec["min_power_kw"] = float(raw.get("min_power_kw", 0.0) or 0.0)
-    if spec["min_power_kw"] < 0.0:
-        raise ValueError(
-            f"profiles '{profile_id}' consumers[{index}] '{spec['id']}': "
-            "min_power_kw muss >= 0 sein."
-        )
-    if spec["min_power_kw"] > spec["nominal_power_kw"] + 1e-9:
-        raise ValueError(
-            f"profiles '{profile_id}' consumers[{index}] '{spec['id']}': "
-            f"min_power_kw ({spec['min_power_kw']}) darf nicht größer als "
-            f"nominal_power_kw ({spec['nominal_power_kw']}) sein."
-        )
+    spec.update(normalize_ev_current_fields(raw, label=label))
     spec["min_on_quarterhours"] = max(1, int(raw.get("min_on_quarterhours", 1) or 1))
     spec["battery_capacity_kwh"] = battery_capacity
     spec["charging_schedule"] = normalize_ev_charging_schedule(raw.get("charging_schedule"))
     _copy_loxone_binding(raw, spec)
 
 
-def _normalize_thermal_annual_consumer(raw: dict, spec: dict) -> None:
-    normalize_thermal_annual_consumer(raw, spec, copy_loxone_binding=_copy_loxone_binding)
+def _normalize_thermal_annual_consumer(
+    raw: dict,
+    spec: dict,
+    *,
+    heating_systems: dict | None,
+    house_thermal: dict | None,
+    persons: int,
+) -> None:
+    normalize_thermal_annual_consumer(
+        raw,
+        spec,
+        copy_loxone_binding=_copy_loxone_binding,
+        heating_systems=heating_systems,
+        house_thermal=house_thermal,
+        persons=persons,
+    )
 
 
 def _normalize_thermal_rc_consumer(
@@ -308,7 +326,21 @@ def _normalize_thermal_rc_consumer(
             spec["thermal_control"] = {"loxone": dict(loxone)}
 
 
-def _normalize_consumer(raw: dict, index: int, profile_id: str) -> dict:
+def _normalize_consumer(
+    raw: dict,
+    index: int,
+    profile_id: str,
+    *,
+    heating_systems: dict | None = None,
+    house_thermal: dict | None = None,
+    persons: int = 0,
+    wallboxes: dict | None = None,
+) -> dict:
+    """One consumer; ``house_thermal`` / ``persons`` feed a ``thermal_annual`` consumer.
+
+    ``wallboxes`` is the ``components.json`` catalog (id → wallbox); an EV resolves its
+    fixed wallbox there (fail loud when missing).
+    """
     if not isinstance(raw, dict):
         raise ValueError(f"profiles '{profile_id}' consumers[{index}] muss ein Objekt sein.")
     consumer_id = str(raw.get("id", "")).strip()
@@ -330,6 +362,12 @@ def _normalize_consumer(raw: dict, index: int, profile_id: str) -> dict:
         "profile_csv": str(raw.get("profile_csv", "")).strip(),
         "use_profile_csv": bool(raw.get("use_profile_csv", False)),
         "absent_mode_enabled": bool(raw.get("absent_mode_enabled", False)),
+        INTERNAL_GAIN_FACTOR_KEY: normalize_consumer_gain_factor(
+            raw.get(INTERNAL_GAIN_FACTOR_KEY),
+            consumer_type=consumer_type,
+            label=f"profiles '{profile_id}' consumers '{consumer_id}'",
+            consumer_id=consumer_id,
+        ),
     }
     if "id_locked" in raw:
         spec["id_locked"] = bool(raw.get("id_locked"))
@@ -351,19 +389,62 @@ def _normalize_consumer(raw: dict, index: int, profile_id: str) -> dict:
                 index=index,
             )
     elif consumer_type == "ev":
-        _normalize_ev_consumer(raw, spec, profile_id=profile_id, index=index)
+        _normalize_ev_consumer(
+            raw, spec, profile_id=profile_id, index=index
+        )
     if consumer_type == "thermal_annual":
-        _normalize_thermal_annual_consumer(raw, spec)
+        _normalize_thermal_annual_consumer(
+            raw,
+            spec,
+            heating_systems=heating_systems,
+            house_thermal=house_thermal,
+            persons=persons,
+        )
     elif consumer_type == "thermal_rc":
         _normalize_thermal_rc_consumer(raw, spec, profile_id=profile_id, index=index)
+    if consumer_type != "thermal_annual" and COOLING_KEY in raw:
+        raise ValueError(
+            f"profiles '{profile_id}' consumers '{consumer_id}': cooling gehört an den "
+            "Haus-Wärme-Verbraucher (type thermal_annual)."
+        )
     normalize_points_fields(raw, spec, profile_id=profile_id, index=index)
     _copy_ehal_entity_fields(raw, spec)
+    _copy_rod_bindings(raw, spec, profile_id=profile_id)
+    if consumer_type == "ev":
+        from house_config.wallboxes import resolve_ev_pair
+
+        # After the bindings: the pair view merges the wallbox's charger bindings in.
+        resolve_ev_pair(
+            spec,
+            wallboxes,
+            label=f"profiles '{profile_id}' consumers[{index}] '{consumer_id}'",
+        )
     return spec
 
 
+def _copy_rod_bindings(raw: dict, spec: dict, *, profile_id: str) -> None:
+    from house_config.heating_rod_bindings import ROD_BINDINGS_KEY, normalize_rod_bindings
+
+    if ROD_BINDINGS_KEY not in raw:
+        return
+    label = f"profiles '{profile_id}' consumers '{spec['id']}'"
+    if spec["type"] != "thermal_annual":
+        raise ValueError(
+            f"{label}: {ROD_BINDINGS_KEY} gehört an den Haus-Wärme-Verbraucher "
+            "(type thermal_annual)."
+        )
+    spec[ROD_BINDINGS_KEY] = normalize_rod_bindings(
+        raw[ROD_BINDINGS_KEY], consumer_id=spec["id"], label=label
+    )
+
+
 def _attach_ehal_entity_fields(out: dict, consumer: dict) -> None:
+    from house_config.heating_rod_bindings import ROD_BINDINGS_KEY
+
     if consumer.get("ehal_bindings"):
         out["ehal_bindings"] = dict(consumer["ehal_bindings"])
+    if consumer.get(ROD_BINDINGS_KEY):
+        out[ROD_BINDINGS_KEY] = dict(consumer[ROD_BINDINGS_KEY])
 
 
 def _copy_loxone_io_fields(consumer: dict, out: dict, *, outputs: bool = True) -> None:
@@ -390,26 +471,39 @@ def _serialize_generic_fields(consumer: dict, out: dict) -> None:
 
 
 def _serialize_ev_fields(consumer: dict, out: dict) -> None:
-    out["min_power_kw"] = consumer.get("min_power_kw", 0.0)
     out["min_on_quarterhours"] = consumer.get("min_on_quarterhours", 1)
     out["battery_capacity_kwh"] = consumer["battery_capacity_kwh"]
     out["charging_schedule"] = consumer["charging_schedule"]
     _copy_loxone_io_fields(consumer, out)
 
 
+# Consumer-owned part of a normalized thermal_annual ``thermal`` block. The building fields
+# belong to the house profile (``house_config.house_thermal``), the generation fields to the
+# heating-system catalog.
+_THERMAL_ANNUAL_CONSUMER_FIELDS = (
+    "solar_thermal_area_m2",
+    "solar_thermal_tilt_deg",
+    "solar_thermal_azimuth_deg",
+)
+
+
 def _serialize_thermal_annual_fields(consumer: dict, out: dict) -> None:
-    thermal = dict(consumer["thermal"])
-    thermal.pop("latitude", None)
-    thermal.pop("longitude", None)
-    out.update(thermal)
-    out["min_on_quarterhours"] = consumer.get("min_on_quarterhours", 1)
-    # Keys read by normalize_thermal_annual_consumer; without them a save reverts
-    # the cycle settings (max run, mandatory pause, starts) to their defaults.
+    thermal = consumer["thermal"]
+    out.pop("nominal_power_kw", None)
+    # The absent-mode setback is stored at the house (thermal.absent_mode_enabled).
+    out.pop("absent_mode_enabled", None)
+    for key in _THERMAL_ANNUAL_CONSUMER_FIELDS:
+        out[key] = thermal[key]
+    out["heating_system_id"] = consumer["heating_system_id"]
+    # Optional fields the normalizer reads (normalize_thermal_annual_consumer); a save must keep
+    # them, else it reverts the cycle and heat-control settings to their defaults.
     for key in _THERMAL_ANNUAL_PASSTHROUGH_KEYS:
-        if key not in consumer:
-            continue
-        value = consumer[key]
-        out[key] = dict(value) if isinstance(value, dict) else value
+        if key in consumer:
+            out[key] = consumer[key]
+    if consumer.get("thermal_flex_window"):
+        out["thermal_flex_window"] = dict(consumer["thermal_flex_window"])
+    if consumer.get(COOLING_KEY):
+        out[COOLING_KEY] = serialize_cooling(consumer[COOLING_KEY])
     _copy_loxone_io_fields(consumer, out)
 
 
@@ -444,6 +538,12 @@ def _serialize_consumer(consumer: dict) -> dict:
         out["profile_csv"] = consumer["profile_csv"]
     out["use_profile_csv"] = bool(consumer.get("use_profile_csv", False))
     out["absent_mode_enabled"] = bool(consumer.get("absent_mode_enabled", False))
+    out[INTERNAL_GAIN_FACTOR_KEY] = normalize_consumer_gain_factor(
+        consumer.get(INTERNAL_GAIN_FACTOR_KEY),
+        consumer_type=consumer["type"],
+        label=f"consumer '{consumer['id']}'",
+        consumer_id=consumer["id"],
+    )
     if consumer["type"] == "generic":
         _serialize_generic_fields(consumer, out)
     elif consumer["type"] == "ev":
@@ -454,4 +554,8 @@ def _serialize_consumer(consumer: dict) -> dict:
         _serialize_thermal_rc_fields(consumer, out)
     serialize_points_fields(consumer, out)
     _attach_ehal_entity_fields(out, consumer)
+    if consumer["type"] == "ev":
+        from house_config.wallboxes import split_ev_view
+
+        split_ev_view(consumer, out)
     return out

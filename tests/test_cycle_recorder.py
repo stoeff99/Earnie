@@ -75,6 +75,69 @@ def test_matrix_columnar_roundtrip():
     assert restored[2]["slot_datetime"] == "2026-07-16T10:30:00"
 
 
+def test_finish_stores_outdoor_forecast_fetched_during_the_cycle(tmp_path, monkeypatch):
+    from data import outdoor_forecast as of
+
+    _cfg(tmp_path, monkeypatch)
+    now = datetime.now().replace(microsecond=0)
+    token = cycle_recorder.begin_cycle(
+        optimization_matrix=_sample_matrix(),
+        planning_window=_sample_window(),
+        soc_percent=50.0,
+        timestamp=now,
+    )
+    with patch.object(of, "get_hourly_outdoor_forecast_c", return_value=[4.4, 5.9, 11.7]):
+        of.get_outdoor_forecast_with_fallback(horizon=3, fallback_ambient_c=10.4)
+    cycle_recorder.finish_cycle(token, mode=2, target_power_kw=0.0, battery_plan_kw=0.0)
+    entry = cycle_recorder.read_segment_cycles(
+        cycle_recorder.segment_path_for_day(now.date())
+    )[0]
+    assert entry["start_state"]["outdoor_forecast"] == {
+        "values_c": [4.4, 5.9, 11.7],
+        "source": "open_meteo",
+    }
+
+
+def test_finish_marks_outdoor_forecast_empty_when_none_was_read(tmp_path, monkeypatch):
+    _cfg(tmp_path, monkeypatch)
+    now = datetime.now().replace(microsecond=0)
+    token = cycle_recorder.begin_cycle(
+        optimization_matrix=_sample_matrix(),
+        planning_window=_sample_window(),
+        soc_percent=50.0,
+        timestamp=now,
+    )
+    cycle_recorder.finish_cycle(token, mode=2, target_power_kw=0.0, battery_plan_kw=0.0)
+    entry = cycle_recorder.read_segment_cycles(
+        cycle_recorder.segment_path_for_day(now.date())
+    )[0]
+    assert "outdoor_forecast" in entry["start_state"]
+    assert entry["start_state"]["outdoor_forecast"] is None
+
+
+def test_finish_stores_fallback_forecast_when_fetch_failed(tmp_path, monkeypatch):
+    from data import outdoor_forecast as of
+
+    _cfg(tmp_path, monkeypatch)
+    now = datetime.now().replace(microsecond=0)
+    token = cycle_recorder.begin_cycle(
+        optimization_matrix=_sample_matrix(),
+        planning_window=_sample_window(),
+        soc_percent=50.0,
+        timestamp=now,
+    )
+    with patch.object(of, "get_hourly_outdoor_forecast_c", side_effect=RuntimeError("down")):
+        of.get_outdoor_forecast_with_fallback(horizon=2, fallback_ambient_c=7.5)
+    cycle_recorder.finish_cycle(token, mode=2, target_power_kw=0.0, battery_plan_kw=0.0)
+    entry = cycle_recorder.read_segment_cycles(
+        cycle_recorder.segment_path_for_day(now.date())
+    )[0]
+    assert entry["start_state"]["outdoor_forecast"] == {
+        "values_c": [7.5, 7.5],
+        "source": "fallback_constant",
+    }
+
+
 def test_begin_finish_writes_gzip_jsonl(tmp_path, monkeypatch):
     _cfg(tmp_path, monkeypatch)
     matrix = _sample_matrix()
@@ -92,7 +155,7 @@ def test_begin_finish_writes_gzip_jsonl(tmp_path, monkeypatch):
         target_power_kw=2.5,
         battery_plan_kw=-1.0,
         consumer_powers_kw={"eauto": 3.68},
-        flags={"override": False, "immediate_charging": False, "outage": False, "manual_intervention": False},
+        flags={"override": False, "immediate_charging": False, "out_of_band": False, "manual_intervention": False},
     )
     assert ok is True
     segment = cycle_recorder.segment_path_for_day(now.date())
@@ -104,6 +167,22 @@ def test_begin_finish_writes_gzip_jsonl(tmp_path, monkeypatch):
     assert entry["optimization_matrix"]["n_rows"] == 4
     assert entry["outputs"]["plan_hash"]
     assert (cycle_recorder.configs_dir() / f"{entry['config_hash']}.json").is_file()
+    assert "solver" not in entry["outputs"]
+
+
+def test_finish_cycle_stores_the_solve_log(tmp_path, monkeypatch):
+    _cfg(tmp_path, monkeypatch)
+    now = datetime.now().replace(microsecond=0)
+    token = cycle_recorder.begin_cycle(
+        optimization_matrix=_sample_matrix(),
+        planning_window=_sample_window(),
+        soc_percent=55.0,
+        timestamp=now,
+    )
+    solve = {"stage": "strict", "strict_elapsed_sec": 3.21, "strict_time_limit_hit": True, "objective": 315.88}
+    cycle_recorder.finish_cycle(token, mode=0, target_power_kw=0.0, battery_plan_kw=0.0, solver=[solve])
+    entry = cycle_recorder.read_segment_cycles(cycle_recorder.segment_path_for_day(now.date()))[0]
+    assert entry["outputs"]["solver"] == [solve]
 
 
 def test_disabled_writes_nothing(tmp_path, monkeypatch):
@@ -176,10 +255,8 @@ def test_debug_dump_includes_recorder_window(tmp_path, monkeypatch):
         monkeypatch,
         local={
             "silent_mode": False,
-            "chart_debug_capture_enabled": True,
         },
     )
-    monkeypatch.setenv("EARNIE_UI_CHART_DEBUG_CAPTURE_ENABLED", "1")
     # Re-apply dump-friendly ui via config tree already written; ensure history exists.
     runtime = tmp_path / "runtime"
     runtime.mkdir(parents=True, exist_ok=True)
@@ -283,3 +360,80 @@ def test_capture_point_record_replay_prepare_equal(tmp_path, monkeypatch):
         assert left["expected_p_act"] == pytest.approx(float(right["expected_p_act"]))
         assert left["k_act"] == pytest.approx(float(right["k_act"]))
     assert recorded["outputs"]["plan_hash"] == plan_live
+
+
+def test_finish_stores_push_reads_and_active_reserves(tmp_path, monkeypatch):
+    from runtime_store import ehal_push_inbox as inbox
+
+    _cfg(tmp_path, monkeypatch)
+    inbox.reset_memory_for_tests()
+    now = datetime.now().replace(microsecond=0)
+    token = cycle_recorder.begin_cycle(
+        optimization_matrix=_sample_matrix(),
+        planning_window=_sample_window(),
+        soc_percent=50.0,
+        timestamp=now,
+    )
+    inbox.read_push_value("evcs.e_auto.sens_evcs_connected")
+    reserves = [{"powerstation_id": "virtual_gs", "state": "charging", "refill_kwh": 0.38}]
+    cycle_recorder.record_active_reserves(token, reserves)
+    cycle_recorder.finish_cycle(token, mode=1, target_power_kw=4.979, battery_plan_kw=4.979)
+    entry = cycle_recorder.read_segment_cycles(
+        cycle_recorder.segment_path_for_day(now.date())
+    )[0]
+    push_reads = entry["start_state"]["push_reads"]
+    assert "evcs.e_auto.sens_evcs_connected" in push_reads["value"]
+    assert entry["start_state"]["active_reserves"] == reserves
+
+
+def test_record_active_reserves_ignores_missing_token():
+    cycle_recorder.record_active_reserves(None, [{"powerstation_id": "x"}])
+
+
+def test_finish_stores_export_and_ess_limits(tmp_path, monkeypatch):
+    _cfg(tmp_path, monkeypatch)
+    now = datetime.now().replace(microsecond=0)
+    token = cycle_recorder.begin_cycle(
+        optimization_matrix=_sample_matrix(),
+        planning_window=_sample_window(),
+        soc_percent=50.0,
+        timestamp=now,
+    )
+    cycle_recorder.record_ess_limits(
+        token,
+        {
+            "id": "home",
+            "min_soc": 5.0,
+            "max_soc": 100.0,
+            "max_charge_power_kw": 3.0,
+            "max_discharge_power_kw": 5.0,
+            "max_power_kw": 5.0,
+            "ehal_bindings": {"ignored": ""},
+        },
+    )
+    cycle_recorder.record_export_limits(
+        token,
+        {"hk_max_export_kw": 11.0, "inbound_export_limit_kw": 8.5, "effective_export_cap_kw": 8.5},
+    )
+    cycle_recorder.finish_cycle(token, mode=2, target_power_kw=0.0, battery_plan_kw=0.0)
+    entry = cycle_recorder.read_segment_cycles(
+        cycle_recorder.segment_path_for_day(now.date())
+    )[0]
+    assert entry["start_state"]["ess_limits"] == {
+        "home": {
+            "min_soc": 5.0,
+            "max_soc": 100.0,
+            "max_charge_power_kw": 3.0,
+            "max_discharge_power_kw": 5.0,
+            "max_power_kw": 5.0,
+        }
+    }
+    assert entry["start_state"]["export_limits"] == {
+        "hk_max_export_kw": 11.0,
+        "inbound_export_limit_kw": 8.5,
+    }
+
+
+def test_record_limits_ignore_missing_token():
+    cycle_recorder.record_ess_limits(None, {"id": "home"})
+    cycle_recorder.record_export_limits(None, {})

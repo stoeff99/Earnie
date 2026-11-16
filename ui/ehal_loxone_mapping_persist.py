@@ -15,6 +15,7 @@ from ui.ehal_loxone_mapping_base import (
     INVERTER_ENTITY_KIND,
     PLANT_ENTITY_ID,
     PV_ENTITY_KIND,
+    WALLBOX_ENTITY_KIND,
     _nonempty,
 )
 from ui.house_config_io import (
@@ -58,8 +59,20 @@ def apply_entity_bindings(
         return house
     profile = dict(profiles.get(profile_id) or {})
     consumers = [dict(c) for c in (profile.get("consumers") or []) if isinstance(c, dict)]
+    from house_config.heating_rod_bindings import (
+        ROD_BINDINGS_KEY,
+        normalize_rod_bindings,
+        rod_kennung,
+    )
+
     for consumer in consumers:
-        if _nonempty(consumer.get("id")) == entity_id:
+        consumer_id = _nonempty(consumer.get("id"))
+        if consumer.get("type") == "thermal_annual" and rod_kennung(consumer_id) == entity_id:
+            consumer[ROD_BINDINGS_KEY] = normalize_rod_bindings(
+                cleaned, consumer_id=consumer_id, label=f"Verbraucher '{consumer_id}'"
+            )
+            break
+        if consumer_id == entity_id:
             from ehal.flex_fields import canonicalize_consumer_bindings
 
             ctype = str(consumer.get("type") or "").strip()
@@ -196,6 +209,39 @@ def apply_pv_system_bindings(
     return out
 
 
+def apply_wallbox_bindings(
+    components_doc: dict,
+    *,
+    wallbox_id: str,
+    bindings: dict[str, str],
+) -> dict:
+    """Write charger bindings onto ``wallboxes[].ehal_bindings`` (multi-EV M3).
+
+    Only charger fields; the wallbox must exist (created on the Wallboxen tab).
+    """
+    from copy import deepcopy
+
+    from ehal.qualified_ids import qualified_charger_id
+    from house_config.wallboxes import WALLBOXES_KEY, is_charger_binding_key
+
+    out = deepcopy(components_doc) if isinstance(components_doc, dict) else {}
+    wid = _nonempty(wallbox_id)
+    foreign = sorted(k for k in bindings if not is_charger_binding_key(str(k)))
+    if foreign:
+        raise ValueError(f"Wallbox '{wid}': keine Lade-Felder: {foreign}.")
+    cleaned = {
+        qualified_charger_id(wid, str(k)): _nonempty(v)
+        for k, v in bindings.items()
+        if str(k or "").strip()
+    }
+    wallboxes = out.get(WALLBOXES_KEY)
+    for index, wallbox in enumerate(wallboxes if isinstance(wallboxes, list) else []):
+        if isinstance(wallbox, dict) and _nonempty(wallbox.get("id")) == wid:
+            wallboxes[index] = {**wallbox, "ehal_bindings": cleaned}
+            return out
+    raise ValueError(f"Unbekannte Wallbox '{wid}' (Tab „Wallboxen“ im Hauskonfigurator).")
+
+
 def _migrate_on_open() -> tuple[dict, dict]:
     """Ensure entity bindings exist; persist house + stripped config once when changed."""
     from runtime_store.shadow.mode import is_shadow_config_readonly
@@ -230,7 +276,7 @@ def persist_loxone_entity_mapping(
 
     Returns a short success detail (where data was written).
     """
-    from runtime_store.shadow.ehal_overlay import upsert_entity_bindings
+    from runtime_store.shadow.hooks import upsert_entity_bindings
     from runtime_store.shadow.mode import is_shadow_config_readonly
     from ui.house_config_io import _load_components_document, _save_components_document
 
@@ -239,6 +285,8 @@ def persist_loxone_entity_mapping(
         migrated_house, profile_id, entity_id
     )
     if is_shadow_config_readonly():
+        if kind == WALLBOX_ENTITY_KIND:
+            raise ValueError("Shadow-Modus: Wallbox-Bindings werden nicht überlagert.")
         path = upsert_entity_bindings(
             profile_id=profile_id,
             entity_id=entity_id,
@@ -267,6 +315,16 @@ def persist_loxone_entity_mapping(
         save_main_config(_m()._ensure_ehal_loxone_meta(migrated_config))
         reset_adapter_cache()
         return "`components.json` (`inverters[].ehal_bindings`)"
+    if kind == WALLBOX_ENTITY_KIND:
+        components = apply_wallbox_bindings(
+            _load_components_document(),
+            wallbox_id=entity_id,
+            bindings=ehal_map,
+        )
+        _save_components_document(components)
+        save_main_config(_m()._ensure_ehal_loxone_meta(migrated_config))
+        reset_adapter_cache()
+        return "`components.json` (`wallboxes[].ehal_bindings`)"
     if kind == PV_ENTITY_KIND:
         components = apply_pv_system_bindings(
             _load_components_document(),

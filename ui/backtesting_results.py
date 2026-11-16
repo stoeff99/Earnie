@@ -1,6 +1,7 @@
 """Backtesting results tables and charts UI."""
 from __future__ import annotations
 
+from ui.number_format import localized_figure
 from ui.backtesting import (
     _HORIZON_MODE_LABELS,
     scenario_labels_map,
@@ -28,9 +29,12 @@ from simulation.horizon_mode import DEFAULT_HORIZON_MODE, FIXED_24H, SUNRISE_WIN
 from ui.backtesting_charts import scenario_monthly_cost_chart
 from ui.backtesting_cons_data import render_cons_data_section
 from ui.backtesting_deviation_list import render_deviation_list
+from ui.backtesting_ladder import render_ladder_headline
 from ui.backtesting_results_helpers import (
     build_annual_cost_rows,
+    build_capacity_rows,
     build_scenario_consumption_rows,
+    capacity_skipped_text,
     format_test_run_caption,
     nav_bounds_from_period,
     ordered_monthly_chart_labels,
@@ -88,6 +92,14 @@ def _render_imported_pv_results_notice(meta: dict) -> None:
             f"Szenarien wollten importiertes PV, hatten aber keine ausreichende CSV "
             f"(≥12 Monate; Fallback: synthetisches PV aus Wetterdaten): {names}."
         )
+
+def _render_heating_results_notice(meta: dict) -> None:
+    """Heating variants with measured data and possible heating-rod double counts."""
+    labels = meta.get("labels") or scenario_labels_map()
+    for sid, hints in (meta.get("heating_hints_by_scenario") or {}).items():
+        for hint in hints:
+            st.info(f"{labels.get(sid, sid)}: {hint}")
+
 
 def render_backtesting_log_caption(meta: dict) -> None:
     st.subheader("Szenario-Explorer-Log")
@@ -191,6 +203,29 @@ def render_annual_cost_table(meta: dict) -> None:
         f"Details: {_annual_cost_details_markdown()}."
     )
 
+def render_capacity_table(meta: dict) -> None:
+    """Capacity charge per result; nothing when the grid area has none in the period."""
+    rows = build_capacity_rows(meta)
+    skipped = capacity_skipped_text(meta)
+    if rows:
+        st.subheader("Leistungspreis")
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.caption(
+            "Je Kalendermonat zählt die höchste gebuchte Viertelstunde, mindestens die "
+            "Mindestleistung des Netzbereichs. Der Betrag ist brutto und in den Jahres- und "
+            "Monatskosten enthalten, ein angebrochener Monat zählt voll. Die Monatswerte stehen "
+            "in den Fake-Jahresrechnungen. Lastprofile aus Stundenwerten glätten kurze Spitzen, "
+            "die echte Spitze kann höher liegen. Mit Bezugsgrenze zählen die Tage mit mindestens "
+            "einer Viertelstunde über der Grenze; die Hauptursachen nennen je solche Viertelstunde "
+            "eine Ursache aus dem Plan ihres Fensters."
+        )
+    if skipped:
+        st.info(
+            f"Leistungspreis nicht berücksichtigt: {skipped}. Der Status ist in "
+            "`include_status` am Hausprofil nicht freigegeben."
+        )
+
+
 def render_scenario_consumption_table(meta: dict, hourly_df: pd.DataFrame | None = None) -> None:
     period = meta.get("period", {})
     st.subheader(scenario_consumption_subheader(period))
@@ -249,7 +284,7 @@ def render_backtesting_monthly_chart(meta: dict) -> None:
         for month in df.index
     }
     st.plotly_chart(
-        scenario_monthly_cost_chart(chart_monthly, scenario_order=chart_columns),
+        localized_figure(scenario_monthly_cost_chart(chart_monthly, scenario_order=chart_columns)),
         width="stretch",
     )
     fee_map = meta.get("monthly_fee_by_scenario") or {}
@@ -274,7 +309,10 @@ def _deviation_labels_map(meta: dict) -> dict[str, str]:
 def _render_backtesting_results(meta: dict, hourly_df: pd.DataFrame) -> None:
     render_backtesting_log_caption(meta)
     _render_imported_pv_results_notice(meta)
+    _render_heating_results_notice(meta)
+    render_ladder_headline(meta)
     render_annual_cost_table(meta)
+    render_capacity_table(meta)
     render_backtesting_monthly_chart(meta)
     render_scenario_consumption_table(meta, hourly_df)
     render_deviation_list(

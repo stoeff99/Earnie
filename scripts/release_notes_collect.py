@@ -77,10 +77,10 @@ def _git(*args: str, repo: Path = _REPO_ROOT) -> str:
 
 
 def channel_of(version: str) -> str:
-    """``official`` | ``pre-release``; ``-dev`` is rejected (no notes for dev)."""
+    """``official`` | ``pre-release``; ``-dev`` / ``-stoeff`` are rejected (no notes for dev)."""
     if not _TARGET_RE.match(version):
         raise ValueError(f"unrecognized version string: {version!r}")
-    if "-dev." in version:
+    if "-dev." in version or "-stoeff." in version:
         raise ValueError(
             f"{version}: no release notes for -dev versions (see release-notes.mdc)"
         )

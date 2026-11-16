@@ -27,6 +27,7 @@ from house_config.entity_id_lock import (
     ID_PROVISIONAL_LABEL_KEY,
     is_id_locked,
 )
+from house_config.house_gains import INTERNAL_GAIN_FACTOR_KEY, default_consumer_gain_factor
 from house_config.id_slug import slug_id
 from house_config.thermal_labels import CONSUMER_TYPE_LABELS
 from ui.form_layout import (
@@ -210,7 +211,13 @@ def _render_consumer_identity_fields(
     consumers: list[dict],
     session_scope: str,
 ) -> tuple[str, str, float, bool]:
-    type_options = _consumer_type_options(consumers, index)
+    from ui.house_config_profile_house_thermal import house_heating_state
+
+    type_options = _consumer_type_options(
+        consumers,
+        index,
+        heating_enabled=bool(house_heating_state(session_scope)["heating_enabled"]),
+    )
     current_type = str(consumer.get("type", "generic"))
     if (
         current_type == "thermal_annual"
@@ -237,6 +244,12 @@ def _render_consumer_identity_fields(
     force_id = _render_consumer_id_from_label(
         consumer, index, session_scope=session_scope, label=c_label
     )
+    if c_type == "thermal_annual":
+        # Generation field: rendered in the „Heizsystem“ section (same widget key).
+        return c_type, c_label, float(consumer.get("nominal_power_kw", 0.0)), force_id
+    if c_type == "ev":
+        # Data model 6: the EV's power follows from its charge currents (EV fields).
+        return c_type, c_label, 0.0, force_id
     nominal = labeled_number_input(
         "Nennleistung (kW)",
         min_value=0.0,
@@ -271,6 +284,34 @@ def _dispatch_consumer_type_fields(
     )
 
 
+def _render_internal_gain_factor(
+    consumer: dict, c_type: str, index: int, *, session_scope: str
+) -> float:
+    """Share of the consumer's electric energy that heats the house (SUSI P2)."""
+    stored = consumer.get(INTERNAL_GAIN_FACTOR_KEY)
+    same_type = str(consumer.get("type") or "generic") == c_type
+    value = (
+        float(stored)
+        if same_type and stored not in (None, "")
+        else default_consumer_gain_factor(c_type, consumer.get("id"))
+    )
+    return float(
+        labeled_number_input(
+            "Interner Gewinn (Wärme)",
+            min_value=0.0,
+            max_value=1.0,
+            value=value,
+            step=0.1,
+            # Type in the key: a type switch starts from the new type's default.
+            key=_scoped_key(session_scope, f"hc_gain_{c_type}_{index}"),
+            help=(
+                "Anteil (0–1) der elektrischen Energie, der als Wärme im beheizten Haus landet "
+                "und den Heizbedarf senkt. Haushaltsgeräte 0,8; E-Auto, Pool und Geräte außen 0."
+            ),
+        )
+    )
+
+
 def _render_consumer_form_body(
     consumer: dict,
     index: int,
@@ -298,19 +339,21 @@ def _render_consumer_form_body(
     item: dict = {
         "label": c_label,
         "type": c_type,
-        "nominal_power_kw": nominal,
-        "absent_mode_enabled": labeled_checkbox(
+    }
+    if c_type != "ev":
+        item["nominal_power_kw"] = nominal
+    # „Haus Wärme“: the absent-mode setback is a house setting („Gebäude / Wärmebedarf“).
+    if c_type != "thermal_annual":
+        item["absent_mode_enabled"] = labeled_checkbox(
             "Inaktiv wenn abwesend",
             value=bool(consumer.get("absent_mode_enabled", False)),
             key=_scoped_key(session_scope, f"hc_absent_opt_in_{index}"),
             help=(
-                "Bei wirksamem Abwesenheitsmodus (Live): "
-                "andere Verbraucher ohne Live-Optimierung; "
-                "Haus Wärme bleibt aktiv mit Solltemperatur − Absenkung "
-                "und Warmwasser 0."
+                "Bei wirksamem Abwesenheitsmodus (Live): Verbraucher ohne "
+                "Live-Optimierung. Die Heizungs-Absenkung steht im Abschnitt "
+                "„Gebäude / Wärmebedarf“."
             ),
-        ),
-    }
+        )
     provisional = str(consumer.get(ID_PROVISIONAL_LABEL_KEY) or "").strip()
     has_id = bool(str(consumer.get("id") or "").strip())
     if provisional and (not has_id or not is_id_locked(consumer)):
@@ -338,7 +381,22 @@ def _render_consumer_form_body(
             consumer,
             index,
             session_scope=session_scope,
-            nominal_power_kw=float(nominal),
+            nominal_power_kw=_form_power_kw(item),
         )
     )
+    # Last field of every consumer form (all types except „Haus Wärme“).
+    if c_type != "thermal_annual":
+        item[INTERNAL_GAIN_FACTOR_KEY] = _render_internal_gain_factor(
+            consumer, c_type, index, session_scope=session_scope
+        )
     return item
+
+
+def _form_power_kw(item: dict) -> float:
+    """kW of the form item; an EV's is its pair maximum, 0 without a usable wallbox."""
+    if item.get("type") == "ev":
+        from ui.house_config_profile_ev import ev_form_pair
+
+        pair = ev_form_pair(item)
+        return float(pair["max_power_kw"]) if pair is not None else 0.0
+    return float(item["nominal_power_kw"])

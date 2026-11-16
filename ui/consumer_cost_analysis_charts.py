@@ -7,9 +7,12 @@ from typing import Any
 
 import plotly.graph_objects as go
 import streamlit as st
+from edibert.ui.number_columns import localized_number_column
 
 import config
 from ui.chart_colors import (
+    CHART_PV_FILL_COLOR,
+    CHART_PV_LINE_COLOR,
     COLOR_BASELOAD,
     COLOR_GRID_IMPORT,
     COLOR_PV,
@@ -18,8 +21,10 @@ from ui.chart_colors import (
     MUTED_BATTERY_EXPORT,
     MUTED_BATTERY_LOAD,
     MUTED_BATTERY_STANDBY,
+    MUTED_EXPORT_PV,
     flex_bar_chart_color,
 )
+from ui.chart_flow_segments import _BRIGHT_BAR_OPACITY, _MUTED_BAR_OPACITY
 from ui.consumer_cost_analysis_data import (
     BASELOAD_ID,
     CostAnalysisSeries,
@@ -36,6 +41,7 @@ from ui.consumer_cost_battery_metrics import (
 )
 from ui.consumption_display.period import TimeWindow, format_window_label
 from house_config.currency_display import active_units
+from ui.number_format import format_decimal, format_euro, localized_figure
 
 
 def _label(labels: Mapping[str, str], consumer_id: str) -> str:
@@ -76,7 +82,10 @@ def window_usage_vs_price_pv_chart(
     labels: Mapping[str, str],
     window: TimeWindow,
 ) -> go.Figure:
-    """Stacked consumer kWh bars with PV (kW) and price overlays."""
+    """Stacked consumer kWh bars, export below zero, PV (kW) and price overlays.
+
+    Colors follow Monitor Chart 1 (history zone).
+    """
     fig = go.Figure()
     if not slots:
         fig.update_layout(title="Keine Daten")
@@ -103,6 +112,27 @@ def window_usage_vs_price_pv_chart(
             x=x_values,
             y=energy_by_id[cid],
             marker_color=_consumer_color(cid, by_id),
+            opacity=_BRIGHT_BAR_OPACITY,
+            yaxis="y",
+        )
+
+    # Export below zero, styled like the muted Chart-1 export segments.
+    for name, values, color in (
+        ("Einspeisung (PV)", [slot.export_from_pv_kwh for slot in slots], MUTED_EXPORT_PV),
+        (
+            "Einspeisung (Batterie)",
+            [slot.export_from_battery_kwh for slot in slots],
+            MUTED_BATTERY_EXPORT,
+        ),
+    ):
+        if not any(v > 1e-9 for v in values):
+            continue
+        fig.add_bar(
+            name=name,
+            x=x_values,
+            y=[-v for v in values],
+            marker_color=color,
+            opacity=_MUTED_BAR_OPACITY,
             yaxis="y",
         )
 
@@ -111,7 +141,9 @@ def window_usage_vs_price_pv_chart(
         x=x_values,
         y=[slot.pv_kw for slot in slots],
         mode="lines",
-        line=dict(color=COLOR_PV, width=2),
+        line=dict(color=CHART_PV_LINE_COLOR, width=2),
+        fill="tozeroy",
+        fillcolor=CHART_PV_FILL_COLOR,
         yaxis="y",
     )
     fig.add_scatter(
@@ -119,12 +151,12 @@ def window_usage_vs_price_pv_chart(
         x=x_values,
         y=[slot.price_cent for slot in slots],
         mode="lines",
-        line=dict(color=COLOR_GRID_IMPORT, width=2, dash="dot"),
+        line=dict(color="red", width=1.5, shape="hv"),
         yaxis="y2",
     )
     fig.update_layout(
         title=f"Verbrauch vs. Preis & PV — {format_window_label(window)}",
-        barmode="stack",
+        barmode="relative",
         height=380,
         margin=dict(l=40, r=50, t=50, b=40),
         yaxis=dict(title="kWh / kW", side="left"),
@@ -273,39 +305,39 @@ def battery_flow_balance_caption(
     discharge = float(totals.battery_discharge_kwh)
     delta = charge - discharge
     parts = [
-        f"Laden {charge:.2f} kWh · Entladen {discharge:.2f} kWh · Δ {delta:+.2f} kWh."
+        f"Laden {format_decimal(charge)} kWh · Entladen {format_decimal(discharge)} kWh · Δ {format_decimal(delta, signed=True)} kWh."
     ]
     if metrics.eta_measured is not None:
         parts.append(
-            f"Gemessener Wirkungsgrad ≈ {metrics.eta_measured:.3f} "
-            f"(Empfehlung für HK); nominal {metrics.eta_nominal:.3f}."
+            f"Gemessener Wirkungsgrad ≈ {format_decimal(metrics.eta_measured, 3)} "
+            f"(Empfehlung für HK); nominal {format_decimal(metrics.eta_nominal, 3)}."
         )
     else:
         parts.append(
             f"Wirkungsgrad nicht ableitbar (Laden/Entladen unvollständig); "
-            f"nominal {metrics.eta_nominal:.3f}."
+            f"nominal {format_decimal(metrics.eta_nominal, 3)}."
         )
     parts.append(
-        f"Standby HK {metrics.standby_a_kwh:.2f} kWh "
-        f"({metrics.standby_nominal_kw:.3f} kW × Fenster) · "
-        f"Rest nach Roundtrip {metrics.standby_b_kwh:.2f} kWh."
+        f"Standby HK {format_decimal(metrics.standby_a_kwh)} kWh "
+        f"({format_decimal(metrics.standby_nominal_kw, 3)} kW × Fenster) · "
+        f"Rest nach Roundtrip {format_decimal(metrics.standby_b_kwh)} kWh."
     )
     if metrics.recommended_standby_kw is not None:
         parts.append(
-            f"Empfehlung Standby-Leistung ≈ {metrics.recommended_standby_kw:.3f} kW "
-            f"(nominal {metrics.standby_nominal_kw:.3f} kW)."
+            f"Empfehlung Standby-Leistung ≈ {format_decimal(metrics.recommended_standby_kw, 3)} kW "
+            f"(nominal {format_decimal(metrics.standby_nominal_kw, 3)} kW)."
         )
     if metrics.standby_hint:
         if metrics.recommended_standby_kw is not None:
             parts.append(
                 "Hinweis: Standby HK und Rest weichen um mehr als 20 % ab — "
-                f"im Hauskonfigurator auf ≈ {metrics.recommended_standby_kw:.3f} kW prüfen."
+                f"im Hauskonfigurator auf ≈ {format_decimal(metrics.recommended_standby_kw, 3)} kW prüfen."
             )
         else:
             parts.append(
                 "Hinweis: Standby HK und Rest weichen um mehr als 20 % ab — "
                 "Standby-Leistung im Hauskonfigurator prüfen "
-                f"(nominal {metrics.standby_nominal_kw:.3f} kW)."
+                f"(nominal {format_decimal(metrics.standby_nominal_kw, 3)} kW)."
             )
     return " ".join(parts)
 
@@ -338,14 +370,14 @@ def render_period_kpis(
     c1, c2 = st.columns(2)
     c1.metric(
         format_window_label(window),
-        active_units().amount(selected.cost_euro),
-        help=f"{selected.energy_kwh:.1f} kWh · {selected.slot_count} Slots",
+        format_euro(selected.cost_euro),
+        help=f"{format_decimal(selected.energy_kwh, 1)} kWh · {selected.slot_count} Slots",
     )
     c2.metric(
         "Letzte 365 Tage",
-        active_units().amount(trailing_year.cost_euro),
+        format_euro(trailing_year.cost_euro),
         help=(
-            f"{trailing_year.energy_kwh:.1f} kWh · {trailing_year.slot_count} Slots "
+            f"{format_decimal(trailing_year.energy_kwh, 1)} kWh · {trailing_year.slot_count} Slots "
             "(nur vorhandene Log-Daten)"
         ),
     )
@@ -363,7 +395,15 @@ def render_period_kpis(
             }
         )
     if rows:
-        st.dataframe(rows, hide_index=True, width="stretch")
+        st.dataframe(
+            rows,
+            hide_index=True,
+            width="stretch",
+            column_config={
+                column: localized_number_column(decimals=2)
+                for column in ("kWh", "PV kWh", "Batterie kWh", "Netz kWh", "Kosten €")
+            },
+        )
 
 
 def render_window_analysis(
@@ -380,20 +420,20 @@ def render_window_analysis(
 
     labels = series.consumer_labels
     st.plotly_chart(
-        window_usage_vs_price_pv_chart(
+        localized_figure(window_usage_vs_price_pv_chart(
             window_slots, labels=labels, window=window
-        ),
+        )),
         width="stretch",
     )
     left, right = st.columns(2)
     with left:
         st.plotly_chart(
-            window_source_mix_chart(window_slots, labels=labels, window=window),
+            localized_figure(window_source_mix_chart(window_slots, labels=labels, window=window)),
             width="stretch",
         )
     with right:
         st.plotly_chart(
-            window_cost_chart(window_slots, labels=labels, window=window),
+            localized_figure(window_cost_chart(window_slots, labels=labels, window=window)),
             width="stretch",
         )
 
@@ -411,11 +451,11 @@ def render_window_analysis(
         standby_power_kw=float(battery_params.get("standby_power_kw") or 0.0),
     )
     st.plotly_chart(
-        battery_flow_chart(
+        localized_figure(battery_flow_chart(
             window_totals,
             title=f"Batterie-Energieflüsse — {format_window_label(window)}",
             standby_a_kwh=metrics.standby_a_kwh,
-        ),
+        )),
         width="stretch",
     )
     st.caption(battery_flow_balance_caption(window_totals, metrics))

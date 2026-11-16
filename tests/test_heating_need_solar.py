@@ -1,6 +1,7 @@
 """Tests für Solarthermie und Geo im Heizbedarfsmodell."""
 from __future__ import annotations
 
+from tests.fixtures.heating_catalog import save_inline_house
 import json
 from pathlib import Path
 
@@ -24,7 +25,7 @@ def _base_thermal() -> dict:
     return {
         "living_area_m2": 120.0,
         "building_class": 3,
-        "heat_pump_type": "luft",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
         "persons": 2,
         "latitude": 48.2,
         "longitude": 11.0,
@@ -103,7 +104,8 @@ def test_consumer_annual_kwh_reflects_solar_thermal(monkeypatch):
         "longitude": 11.0,
         "living_area_m2": 120.0,
         "building_class": 3,
-        "heat_pump_type": "luft",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
+        "nominal_power_kw": 3.0,
         "persons": 2,
         "heat_storage": _heat_storage(),
     }
@@ -136,7 +138,7 @@ def test_profiles_store_geo_and_solar_roundtrip(tmp_path: Path, monkeypatch):
                         "nominal_power_kw": 3.0,
                         "living_area_m2": 100.0,
                         "building_class": 3,
-                        "heat_pump_type": "luft",
+                        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
                         "persons": 2,
                         "solar_thermal_area_m2": 4.0,
                         "solar_thermal_tilt_deg": 20.0,
@@ -146,7 +148,7 @@ def test_profiles_store_geo_and_solar_roundtrip(tmp_path: Path, monkeypatch):
             }
         ]
     }
-    save_house_profiles_document(str(path), doc)
+    save_inline_house(str(path), doc)
     raw = json.loads(path.read_text(encoding="utf-8"))
     profile = raw["profiles"][0]
     assert profile["latitude"] == 47.4
@@ -173,11 +175,13 @@ def test_profiles_store_requires_geo_for_thermal(tmp_path: Path):
                         "label": "Ohne Geo",
                         "annual_kwh": 4000.0,
                         "netznutzung": {"area_id": "user_no_grid_fee"},
+                        "heating_enabled": True,
+                        "thermal": {"living_area_m2": 100.0},
                         "consumers": [
                             {
                                 "id": "wp",
                                 "type": "thermal_annual",
-                                "living_area_m2": 100.0,
+                                "heating_system_id": "heating_missing_geo",
                             }
                         ],
                     }

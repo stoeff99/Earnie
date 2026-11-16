@@ -108,22 +108,22 @@ def test_build_annual_cost_rows_reference_kwh_and_delta():
     assert len(rows) == 3
     ref_row = rows[0]
     assert ref_row["Szenario"] == "Historisch (ohne Optimierung)"
-    assert ref_row["Jahres Verbrauch [kWh]"] == "5000.0"
-    assert ref_row["Jahres Kosten [€]"] == "1200.00 €"
+    assert ref_row["Jahres Verbrauch [kWh]"] == "5000,0"
+    assert ref_row["Jahres Kosten [€]"] == "1200,00 €"
     assert ref_row["Δ vs Referenz [€]"] == "—"
     assert ref_row["Speicher-Standby [kWh]"] == "—"
     live_ref_row = rows[1]
-    assert live_ref_row["Jahres Verbrauch [kWh]"] == "5050.0"
+    assert live_ref_row["Jahres Verbrauch [kWh]"] == "5050,0"
     assert live_ref_row["Szenario"] == live_ref_label
     assert live_ref_row["Δ vs Referenz [€]"] == "—"
     live_row = rows[2]
     assert live_row["Szenario"] == "Live"
-    assert live_row["Jahres Verbrauch [kWh]"] == "4800.0"
-    assert live_row["Speicher-Standby [kWh]"] == "227.8"
-    assert live_row["Gesamtverbrauch [kWh]"] == "5027.8"
-    assert ref_row["Gesamtverbrauch [kWh]"] == "5000.0"
-    assert live_row["Jahres Kosten [€]"] == "1000.00 €"
-    assert live_row["Δ vs Referenz [€]"] == "-100.00 €"
+    assert live_row["Jahres Verbrauch [kWh]"] == "4800,0"
+    assert live_row["Speicher-Standby [kWh]"] == "227,8"
+    assert live_row["Gesamtverbrauch [kWh]"] == "5027,8"
+    assert ref_row["Gesamtverbrauch [kWh]"] == "5000,0"
+    assert live_row["Jahres Kosten [€]"] == "1000,00 €"
+    assert live_row["Δ vs Referenz [€]"] == "-100,00 €"
     assert live_ref_row["Hinweis"] == "—"
     assert live_row["Hinweis"] == "—"
     assert ref_row["Hinweis"] == "—"
@@ -177,11 +177,11 @@ def test_build_annual_cost_rows_delta_always_vs_live_reference():
     rows = build_annual_cost_rows(meta)
     by_label = {row["Szenario"]: row for row in rows}
     assert by_label[fixed_ref_label]["Δ vs Referenz [€]"] == "—"
-    assert by_label[fixed_ref_label]["Jahres Verbrauch [kWh]"] == "5100.0"
+    assert by_label[fixed_ref_label]["Jahres Verbrauch [kWh]"] == "5100,0"
     # Delta vs Live Referenz (1100), not vs Fixed Full's own ref (1050)
-    assert by_label["Fixed Full"]["Δ vs Referenz [€]"] == "-120.00 €"
-    assert by_label["Fixed Full"]["Jahres Verbrauch [kWh]"] == "4950.0"
-    assert by_label["Live"]["Δ vs Referenz [€]"] == "-100.00 €"
+    assert by_label["Fixed Full"]["Δ vs Referenz [€]"] == "-120,00 €"
+    assert by_label["Fixed Full"]["Jahres Verbrauch [kWh]"] == "4950,0"
+    assert by_label["Live"]["Δ vs Referenz [€]"] == "-100,00 €"
 
 
 def test_ordered_monthly_chart_labels_matches_gesamtkosten():
@@ -378,19 +378,19 @@ def test_build_scenario_consumption_rows_optimized_only_with_constant_refs():
     rows = build_scenario_consumption_rows(meta)
     assert [r["Szenario"] for r in rows] == ["Live", "Fixed Full"]
     live_row = rows[0]
-    assert live_row["Ohne PV und Speicher [kWh]"] == "490.0"
-    assert live_row["Reference (Live) - ohne Optimierung [kWh]"] == "500.0"
-    assert live_row["Soll Fenster [kWh]"] == "500.0"
-    assert live_row["Geplant MILP [kWh]"] == "525.0"
-    assert live_row["Optimiert (kWh)"] == "520.5"
-    assert live_row["Δ kWh (Ref. ohne Optimierung)"] == "+20.5"
+    assert live_row["Ohne PV und Speicher [kWh]"] == "490,0"
+    assert live_row["Reference (Live) - ohne Optimierung [kWh]"] == "500,0"
+    assert live_row["Soll Fenster [kWh]"] == "500,0"
+    assert live_row["Geplant MILP [kWh]"] == "525,0"
+    assert live_row["Optimiert (kWh)"] == "520,5"
+    assert live_row["Δ kWh (Ref. ohne Optimierung)"] == "+20,5"
     assert live_row["Plausibilität"] == "29/31 OK"
     assert live_row["Hinweis"] == "—"
     fixed_row = rows[1]
-    assert fixed_row["Ohne PV und Speicher [kWh]"] == "490.0"
-    assert fixed_row["Reference (Live) - ohne Optimierung [kWh]"] == "500.0"
-    assert fixed_row["Optimiert (kWh)"] == "510.0"
-    assert fixed_row["Δ kWh (Ref. ohne Optimierung)"] == "+10.0"
+    assert fixed_row["Ohne PV und Speicher [kWh]"] == "490,0"
+    assert fixed_row["Reference (Live) - ohne Optimierung [kWh]"] == "500,0"
+    assert fixed_row["Optimiert (kWh)"] == "510,0"
+    assert fixed_row["Δ kWh (Ref. ohne Optimierung)"] == "+10,0"
     assert fixed_row["Hinweis"] == "—"
 
 
@@ -474,8 +474,8 @@ def test_historisch_exempt_from_live_reference_kwh_hint():
     }
     rows = build_annual_cost_rows(meta)
     by_label = {row["Szenario"]: row for row in rows}
-    assert by_label["Historisch"]["Jahres Verbrauch [kWh]"] == "1186.4"
-    assert by_label[live_ref_label]["Jahres Verbrauch [kWh]"] == "1111.7"
+    assert by_label["Historisch"]["Jahres Verbrauch [kWh]"] == "1186,4"
+    assert by_label[live_ref_label]["Jahres Verbrauch [kWh]"] == "1111,7"
     assert by_label["Historisch"]["Hinweis"] == "—"
     assert by_label[live_ref_label]["Hinweis"] == "—"
     assert by_label["Live"]["Hinweis"] == "—"
@@ -529,7 +529,7 @@ def test_build_scenario_consumption_rows_timing_shift_note(monkeypatch):
         timestamps=["2024-01-01 00:00:00"],
     )
     live_row = next(row for row in rows if row["Szenario"] == "Live")
-    assert live_row["Δ kWh (Ref. ohne Optimierung)"] == "+0.0"
+    assert live_row["Δ kWh (Ref. ohne Optimierung)"] == "+0,0"
     assert "Δ Flex (kWh)" not in live_row
     assert live_row["Hinweis"] == "Zeitliche Lastverschiebung (Energie ≈ Spec)"
 
@@ -588,7 +588,81 @@ def test_annual_cost_rows_flag_duplicate_and_reference_slot_differences():
     assert rows["Live"]["Hinweis"] == (
         "Referenz rechnet über andere Zeitslots (5 h nur hier, 1 h nur in der Referenz)"
     )
-    assert rows["Live"]["Speicher-Standby [kWh]"] == "5.0"
+    assert rows["Live"]["Speicher-Standby [kWh]"] == "5,0"
+
+
+def _heating_variant_meta() -> dict:
+    """Live (heat pump) beside a gas variant, a gas + rod variant and a same-system run."""
+    live_ref_id = "ref:live"
+    ids = ["live", "gas", "gas_rod", "same_hp"]
+    gas_ref_id = "ref:gas"
+    return {
+        "reference_id": HISTORICAL_REFERENCE_ID,
+        "live_scenario_id": "live",
+        "scenario_ids": [HISTORICAL_REFERENCE_ID, live_ref_id, gas_ref_id, *ids],
+        "labels": {sid: sid for sid in [HISTORICAL_REFERENCE_ID, live_ref_id, gas_ref_id, *ids]},
+        "summary": {
+            "total_eur": {
+                sid: 1000.0 for sid in [HISTORICAL_REFERENCE_ID, live_ref_id, gas_ref_id, *ids]
+            }
+        },
+        "reference_by_scenario": {
+            "live": live_ref_id,
+            "gas": gas_ref_id,
+            "gas_rod": gas_ref_id,
+            "same_hp": live_ref_id,
+        },
+        "booked_consumption": {
+            HISTORICAL_REFERENCE_ID: {"consumption_kwh": 6000.0, "standby_kwh": 0.0},
+            live_ref_id: {"consumption_kwh": 6000.0, "standby_kwh": 0.0},
+            gas_ref_id: {"consumption_kwh": 3500.0, "standby_kwh": 0.0},
+            "live": {"consumption_kwh": 6050.0, "standby_kwh": 0.0},
+            "gas": {"consumption_kwh": 3520.0, "standby_kwh": 0.0},
+            "gas_rod": {"consumption_kwh": 4950.0, "standby_kwh": 0.0},
+            "same_hp": {"consumption_kwh": 6900.0, "standby_kwh": 0.0},
+        },
+        "heat_fuel": {
+            HISTORICAL_REFERENCE_ID: _heating_block("hp"),
+            live_ref_id: _heating_block("hp"),
+            gas_ref_id: _heating_block("gas"),
+            "live": _heating_block("hp"),
+            "gas": _heating_block("gas"),
+            "gas_rod": _heating_block("gas_rod", rod_kwh=1430.0),
+            "same_hp": _heating_block("hp"),
+        },
+    }
+
+
+def _heating_block(system_id: str, *, rod_kwh: float = 0.0) -> dict:
+    return {
+        "fuel_kwh": 0.0,
+        "fuel_eur": 0.0,
+        "co2_kg": 0.0,
+        "heating_systems": {"wp": system_id},
+        "rod_kwh": rod_kwh,
+    }
+
+
+def test_annual_cost_rows_heating_variant_has_no_live_deviation_hint():
+    rows = {row["Szenario"]: row for row in build_annual_cost_rows(_heating_variant_meta())}
+    assert rows["gas"]["Hinweis"] == "—"  # heat pump → gas: −42 % electricity on purpose
+    assert rows["gas_rod"]["Hinweis"] == "—"
+    assert rows["live"]["Hinweis"] == "—"
+    # Same heating system as the Live reference, +15 %: still a simulation problem.
+    assert "Live-Referenz" in rows["same_hp"]["Hinweis"]
+
+
+def test_annual_cost_rows_rod_electricity_comes_off_before_the_check():
+    meta = _heating_variant_meta()
+    for block in meta["heat_fuel"].values():
+        block["heating_systems"] = {"wp": "hp_rod"}
+    meta["booked_consumption"]["live"]["consumption_kwh"] = 6000.0 + 900.0
+    meta["heat_fuel"]["live"]["rod_kwh"] = 900.0
+    meta["booked_consumption"]["same_hp"]["consumption_kwh"] = 6000.0 + 900.0
+    meta["heat_fuel"]["same_hp"]["rod_kwh"] = 200.0
+    rows = {row["Szenario"]: row for row in build_annual_cost_rows(meta)}
+    assert rows["live"]["Hinweis"] == "—"  # +15 % is all rod electricity
+    assert "Live-Referenz" in rows["same_hp"]["Hinweis"]  # +11.7 % without the rod
 
 
 def test_annual_cost_rows_booked_loss_triggers_live_reference_hint():
@@ -599,7 +673,7 @@ def test_annual_cost_rows_booked_loss_triggers_live_reference_hint():
         "live": {"consumption_kwh": 11892.0, "standby_kwh": 227.8},
     }
     rows = {row["Szenario"]: row for row in build_annual_cost_rows(_booked_meta(booked))}
-    assert rows["Live"]["Jahres Verbrauch [kWh]"] == "11892.0"
+    assert rows["Live"]["Jahres Verbrauch [kWh]"] == "11892,0"
     assert "Live-Referenz" in rows["Live"]["Hinweis"]
 
 

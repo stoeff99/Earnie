@@ -1,6 +1,7 @@
 """EHAL Live-Lesen / Live-Schreiben field tables (pure data, split from ``ehal_debug_mapping``)."""
 from __future__ import annotations
 
+from ehal.heat_fields import THERMAL_ANNUAL_READ_KINDS
 from ehal.field_catalog import (
     SETPOINT_FIELDS,
     TELEMETRY_OPTIONAL_STATIC_HUB as TELEMETRY_OPTIONAL,
@@ -71,6 +72,7 @@ BATTERY_ESS_LIVE_WRITE_KINDS: tuple[str, ...] = (
     "set_ess_charge_power_limit",
     "set_ess_discharge_power_limit",
     "set_ess_mode",
+    "set_ess_target_soc",
 )
 
 BATTERY_SOURCE_SELECT_KIND = "set_ess_source_select"
@@ -93,12 +95,15 @@ PLANT_LIVE_WRITE_FIELDS: tuple[str, ...] = (
     "set_ess_charge_power_limit",
     "set_ess_discharge_power_limit",
     "set_ess_mode",
+    "set_ess_target_soc",
     "set_grid_export_power_limit",
 )
 EV_LIVE_READ_FIELDS: tuple[str, ...] = (
     "sens_evcs_active_power",
     "sens_evcs_connected",
     "sens_evcs_soc_act",
+    "sens_ev_connected",
+    "sens_ev_charge_power",
     "get_evcs_nominal_current",
     "sens_evcs_bat_capacity",
     "get_evcs_ready_by_time",
@@ -125,10 +130,8 @@ THERMAL_LIVE_READ_FIELDS: tuple[str, ...] = (
     "sens_heating_active",
 )
 
-THERMAL_ANNUAL_LIVE_READ_FIELDS: tuple[str, ...] = (
-    "sens_temperature_heat_storage",
-    "sens_temperature_heat_storage_low",
-)
+# Store temperatures (level 0) + feedback signals (level 3, HeatControl P1).
+THERMAL_ANNUAL_LIVE_READ_FIELDS: tuple[str, ...] = THERMAL_ANNUAL_READ_KINDS
 
 NETWORK_LIVE_READ_FIELDS: tuple[str, ...] = TELEMETRY_REQUIRED + TELEMETRY_OPTIONAL
 NETWORK_LIVE_WRITE_FIELDS: tuple[str, ...] = SETPOINT_FIELDS

@@ -16,45 +16,26 @@
                     "id": "waermepumpe",
                     "label": "Wärmepumpe",
                     "type": "thermal_annual",
-                    "nominal_power_kw": 1.9,
                     "use_profile_csv": false,
-                    "absent_mode_enabled": true,
-                    "living_area_m2": 157.0,
-                    "building_class": 2,
-                    "heat_pump_type": "erde",
-                    "persons": 2,
-                    "target_temp_c": 21.5,
-                    "absent_temp_reduction_c": 6.5,
-                    "heating_limit_c": 15.0,
                     "solar_thermal_area_m2": 10.3,
                     "solar_thermal_tilt_deg": 18.0,
                     "solar_thermal_azimuth_deg": 26.0,
-                    "building_mass": "leicht",
-                    "house_tolerance_c": 0.5,
-                    "hwb_kwh_m2": 40.0,
-                    "heat_storage": {
-                        "volume_liters": 887.0,
-                        "heat_loss_kw_per_k": 0.01,
-                        "setpoint_c": 47.0,
-                        "tolerance_c": 5.0
-                    },
                     "timezone_name": "Europe/Vienna",
-                    "min_on_quarterhours": 1,
                     "ehal_bindings": {
                         "sens_temperature_heat_storage": "alias_3",
                         "sens_temperature_heat_storage_low": "alias_4",
                         "heatpump.waermepumpe.set_enable": "alias_2",
                         "heatpump.waermepumpe.sens_power_act": "alias_1"
-                    }
+                    },
+                    "heating_system_id": "heating_profile_a",
+                    "internal_gain_factor": 0.0
                 },
                 {
                     "id": "e_auto",
                     "label": "smart",
                     "type": "ev",
-                    "nominal_power_kw": 3.5,
                     "use_profile_csv": false,
                     "absent_mode_enabled": true,
-                    "min_power_kw": 1.4,
                     "min_on_quarterhours": 1,
                     "battery_capacity_kwh": 16.0,
                     "charging_schedule": {
@@ -71,8 +52,6 @@
                             "ready_by_hour": 12,
                             "daily_rest_soc": 80.0
                         },
-                        "nominal_power_voltage_v": 220.0,
-                        "nominal_power_phases": 1,
                         "milp": {
                             "live_modus_a_min_remaining_kwh": 2.8,
                             "tie_break_on_epsilon": 0.001,
@@ -80,17 +59,19 @@
                         }
                     },
                     "ehal_bindings": {
-                        "sens_evcs_active_power": "alias_5",
-                        "set_evcs_max_current": "alias_6",
-                        "set_evcs_mode": "alias_7",
-                        "sens_evcs_connected": "alias_8",
                         "sens_evcs_soc_act": "alias_9",
-                        "get_evcs_nominal_current": "alias_10",
                         "sens_evcs_bat_capacity": "alias_11",
                         "get_evcs_ready_by_time": "alias_12",
                         "get_evcs_limit_soc": "alias_13",
-                        "get_evcs_soc_min_immediate": "alias_14",
-                        "evcs.e_auto.set_evcs_max_current": ""
+                        "get_evcs_soc_min_immediate": "alias_14"
+                    },
+                    "internal_gain_factor": 0.0,
+                    "phases": 1,
+                    "min_current_a": 6.363636363636363,
+                    "max_current_a": 15.909090909090908,
+                    "wallbox_assignment": {
+                        "mode": "fixed",
+                        "wallbox_id": "e_auto"
                     }
                 },
                 {
@@ -118,7 +99,8 @@
                         "sens_heating_active": "alias_20",
                         "pool.pool_swimspa.set_enable": "alias_16",
                         "pool.pool_swimspa.sens_power_act": "alias_15"
-                    }
+                    },
+                    "internal_gain_factor": 0.0
                 },
                 {
                     "id": "pool_filter",
@@ -150,7 +132,8 @@
                         }
                     },
                     "signal_type": "binary",
-                    "min_on_quarterhours": 2
+                    "min_on_quarterhours": 2,
+                    "internal_gain_factor": 0.0
                 },
                 {
                     "id": "geschirrspueler",
@@ -175,7 +158,8 @@
                     },
                     "ehal_bindings": {
                         "consumer.geschirrspueler.sens_power_act": "alias_26"
-                    }
+                    },
+                    "internal_gain_factor": 0.8
                 },
                 {
                     "id": "kochen",
@@ -194,7 +178,8 @@
                     "earnie_role": "known",
                     "ehal_bindings": {
                         "consumer.kochen.sens_power_act": "alias_27"
-                    }
+                    },
+                    "internal_gain_factor": 0.8
                 },
                 {
                     "id": "trockner",
@@ -219,7 +204,8 @@
                     },
                     "ehal_bindings": {
                         "consumer.trockner.sens_power_act": "alias_28"
-                    }
+                    },
+                    "internal_gain_factor": 0.8
                 },
                 {
                     "id": "tv",
@@ -238,7 +224,8 @@
                     "earnie_role": "known",
                     "ehal_bindings": {
                         "consumer.tv.sens_power_act": "alias_29"
-                    }
+                    },
+                    "internal_gain_factor": 0.8
                 },
                 {
                     "id": "waschmaschine",
@@ -263,7 +250,8 @@
                     },
                     "ehal_bindings": {
                         "consumer.waschmaschine.sens_power_act": "alias_30"
-                    }
+                    },
+                    "internal_gain_factor": 0.8
                 },
                 {
                     "id": "verbraucher",
@@ -285,7 +273,8 @@
                         "power_source": "manual",
                         "default_power_kw": 0.1,
                         "powerstation_id": "ecoflow_delta_3"
-                    }
+                    },
+                    "internal_gain_factor": 0.8
                 }
             ],
             "land": "AT",
@@ -301,7 +290,34 @@
                 "include_status": [
                     "verordnet"
                 ]
-            }
+            },
+            "thermal": {
+                "living_area_m2": 157.0,
+                "hwb_kwh_m2": 40.0,
+                "building_class": 2,
+                "building_mass": "leicht",
+                "target_temp_c": 21.5,
+                "heating_limit_c": 15.0,
+                "house_tolerance_c": 0.5,
+                "absent_temp_reduction_c": 6.5,
+                "absent_mode_enabled": true,
+                "solar_gains": {
+                    "enabled": false,
+                    "window_area_m2": {
+                        "s": 12.5,
+                        "e": 4.0,
+                        "w": 4.0,
+                        "n": 4.0
+                    },
+                    "g_value": 0.6,
+                    "frame_shading_factor": 0.5
+                }
+            },
+            "persons": 2,
+            "heating_enabled": true,
+            "vat_deductible": false,
+            "baseload_internal_gain_factor": 0.8,
+            "cooling_enabled": false
         }
     ],
     "plant": {
@@ -318,5 +334,5 @@
             "single_tariff": true
         }
     },
-    "earnie_data_model": 5
+    "earnie_data_model": 6
 }

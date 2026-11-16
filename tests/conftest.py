@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from dotenv import load_dotenv
 
-from tests.fixtures.backtesting_fixtures import pin_fixture_config_env
+from tests.fixtures.backtesting_fixtures import FIXTURES_ROOT, pin_fixture_config_env
 from tests.fixtures.historical_fixtures import CONS_DATA_FILE, fixture_available
 from tests.regression.baseline import GIT_LOCATION_ENV
 
@@ -22,6 +22,34 @@ from tests.regression.baseline import GIT_LOCATION_ENV
 # (config, index, refs). Drop them for the whole test process.
 for _key in GIT_LOCATION_ENV:
     os.environ.pop(_key, None)
+
+
+# Streamlit AppTest defaults to a 3 s script timeout. Under the full xdist run
+# (``-n auto``, all cores busy, MILP tests in parallel) a cold script run regularly
+# exceeds it and fails with "AppTest script run timed out after 3(s)" in a random
+# test. The timeout only decides how long a hung script may take before it fails,
+# so raise the floor for every AppTest; larger explicit values stay unchanged.
+APPTEST_MIN_TIMEOUT_S = 30.0
+
+
+def _raise_apptest_default_timeout() -> None:
+    from streamlit.testing.v1 import AppTest
+
+    original_init = AppTest.__init__
+
+    def _init(self, script_path, *, default_timeout, args=None, kwargs=None):
+        original_init(
+            self,
+            script_path,
+            default_timeout=max(default_timeout, APPTEST_MIN_TIMEOUT_S),
+            args=args,
+            kwargs=kwargs,
+        )
+
+    AppTest.__init__ = _init
+
+
+_raise_apptest_default_timeout()
 
 
 def _configure_console_utf8() -> None:
@@ -54,6 +82,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DOTENV_PATHS = (ROOT / "earnie_env" / "config" / ".env", ROOT / ".env")
 DEFAULT_TEST_CONFIG_PATH = ROOT / "tests" / "fixtures" / "backtesting" / "config.json"
 _USE_LIVE_CONFIG_ENV = "EARNIE_TEST_USE_LIVE_CONFIG"
+_IMPORT_RUNTIME_DIR = tempfile.mkdtemp(prefix="earnie-runtime-import-")
+atexit.register(shutil.rmtree, _IMPORT_RUNTIME_DIR, ignore_errors=True)
 
 
 def _apply_default_test_config_env() -> None:
@@ -62,6 +92,11 @@ def _apply_default_test_config_env() -> None:
         return
     os.environ.setdefault("EARNIE_OFFLINE", "1")
     pin_fixture_config_env()
+    # config is imported below, before the per-test runtime dir exists; without this
+    # it reads the developer's earnie_env/runtime/local_settings.json (e.g.
+    # shadow_feed_enabled → main.main() tests wrote feeds into the fixtures).
+    os.environ["EARNIE_RUNTIME_PATH"] = _IMPORT_RUNTIME_DIR
+    os.environ.pop("EARNIE_LOCAL_SETTINGS_PATH", None)
     # Do not force EARNIE_GRID_FEES_PATH here — bootstrap tests must seed
     # config/grid_fees.json from share/. AppTest sets the public catalog path.
 
@@ -352,6 +387,35 @@ def _fail_on_blocked_earnie_server_post():
         pytest.fail("test tried to POST to the production earnie-server:\n" + "\n".join(hits))
 
 
+def _committed_fixture_state() -> dict[str, tuple[int, int]]:
+    """(mtime_ns, size) of each file under the env-pinned config fixtures."""
+    state = {}
+    for path in FIXTURES_ROOT.rglob("*"):
+        if path.is_file() and "__pycache__" not in path.parts:
+            stat = path.stat()
+            state[path.relative_to(FIXTURES_ROOT).as_posix()] = (stat.st_mtime_ns, stat.st_size)
+    return state
+
+
+@pytest.fixture(autouse=True)
+def _guard_committed_backtesting_fixtures():
+    """Fail the test that wrote into ``tests/fixtures/backtesting/``.
+
+    The default env points config and sidecars at these committed files, so a save
+    path without a tmp_path copy changes the repo and breaks later tests.
+    """
+    before = _committed_fixture_state()
+    yield
+    after = _committed_fixture_state()
+    if after != before:
+        changed = sorted(name for name in before.keys() | after.keys() if before.get(name) != after.get(name))
+        pytest.fail(
+            "tests/fixtures/backtesting/ changed during this test (or a test running in "
+            f"parallel on another xdist worker): {', '.join(changed)}. Tests must write to a "
+            "tmp_path copy. Restore with: git checkout -- tests/fixtures/backtesting"
+        )
+
+
 def _loxone_integration_enabled() -> bool:
     if os.getenv("EARNIE_SKIP_LOXONE_INTEGRATION") == "1":
         return False
@@ -423,8 +487,46 @@ def _e2e_explicitly_selected(config) -> bool:
     return _marker_explicitly_selected(config, "e2e", "EARNIE_RUN_E2E")
 
 
+_MISSING_CONFTEST_KEY = pytest.StashKey[str]()
+
+
+def _flag_items_in_duplicate_conftest_directories(items) -> None:
+    """Flag tests whose directory pytest collected a second time.
+
+    pytest 9 binds conftest fixtures to the first ``Dir`` node of their directory.
+    When paths of one directory are not adjacent on the command line
+    (``tests/apptest/a.py tests/b.py tests/apptest/c.py``), the directory is
+    collected again and its tests silently lose that conftest's autouse fixtures —
+    for AppTests the tmp_path copy of the config fixtures, so they wrote into
+    ``tests/fixtures/backtesting/``. ``pytest_runtest_setup`` fails flagged tests
+    before any fixture runs (a collection error would crash xdist workers).
+    """
+    seen: dict[str, pytest.Directory] = {}
+    for item in items:
+        for node in item.listchain():
+            if not isinstance(node, pytest.Directory):
+                continue
+            if not (node.path / "conftest.py").is_file():
+                continue
+            if seen.setdefault(node.nodeid, node) is not node:
+                item.stash[_MISSING_CONFTEST_KEY] = node.nodeid
+                break
+
+
+def pytest_runtest_setup(item):
+    directory = item.stash.get(_MISSING_CONFTEST_KEY, None)
+    if directory is not None:
+        pytest.fail(
+            f"pytest collected '{directory}' twice, so its conftest.py fixtures are missing "
+            "for this test. Put all paths from that directory next to each other on the "
+            "command line.",
+            pytrace=False,
+        )
+
+
 def pytest_collection_modifyitems(config, items):
     """Deselect regression and e2e by default; keep ``slow`` tests at the end."""
+    _flag_items_in_duplicate_conftest_directories(items)
     deselect_names = []
     if not _regression_explicitly_selected(config):
         deselect_names.append("regression")

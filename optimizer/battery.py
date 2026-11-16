@@ -78,6 +78,13 @@ def apply_soc_change(
     *,
     dt_h: float,
 ) -> tuple[float, float]:
+    """SoC after one slot of ``batt_action`` (kW, charging positive) and the power that fits.
+
+    The SoC limits cut the action, they never add to it: the returned power has the sign of
+    ``batt_action`` and at most its size. A start outside the limits (measured SoC below
+    ``min_soc`` or above ``max_soc``) stays where it is until an action moves it back in; it
+    does not jump to the limit, and an action that would move it further out is dropped.
+    """
     if battery_capacity_kwh <= 0.0:
         return old_soc, 0.0
     if batt_action >= 0:
@@ -86,24 +93,44 @@ def apply_soc_change(
         energy_change = batt_action / efficiency * dt_h
     soc_change = (energy_change / battery_capacity_kwh) * 100
     new_soc = old_soc + soc_change
-    if new_soc > max_soc_limit:
-        new_soc = max_soc_limit
-        actual_energy = ((max_soc_limit - old_soc) / 100) * battery_capacity_kwh
+    upper = max(max_soc_limit, old_soc)
+    lower = min(min_soc_limit, old_soc)
+    if new_soc > upper:
+        new_soc = upper
+        charged_kwh = ((upper - old_soc) / 100) * battery_capacity_kwh
         # Reverse: energy = p * η * dt_h  →  p = energy / (η * dt_h)
-        batt_action = (
-            actual_energy / (efficiency * dt_h)
-            if actual_energy >= 0
-            else actual_energy * efficiency / dt_h
-        )
-    elif new_soc < min_soc_limit:
-        new_soc = min_soc_limit
-        actual_energy = ((min_soc_limit - old_soc) / 100) * battery_capacity_kwh
-        batt_action = (
-            actual_energy * efficiency / dt_h
-            if actual_energy < 0
-            else actual_energy / (efficiency * dt_h)
-        )
+        batt_action = charged_kwh / (efficiency * dt_h)
+    elif new_soc < lower:
+        new_soc = lower
+        discharged_kwh = ((lower - old_soc) / 100) * battery_capacity_kwh
+        batt_action = discharged_kwh * efficiency / dt_h
     return new_soc, batt_action
+
+
+def vendor_mode_step(
+    sim_soc: float,
+    net_pv_surplus_kw: float,
+    battery_params: dict,
+    *,
+    dt_h: float,
+) -> tuple[float, float]:
+    """One slot of the battery in vendor mode (self-consumption, no grid charging).
+
+    Charges the PV surplus and discharges on deficit, clamped to ``max_power_kw``
+    and to ``min_soc`` / ``max_soc``. ``net_pv_surplus_kw`` is PV minus the load the
+    battery sees (standby included by the caller). Returns ``(soc_next, batt_kw)``
+    with ``batt_kw`` positive while charging.
+    """
+    batt_action = clamp_power(net_pv_surplus_kw, battery_params["max_power_kw"])
+    return apply_soc_change(
+        sim_soc,
+        batt_action,
+        battery_params["battery_capacity_kwh"],
+        battery_params["efficiency"],
+        battery_params["min_soc"],
+        battery_params["max_soc"],
+        dt_h=dt_h,
+    )
 
 
 def charge_kw_for_hourly_soc(
@@ -170,6 +197,7 @@ def _milp_full_control_setpoint(
     opt_charge: float,
     opt_discharge: float,
     opt_grid_buy: float,
+    opt_grid_sell: float,
     net_pv_surplus: float,
     current_soc: float,
     planned_soc: float,
@@ -181,7 +209,14 @@ def _milp_full_control_setpoint(
     dt_h: float,
     threshold: float,
 ) -> tuple[int, float, float]:
-    """Pick forced charge / discharge / Entladesperre for ``control=full``."""
+    """Pick forced charge / discharge / Entladesperre for ``control=full``.
+
+    The setpoint follows the plan's SoC also while the battery is outside its limits
+    (``milp_soc_recovery``): the limits are widened to the current SoC, so the power is the
+    plan's and not what would reach the limit within this slot.
+    """
+    soc_floor = min(min_soc, current_soc)
+    soc_ceiling = max(max_soc, current_soc)
     if opt_charge > threshold and opt_grid_buy > threshold:
         target_soc = round(max(current_soc, planned_soc), 1)
         target_power = charge_kw_for_hourly_soc(
@@ -190,8 +225,8 @@ def _milp_full_control_setpoint(
             battery_capacity,
             efficiency,
             max_power,
-            min_soc,
-            max_soc,
+            soc_floor,
+            soc_ceiling,
             dt_h=dt_h,
         )
         return MODE_ZWANGS_LADEN, target_power, target_soc
@@ -204,12 +239,14 @@ def _milp_full_control_setpoint(
             battery_capacity,
             efficiency,
             max_power,
-            min_soc,
-            max_soc,
+            soc_floor,
+            soc_ceiling,
             dt_h=dt_h,
         )
         automatik_power = automatik_discharge_kw(net_pv_surplus, max_power)
-        if candidate_power > automatik_power + threshold:
+        # Above the deficit the extra power is export: only when the plan sells. A SoC above plan
+        # (flex delivered less than the plan's on-slots) stays in the battery.
+        if candidate_power > automatik_power + threshold and opt_grid_sell > threshold:
             return MODE_ZWANGS_ENTLADEN, candidate_power, candidate_soc
 
     if (
@@ -271,6 +308,7 @@ def derive_control_from_milp_plan(
             opt_charge=float(ess_plan.get("p_charge") or 0.0),
             opt_discharge=float(ess_plan.get("p_discharge") or 0.0),
             opt_grid_buy=float(milp_plan.get("p_grid_buy") or 0.0),
+            opt_grid_sell=float(milp_plan.get("p_grid_sell") or 0.0),
             net_pv_surplus=net_pv_surplus,
             current_soc=current_soc,
             planned_soc=planned_soc,
@@ -359,8 +397,8 @@ def _derive_control_from_milp(
     planned_soc = planned_soc_percent_from_energy(
         float(e_val) if e_val is not None else 0.0,
         battery_capacity,
-        min_soc,
-        max_soc,
+        min(min_soc, current_soc),
+        max(max_soc, current_soc),
     )
     return derive_control_from_milp_plan(
         milp_plan,

@@ -45,6 +45,22 @@ from .milp_horizon import (
     _build_milp_model,
     _terminal_soc_energy_kwh,
 )
+from .import_power_limit import ImportCaps
+from .milp_ev_pool import add_ev_pool_constraints
+from .milp_import_cap import add_import_cap_constraints
+from house_config.import_cap import MODE_OBSERVE, MODE_OPTIMIZE
+
+from .import_cap_report import (
+    NOT_PLANNED_AUTOMATIK,
+    NOT_PLANNED_SHADOW,
+    NOT_PLANNED_TRIVIAL,
+    not_planned_report,
+    not_planned_slot_marks,
+    observe_report,
+    plan_slot_marks,
+    report_from_model,
+)
+from .milp_vendor_mode import add_vendor_mode_export_constraints, plan_vendor_mode_enabled
 from .milp_result import (
     _extract_milp_plan,
     _log_milp_decision,
@@ -99,6 +115,23 @@ def _add_virtual_reserve_refill(
     )
 
 
+def _base_level_start(
+    battery_params: dict | list[dict],
+    current_soc: float,
+    soc_hold_index: int | None,
+    soc_hold_percent: float | None,
+) -> tuple[int, float]:
+    """First slot the SoC base level tracks and the energy before it.
+
+    With a SoC hold the plan starts for real after the hold: the slots before it are not replayed
+    and only lead there.
+    """
+    capacity = float(_primary_battery_params(battery_params).get("battery_capacity_kwh") or 0.0)
+    if soc_hold_index is not None and soc_hold_percent is not None:
+        return soc_hold_index + 1, float(soc_hold_percent) / 100.0 * capacity
+    return 0, float(current_soc) / 100.0 * capacity
+
+
 def _build_milp_model_with_objective(
     matrix: list[dict[str, Any]],
     battery_params: dict | list[dict],
@@ -113,6 +146,8 @@ def _build_milp_model_with_objective(
     current_soc_by_id: dict[str, float] | None = None,
     inverter_params: dict | list[dict] | None = None,
     pv_systems: list[dict] | None = None,
+    soc_hold_index: int | None = None,
+    soc_hold_percent: float | None = None,
 ) -> MilpHorizonModel:
     """Horizontmodell samt Zielfunktion (Energiekosten + Batterie-Verschleiß)."""
     from .export_power_limit import export_caps_for_horizon
@@ -161,6 +196,9 @@ def _build_milp_model_with_objective(
         k_push,
         inputs.ev_milp_by_id,
         wear_cent_per_kwh=wear_cent_per_kwh,
+        base_level_start=_base_level_start(
+            battery_params, current_soc, soc_hold_index, soc_hold_percent
+        ),
     )
     return model
 
@@ -183,6 +221,7 @@ def _add_flex_side_constraints(
         inputs.contexts,
         verbose,
         filter_contexts=inputs.filters,
+        book_indices=inputs.book_indices,
     )
     add_generic_flex_rolling_constraints(
         model,
@@ -192,6 +231,7 @@ def _add_flex_side_constraints(
         consumer_continue_on,
         filter_contexts=inputs.filters,
     )
+    add_ev_pool_constraints(model)
     window = matrix[: inputs.horizon]
     add_thermal_flex_constraints(
         model,
@@ -306,6 +346,7 @@ def _solve_milp_to_model(
     current_soc_by_id: dict[str, float] | None = None,
     inverter_params: dict | list[dict] | None = None,
     pv_systems: list[dict] | None = None,
+    import_caps: ImportCaps | None = None,
 ) -> tuple[MilpHorizonModel, dict[str, float], dict[str, float], list[int], dict, dict] | None:
     """Baut und löst das MILP; None wenn nicht optimal / leere Matrix."""
     if not matrix:
@@ -336,6 +377,8 @@ def _solve_milp_to_model(
         current_soc_by_id=current_soc_by_id,
         inverter_params=inverter_params,
         pv_systems=pv_systems,
+        soc_hold_index=soc_hold_index,
+        soc_hold_percent=soc_hold_percent,
     )
     _add_flex_side_constraints(
         model, matrix, inputs, verbose, consumer_continue_on, thermal_flex_contexts
@@ -351,6 +394,16 @@ def _solve_milp_to_model(
         sunrise_soc_min_index=sunrise_soc_min_index,
         terminal_soc_percent=terminal_soc_percent,
     )
+    if plan_vendor_mode_enabled():
+        add_vendor_mode_export_constraints(
+            model,
+            matrix,
+            inverter_params if inverter_params is not None else _default_inverter_params(),
+            first_slot=0 if soc_hold_index is None else soc_hold_index + 1,
+        )
+
+    if import_caps is not None:
+        add_import_cap_constraints(model, import_caps)
 
     update_cbc_milp_context_from_row(matrix[0])
     status = solve_with_strict_fallback(model.prob, msg=False, verbose=verbose)
@@ -412,6 +465,57 @@ def _extract_optimizer_controls_from_model(
     )
 
 
+def _warn_import_cap_not_planned(import_caps: ImportCaps | None, reason: str, mode: str) -> None:
+    """Automatik and the trivial window plan nothing, so an import cap is not held by a plan.
+
+    Observe mode never holds the cap, so there is nothing to warn about.
+    """
+    if import_caps is None or mode == MODE_OBSERVE:
+        return
+    limit = next(value for value in import_caps.limits_kw if value is not None)
+    logger.warning("MILP: Bezugsgrenze (%.2f kW) nicht eingeplant: %s.", limit, reason)
+
+
+def _with_not_planned_report(
+    result: tuple,
+    import_caps: ImportCaps | None,
+    matrix: list[dict[str, Any]],
+    reason: str,
+    mode: str,
+) -> tuple:
+    """Automatik or trivial result; with a cap its plan says the cap was not planned."""
+    if import_caps is None:
+        return result
+    plan = dict(result[5])
+    plan["import_cap_report"] = not_planned_report(import_caps, matrix, reason, mode=mode)
+    return result[:5] + (plan,) + result[6:]
+
+
+def shadow_import_cap_report(
+    executed_model: MilpHorizonModel,
+    matrix: list[dict[str, Any]],
+    import_caps: ImportCaps,
+    solve_args: dict[str, Any],
+    fallback_k_push: float,
+) -> dict[str, Any]:
+    """Observe mode (max-power plan P6d, decision O2): solve the same inputs again under the cap.
+
+    ``solve_args`` are the keyword arguments of ``_solve_milp_to_model`` that gave
+    ``executed_model`` (without ``import_caps``). The second plan is never executed; it only gives
+    the report. If it does not solve, the executed plan stands and the report says so.
+    """
+    shadow = _solve_milp_to_model(**{**solve_args, "verbose": False}, import_caps=import_caps)
+    if shadow is None:
+        logger.warning(
+            "MILP: Beobachtungsmodus – Plan mit Bezugsgrenze nicht gelöst; Viertelstunde ohne Vergleich."
+        )
+        return not_planned_report(import_caps, matrix, NOT_PLANNED_SHADOW, mode=MODE_OBSERVE)
+    shadow_model, _preset, shadow_remaining, _idx, _contexts, _filters = shadow
+    return observe_report(
+        shadow_model, executed_model, matrix, import_caps, shadow_remaining, fallback_k_push
+    )
+
+
 def _trivial_optimizer_result(current_soc: float) -> (
     tuple[int, float, float, dict[str, float], dict[str, int], dict[str, float], dict[str, dict]]
 ):
@@ -452,13 +556,19 @@ def milp_optimizer(
     current_soc_by_id: dict[str, float] | None = None,
     inverter_params: dict | list[dict] | None = None,
     pv_systems: list[dict] | None = None,
+    import_caps: ImportCaps | None = None,
+    import_cap_observe: bool = False,
 ) -> tuple[int, float, float, dict[str, float], dict[str, int], dict[str, float], dict[str, dict]]:
     """
     Berechnet den optimalen Betriebsmodus und die Ziel-Leistung für den Loxone Miniserver.
     Optimiert Batterie und alle konfigurierten flexible_consumers gemeinsam per MILP.
     Rückgabe: (mode, target_power, target_soc, {consumer_id: leistung_kw},
                {consumer_id: pv_follow 0|1}, milp_plan, urgent_observability)
+
+    ``import_cap_observe``: observe mode of the import cap (P6d). The executed plan ignores
+    ``import_caps``; a second plan with them gives ``milp_plan["import_cap_report"]``.
     """
+    cap_mode = MODE_OBSERVE if import_cap_observe else MODE_OPTIMIZE
     battery_params = (
         battery_params if battery_params is not None else _default_battery_params()
     )
@@ -471,41 +581,62 @@ def milp_optimizer(
         spa_remaining_kwh,
     )
     if trivial is not None:
-        return _trivial_optimizer_result(current_soc)
+        _warn_import_cap_not_planned(import_caps, "trivial window, no solve", cap_mode)
+        return _with_not_planned_report(
+            _trivial_optimizer_result(current_soc),
+            import_caps,
+            matrix,
+            NOT_PLANNED_TRIVIAL,
+            cap_mode,
+        )
     fallback_k_push = k_push if k_push is not None else config.get_push_price_cent()
+    solve_args: dict[str, Any] = {
+        "matrix": matrix,
+        "current_soc": current_soc,
+        "battery_params": battery_params,
+        "k_push": fallback_k_push,
+        "verbose": verbose,
+        "consumers": consumers,
+        "consumer_remaining_kwh": consumer_remaining_kwh,
+        "spa_remaining_kwh": spa_remaining_kwh,
+        "flex_indices": flex_indices,
+        "charging_contexts": charging_contexts,
+        "filter_contexts": filter_contexts,
+        "terminal_soc_percent": terminal_soc_percent,
+        "sunrise_soc_min_index": sunrise_soc_min_index,
+        "consumer_continue_on": consumer_continue_on,
+        "thermal_flex_contexts": thermal_flex_contexts,
+        "soc_hold_index": soc_hold_index,
+        "soc_hold_percent": soc_hold_percent,
+        "hk_max_export_kw": hk_max_export_kw,
+        "inbound_export_limit_kw": inbound_export_limit_kw,
+        "export_caps_kw": export_caps_kw,
+        "current_soc_by_id": current_soc_by_id,
+        "inverter_params": inverter_params,
+        "pv_systems": pv_systems,
+    }
     solved = _solve_milp_to_model(
-        matrix,
-        current_soc,
-        battery_params,
-        fallback_k_push,
-        verbose,
-        consumers,
-        consumer_remaining_kwh,
-        spa_remaining_kwh,
-        flex_indices,
-        charging_contexts,
-        filter_contexts,
-        terminal_soc_percent,
-        sunrise_soc_min_index,
-        consumer_continue_on,
-        thermal_flex_contexts,
-        soc_hold_index=soc_hold_index,
-        soc_hold_percent=soc_hold_percent,
-        hk_max_export_kw=hk_max_export_kw,
-        inbound_export_limit_kw=inbound_export_limit_kw,
-        export_caps_kw=export_caps_kw,
-        current_soc_by_id=current_soc_by_id,
-        inverter_params=inverter_params,
-        pv_systems=pv_systems,
+        **solve_args, import_caps=None if import_cap_observe else import_caps
     )
     if solved is None:
-        return _AUTOMATIK_FALLBACK
+        _warn_import_cap_not_planned(import_caps, "no optimal solve, Automatik", cap_mode)
+        return _with_not_planned_report(
+            _AUTOMATIK_FALLBACK, import_caps, matrix, NOT_PLANNED_AUTOMATIK, cap_mode
+        )
 
     model, preset_by_slot, remaining, schedule_indices, contexts, filters = solved
     controls = _extract_optimizer_controls_from_model(
         model, matrix, preset_by_slot, current_soc, primary
     )
     _attach_heat_control_horizon(controls.milp_plan, model)
+    if import_caps is not None and import_cap_observe:
+        controls.milp_plan["import_cap_report"] = shadow_import_cap_report(
+            model, matrix, import_caps, solve_args, fallback_k_push
+        )
+    elif import_caps is not None:
+        controls.milp_plan["import_cap_report"] = report_from_model(
+            model, matrix, import_caps, remaining
+        )
     urgent_observability = _collect_urgent_rule_observability(
         model, matrix, remaining, schedule_indices, contexts, filters
     )
@@ -572,6 +703,7 @@ def milp_horizon_schedule(
     current_soc_by_id: dict[str, float] | None = None,
     inverter_params: dict | list[dict] | None = None,
     pv_systems: list[dict] | None = None,
+    import_caps: ImportCaps | None = None,
 ) -> list[dict[str, Any]]:
     """
     Ein CBC-Solve über die Matrix; Rückgabe: Stundenplan-Slots für Open-Loop / commit-K.
@@ -592,7 +724,10 @@ def milp_horizon_schedule(
         )
         is not None
     ):
-        return trivial_horizon_schedule(len(matrix))
+        schedule = trivial_horizon_schedule(len(matrix))
+        if import_caps is None:
+            return schedule
+        return _with_slot_marks(schedule, not_planned_slot_marks(import_caps, len(schedule)))
     fallback_k_push = k_push if k_push is not None else config.get_push_price_cent()
     solved = _solve_milp_to_model(
         matrix,
@@ -618,11 +753,25 @@ def milp_horizon_schedule(
         current_soc_by_id=current_soc_by_id,
         inverter_params=inverter_params,
         pv_systems=pv_systems,
+        import_caps=import_caps,
     )
     if solved is None:
-        return [dict(_FALLBACK_SCHEDULE_SLOT)]
-    model, preset_by_slot, _, _, _, _ = solved
-    return extract_horizon_schedule(model, primary, preset_by_slot)
+        fallback = [dict(_FALLBACK_SCHEDULE_SLOT)]
+        if import_caps is None:
+            return fallback
+        return _with_slot_marks(fallback, not_planned_slot_marks(import_caps, 1))
+    model, preset_by_slot, remaining, _, _, _ = solved
+    schedule = extract_horizon_schedule(model, primary, preset_by_slot)
+    if import_caps is None:
+        return schedule
+    return _with_slot_marks(schedule, plan_slot_marks(model, matrix, import_caps, remaining))
+
+
+def _with_slot_marks(
+    schedule: list[dict[str, Any]], marks: list[dict[str, Any] | None]
+) -> list[dict[str, Any]]:
+    """Schedule slots with the import cap's limit and cause (SE log, P6c); slots without a limit stay."""
+    return [slot if mark is None else {**slot, **mark} for slot, mark in zip(schedule, marks)]
 
 
 # Re-Exports für Tests und interne Aufrufer (API-Stabilität).

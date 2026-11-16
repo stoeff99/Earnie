@@ -83,6 +83,65 @@ Windows wrapper: `.\docker\build-container.ps1`
 
 Local `build_container` default tags from `version.py`: every version → `:next` and `:<version>`; official also `:latest`; SemVer pre-release omits `:latest`. Legacy `ernie-energy` aliases follow the same rule. **CI** (tag → `release-publish.yml`): candidate is `:<version>` only; `:next` / `:latest` only after job `promote` (see the release bullets below).
 
+### Dev build and transfer to the NAS
+
+Dev images reach the NAS over SSH, without a registry. Only `scripts/build_container.py` adds the Shadow client to a `-dev` image. A plain `docker build`, including *Build Image* in the VS Code Docker extension, leaves it out, and that image refuses to start with `EARNIE_SHADOW=1`.
+
+VS Code tasks (*Terminal → Run Task…*, defined in `.vscode/tasks.json`):
+
+| Task | What it does |
+|------|--------------|
+| `docker: build earnie` | Builds locally for `linux/amd64` |
+| `docker: build + load NAS (ssh earnie-nas)` | Builds locally, then loads the image on the NAS with `docker save` / `docker load` |
+| `docker: build + push earnie` | Builds and pushes `:<version>` to GHCR with `--versioned-only`; `:next` stays where it is |
+
+Do not push a `-dev` version without `--versioned-only`: `:next` would then point at the dev image and reach everyone who follows that tag.
+
+The load task does not touch the running container. To switch, recreate the container in Container Manager with the tag from `version.py`. A rebuild under an unchanged tag also needs the container recreated.
+
+**One-time setup** (Synology, Windows dev machine). Keep the real host and user name out of this repo; the task only knows the SSH alias.
+
+1. Create a key with a passphrase and add it to the agent. Starting the service needs an elevated PowerShell:
+
+   ```powershell
+   ssh-keygen -t ed25519 -f $HOME/.ssh/earnie_nas
+   Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent
+   ssh-add $HOME/.ssh/earnie_nas
+   ```
+
+2. Enable SSH and the user home service in DSM, then install the public key on the NAS:
+
+   ```powershell
+   Get-Content $HOME/.ssh/earnie_nas.pub | ssh <user>@<nas-host> "mkdir -p ~/.ssh; cat >> ~/.ssh/authorized_keys; chmod 700 ~/.ssh; chmod 600 ~/.ssh/authorized_keys; chmod go-w ~"
+   ```
+
+3. Add the alias to `~/.ssh/config` (no file extension, no BOM):
+
+   ```text
+   Host earnie-nas
+       HostName <nas-host>
+       User <user>
+       IdentityFile ~/.ssh/earnie_nas
+   ```
+
+4. Allow `docker load` without a password. Run `id -u` on the NAS and use that number as `<uid>`; a numeric ID also avoids trouble with non-ASCII user names. DSM has no `visudo`, so the file gets its owner and mode before it moves into place. `sudo -l` must then list the `NOPASSWD` rule.
+
+   ```powershell
+   ssh -t earnie-nas "echo '#<uid> ALL=(root) NOPASSWD: /usr/local/bin/docker load' > /tmp/earnie-docker && sudo chown root:root /tmp/earnie-docker && sudo chmod 440 /tmp/earnie-docker && sudo mv /tmp/earnie-docker /etc/sudoers.d/earnie-docker; sudo rm -f /tmp/earnie-docker; sudo -l"
+   ```
+
+5. Check the setup. No prompt may appear. An error about empty input or a missing `repositories` file is the expected result, because Docker ran and had nothing to load:
+
+   ```powershell
+   ssh -o BatchMode=yes earnie-nas "sudo -n /usr/local/bin/docker load < /dev/null"
+   ```
+
+Notes:
+
+- Docker access amounts to root on the NAS, so the rule allows `docker load` only. Keep the passphrase on the key.
+- A DSM update may remove the `sudoers.d` file; `sudo: a password is required` then means repeating step 4. If a bad file breaks `sudo`, remove it with a one-time DSM Task Scheduler task running as `root`.
+- Outside the task, run the pipe through `cmd /c`. PowerShell 5.1 can corrupt binary data piped between native commands.
+
 ### Release (tag → GitHub Actions)
 
 **Primary path:** bump `version.py` (user approval only), commit + push `main`, then push an annotated tag. CI (`.github/workflows/release-publish.yml`) builds a release candidate (multi-arch image to GHCR, draft GitHub Release) and publishes it after your approval. Per-release checklist: [docs/workflow/release-checklist.md](docs/workflow/release-checklist.md).
@@ -163,7 +222,7 @@ Use exactly one of these — do not invent a fourth gate or mix them up:
 |---------|------|
 | Backend replay / write block / banner / cycle wait / startup refuse / feed recorder off in Shadow | `runtime_store.shadow.is_shadow_mode()` |
 | Config writers, load-time migration skip, EHAL overlay use (shared feed under `config_dir()` only) | `runtime_store.shadow.is_shadow_config_readonly()` |
-| Setpoint helper invocation so `shadow_writes.jsonl` fills (Shadow ≠ plain silent) | `runtime_store.shadow.writes.should_invoke_setpoint_writes()` |
+| Setpoint helper invocation so `shadow_writes.jsonl` fills (Shadow ≠ plain silent) | `runtime_store.shadow.hooks.should_invoke_setpoint_writes()` |
 
 Wrong gate examples: using `is_shadow_mode()` for config saves breaks private-env dogfood; collapsing Shadow into plain silent empties would-write logs.
 
@@ -177,7 +236,17 @@ New live HTTP clients that feed the optimizer cycle (hub GET or `ext:*`) must go
 | `ext_get(replay=…, live=…, allow_live_fallback=…)` | External APIs — Soft fallback (prices/outdoor) may live-fetch in Shadow **without** recording; PV uses `allow_live_fallback=False` |
 | `safe_record(...)` | Replace ad-hoc try/except wrappers around `record_transport` |
 
-Structure / setup probes (MCP, greenfield, EHAL mapping scan, credential probe) must call `assert_not_shadow_backend` — UI disable alone is not enough. Daemon loop glue lives in `runtime_store.shadow.daemon` (not `runtime_store/main_daemon.py`).
+Structure / setup probes (MCP, greenfield, EHAL mapping scan, credential probe) must call `assert_not_shadow_backend` — UI disable alone is not enough. Daemon loop glue lives in `runtime_store.shadow.hooks` (not `runtime_store/main_daemon.py`).
+
+### Shadow client is not in the release image
+
+The release image ships only the Shadow core that Prod needs to record the feed: `mode`, `feed`, `hooks`, `transport`, `errors`, `superset`. The client modules (`cycle`, `ehal_overlay`, `reader`, `replay`, `startup`, `writes`, plus `ui/shadow_banner.py`) are left out via `.dockerignore`; the list is `CLIENT_FILES` in [`runtime_store/shadow/hooks.py`](runtime_store/shadow/hooks.py).
+
+- Code outside `runtime_store/shadow/` reaches client functions **only** through `runtime_store.shadow.hooks` (`mode`, `errors`, `transport`, `feed` may be imported directly). `ui.shadow_banner` is imported lazily inside an `is_shadow_mode()` branch.
+- `EARNIE_SHADOW=1` on an image without the client refuses to start (`refuse_shadow_startup_or_exit`, `shadow_migration_mode_refusal`); it never runs as Prod.
+- **Dev builds carry the client:** for a `-dev` version in `version.py`, `scripts/build_container.py` passes the client files as `--build-context shadow-client=<dir>`, which replaces the empty `shadow-client` stage of `docker/Dockerfile`. All other versions and the CI images (`release-publish.yml`) build without it.
+- [`tests/test_stripped_release_image.py`](tests/test_stripped_release_image.py) checks `.dockerignore` against the list, scans shipped code for imports of left-out modules, and imports the Prod packages in a subprocess where those modules cannot be imported.
+- The offline replay and regression tools (`runtime_store/recorder_replay.py`, `scripts/run_regression.py`, `scripts/run_regression_r0_study.py`, `scripts/replay_debug_dump.py`) are left out the same way; the cycle recorder and `runtime_store/push_read_replay.py` stay.
 
 ## Roadmap
 

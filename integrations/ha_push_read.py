@@ -27,6 +27,15 @@ def binding_entries(house: dict, components: dict) -> list[tuple[str, str, str, 
             ctype = str(consumer.get("type") or "")
             for field, name in (consumer.get("ehal_bindings") or {}).items():
                 entries.append(("consumer", cid, ctype, str(field), str(name)))
+        from ehal.push_signals import _rod_entries
+
+        entries.extend(_rod_entries(profile))
+    # Wallboxes open to dynamic EVs: ``evcs.<Wallbox>.*`` (multi-EV M3).
+    from house_config.wallboxes import dynamic_charger_consumers
+
+    for charger in dynamic_charger_consumers(house, components):
+        for field, name in charger["ehal_bindings"].items():
+            entries.append(("consumer", charger["id"], "ev", str(field), str(name)))
     for battery in components.get("batteries", []):
         bid = str(battery.get("id") or "")
         for field, name in (battery.get("ehal_bindings") or {}).items():
@@ -63,7 +72,10 @@ def setpoint_qualified_ids(house: dict, components: dict) -> dict[str, str]:
             continue
         qid = pilot_id(kind, eid, field, ctype)
         if qid:
-            out[str(field)] = qid
+            # Charger keys are often stored bare (``set_evcs_max_current``): keyed by the
+            # qualified ID so that several EV ↔ wallbox pairs do not overwrite each other.
+            key = qid if kind == "consumer" and ctype == "ev" else str(field)
+            out[key] = qid
     return out
 
 

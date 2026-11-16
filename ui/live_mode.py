@@ -6,7 +6,7 @@ import pandas as pd
 
 from data import consumer_targets, live_consumption, profile_manager
 from data.edibert_live_market import fetch_live_day_ahead_prices
-from runtime_store import main_daemon, run_state
+from runtime_store import main_daemon, run_state, savings_ledger_store
 from runtime_store.live_display_loader import (
     load_live_display_snapshot,
     snapshot_completed_at,
@@ -22,10 +22,11 @@ from ui.history_navigation import (
     render_s2_nav_buttons,
 )
 from ui.help_hint import render_status_with_help
+from ui.ledger_kpi import render_ledger_kpi
 from ui.main_py_sync import MAIN_PY_SYNC_HELP, main_py_sync_status_message
 from ui.runtime_config import reload_runtime_config, simulation_settings_fingerprint
-from ui.chart_debug_capture import render_chart_debug_capture_controls
 from ui.sankey import render_live_power_flow
+from ui.support_package import remember_live_soc
 from ui.simulation_results import (
     SESSION_LIVE_DISPLAY_BUNDLE,
     build_optimization_display_bundle,
@@ -110,6 +111,20 @@ def _render_main_down_notice(snapshot: dict | None, *, persisted_fresh: bool) ->
         )
 
 
+def _render_pv_source_notice(main_state: dict | None) -> None:
+    """Warn when the last main.py cycle planned a PV system without forecast.solar."""
+    sources = (main_state or {}).get("pv_forecast_sources") or {}
+    substituted = sorted(sid for sid, src in sources.items() if src == "open_meteo")
+    if not substituted:
+        return
+    st.warning(
+        "PV-Prognose ohne forecast.solar: Für **"
+        + ", ".join(substituted)
+        + "** hat main.py mit der Open-Meteo-Einstrahlung geplant "
+        "(forecast.solar lieferte keine Daten)."
+    )
+
+
 def _render_opt_in_simulation_prompt() -> None:
     st.caption(
         "Ohne aktuellen main.py-Lauf kann eine **einmalige** UI-Simulation "
@@ -120,14 +135,25 @@ def _render_opt_in_simulation_prompt() -> None:
         st.rerun()
 
 
+SAVINGS_SECTION_TITLE = "Earnie-Effekt"
+
+
 def render_optimization_savings_and_chart(current_soc: float) -> None:
-    """Cockpit-Charts aus main.py-Persistenz (opt-in UI-Simulation bei Ausfall)."""
+    """Cockpit-Charts aus main.py-Persistenz (opt-in UI-Simulation bei Ausfall).
+
+    The savings section (ledger tile + Chart 2) is followed by the capacity-charge block,
+    which belongs to the cost view.
+    """
+    from ui.capacity_charge_panel import render_capacity_charge_panel
+
     reload_runtime_config()
     _live_optimization_prepare_fragment(current_soc)
     _live_optimization_chart1_fragment(current_soc)
     render_s2_nav_buttons(now=live_now())
     render_live_power_flow(current_soc)
+    st.subheader(SAVINGS_SECTION_TITLE)
     _live_optimization_chart2_fragment()
+    render_capacity_charge_panel()
     bundle = st.session_state.get(SESSION_LIVE_DISPLAY_BUNDLE)
     if bundle is not None:
         render_optimization_results_tail(bundle)
@@ -259,6 +285,7 @@ def _run_opt_in_live_simulation(
         sim_soc,
         consumer_daily_targets_kwh=targets,
         sunrise_soc_min_index=sunrise_soc_min_index,
+        baseline_initial_soc=savings_ledger_store.current_shadow_soc(),
     )
 
     optimized_df = pd.DataFrame(savings_info["optimized_rows"])
@@ -306,6 +333,7 @@ def _live_optimization_prepare_fragment(current_soc: float) -> None:
     reload_runtime_config()
     current_slot = optimization_schedule.quarter_hour_slot_key()
     main_state = run_state.load_run_state()
+    _render_pv_source_notice(main_state)
     snapshot = load_live_display_snapshot()
     persisted_at = snapshot_completed_at(snapshot)
     poll_sec = main_sync_poll_interval_sec()
@@ -368,11 +396,15 @@ def _live_optimization_chart1_fragment(current_soc: float) -> None:
     bundle = st.session_state.get(SESSION_LIVE_DISPLAY_BUNDLE)
     if bundle is not None:
         render_optimization_chart1(bundle)
-        render_chart_debug_capture_controls(current_soc)
+        remember_live_soc(current_soc)
 
 
 @st.fragment(run_every=CHARTS_FRAGMENT_RUN_EVERY)
 def _live_optimization_chart2_fragment() -> None:
     bundle = st.session_state.get(SESSION_LIVE_DISPLAY_BUNDLE)
+    # The running day's figures are the ones Chart 2 draws below.
+    render_ledger_kpi(
+        live_now(), bundle.savings_view.get("ledger_savings") if bundle is not None else None
+    )
     if bundle is not None:
         render_optimization_chart2(bundle)

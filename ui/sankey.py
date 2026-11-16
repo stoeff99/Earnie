@@ -11,6 +11,7 @@ from data import live_consumption
 from integrations import ehal_live
 from runtime_store import run_state
 from runtime_store.ehal_setup import active_ehal_backend, backend_label
+from ui.number_format import format_decimal, localized_figure
 from ui.fragment_refresh import STATUS_FRAGMENT_RUN_EVERY
 from ui.runtime_config import reload_runtime_config
 from ui import sankey_produktiv as produktiv
@@ -41,8 +42,8 @@ def _flex_kw_for_consumer(flex_kw: dict, consumer: dict) -> float:
 
 def _grid_label(grid_kw: float) -> str:
     if grid_kw >= 0:
-        return f"🔌 Stromnetz (Bezug: {grid_kw:.2f} kW)"
-    return f"🔌 Stromnetz (Einspeisung: {abs(grid_kw):.2f} kW)"
+        return f"🔌 Stromnetz (Bezug: {format_decimal(grid_kw)} kW)"
+    return f"🔌 Stromnetz (Einspeisung: {format_decimal(abs(grid_kw))} kW)"
 
 
 def _grid_color(grid_kw: float) -> str:
@@ -50,18 +51,19 @@ def _grid_color(grid_kw: float) -> str:
 
 
 def _battery_color(battery_kw: float) -> str:
-    if battery_kw < 0:
-        return SANKEY_BATTERY_DISCHARGE_COLOR
+    """Node colour; ``battery_kw`` uses the Live sign (``+`` = discharge)."""
     if battery_kw > 0:
+        return SANKEY_BATTERY_DISCHARGE_COLOR
+    if battery_kw < 0:
         return SANKEY_BATTERY_CHARGE_COLOR
     return SANKEY_BATTERY_IDLE_COLOR
 
 
 def _live_battery_label(current_soc: float | None, battery_kw: float) -> str:
-    soc_txt = f"{float(current_soc):.1f} %" if current_soc is not None else "SoC —"
+    soc_txt = f"{format_decimal(float(current_soc), 1)} %" if current_soc is not None else "SoC —"
     if battery_kw >= 0:
-        return f"🔋 Batterie ({soc_txt} - Entladen: {battery_kw:.2f} kW)"
-    return f"🔋 Batterie ({soc_txt} - Laden: {abs(battery_kw):.2f} kW)"
+        return f"🔋 Batterie ({soc_txt} - Entladen: {format_decimal(battery_kw)} kW)"
+    return f"🔋 Batterie ({soc_txt} - Laden: {format_decimal(abs(battery_kw))} kW)"
 
 
 def _battery_label(
@@ -83,7 +85,7 @@ def _flex_label(consumer: dict, live_kw: float, main_state: dict | None) -> str:
             ev_soc_percent=ev_soc,
         )
     return (
-        f"⚡ {consumer['name']} ({live_kw:.2f} kW"
+        f"⚡ {consumer['name']} ({format_decimal(live_kw)} kW"
         f"{produktiv.ev_soc_label_suffix(ev_soc)})"
     )
 
@@ -125,16 +127,16 @@ class _SankeyLinks:
         self.targets.append(target)
         self.values.append(value)
         self.colors.append(color or SANKEY_DEFAULT_LINK_COLOR)
-        self.hover.append(hover if hover is not None else f"{value:.2f} kW")
+        self.hover.append(hover if hover is not None else f"{format_decimal(value)} kW")
 
 
 def _append_sources_to_system(links: _SankeyLinks, data: dict, system_idx: int) -> None:
     if data["pv"] > _MIN_FLOW_KW:
-        links.add(0, system_idx, data["pv"], hover=f"PV: {data['pv']:.2f} kW")
+        links.add(0, system_idx, data["pv"], hover=f"PV: {format_decimal(data['pv'])} kW")
     if data["grid"] > _MIN_FLOW_KW:
-        links.add(1, system_idx, data["grid"], hover=f"Netz Bezug: {data['grid']:.2f} kW")
+        links.add(1, system_idx, data["grid"], hover=f"Netz Bezug: {format_decimal(data['grid'])} kW")
     if data["battery"] > _MIN_FLOW_KW:
-        links.add(2, system_idx, data["battery"], hover=f"Batterie Entladen: {data['battery']:.2f} kW")
+        links.add(2, system_idx, data["battery"], hover=f"Batterie Entladen: {format_decimal(data['battery'])} kW")
 
 
 def _append_return_flows(links: _SankeyLinks, data: dict, system_idx: int) -> None:
@@ -143,14 +145,14 @@ def _append_return_flows(links: _SankeyLinks, data: dict, system_idx: int) -> No
             system_idx,
             1,
             abs(data["grid"]),
-            hover=f"Netz Einspeisung: {abs(data['grid']):.2f} kW",
+            hover=f"Netz Einspeisung: {format_decimal(abs(data['grid']))} kW",
         )
     if data["battery"] < -_MIN_FLOW_KW:
         links.add(
             system_idx,
             2,
             abs(data["battery"]),
-            hover=f"Batterie Laden: {abs(data['battery']):.2f} kW",
+            hover=f"Batterie Laden: {format_decimal(abs(data['battery']))} kW",
         )
 
 
@@ -233,7 +235,7 @@ def _breakdown_node_labels_colors(
 ) -> tuple[list[str], list[str]]:
     """Knotenbeschriftungen und -farben für die aufgelöste Haus-Darstellung."""
     flex_kw = breakdown.get("flex_kw") or {}
-    lbl_baseload = f"🏠 Grundlast ({breakdown['baseload_kw']:.2f} kW)"
+    lbl_baseload = f"🏠 Grundlast ({format_decimal(breakdown['baseload_kw'])} kW)"
     flex_labels = [
         _flex_label(
             consumer,
@@ -288,7 +290,7 @@ def _append_breakdown_links(
             system_idx,
             baseload_idx,
             breakdown["baseload_kw"],
-            hover=f"Grundlast: {breakdown['baseload_kw']:.2f} kW",
+            hover=f"Grundlast: {format_decimal(breakdown['baseload_kw'])} kW",
         )
     sink_sum_kw = _real_sink_sum_kw(data, breakdown, consumers)
     for i, consumer in enumerate(consumers):
@@ -341,7 +343,7 @@ def _house_sankey_data(
 ) -> tuple[list[str], _SankeyLinks, list[str]]:
     """Kompakte Darstellung ohne Auflösung des Hausverbrauchs."""
     links = _SankeyLinks()
-    lbl_house = f"🏠 Wohnhaus ({data['house']:.2f} kW)"
+    lbl_house = f"🏠 Wohnhaus ({format_decimal(data['house'])} kW)"
     labels = [head.lbl_pv, head.lbl_grid, head.lbl_bat, lbl_house, "⚙️ System-Knoten"]
 
     if data["pv"] > _MIN_FLOW_KW:
@@ -351,7 +353,7 @@ def _house_sankey_data(
     if data["battery"] > _MIN_FLOW_KW:
         links.add(2, 4, data["battery"])
     if data["house"] > _MIN_FLOW_KW:
-        links.add(4, 3, data["house"], hover=f"Wohnhaus: {data['house']:.2f} kW")
+        links.add(4, 3, data["house"], hover=f"Wohnhaus: {format_decimal(data['house'])} kW")
     _append_return_flows(links, data, 4)
 
     colors = [
@@ -372,7 +374,7 @@ def _prepare_sankey_data(
 ) -> tuple[list[str], _SankeyLinks, list[str]]:
     """Sankey: Energiebilanz; optional Auflösung Haus → Grundlast + flexible Verbraucher."""
     head = _SankeyHead(
-        lbl_pv=f"☀️ PV-Felder ({data['pv']:.2f} kW)",
+        lbl_pv=f"☀️ PV-Felder ({format_decimal(data['pv'])} kW)",
         lbl_grid=_grid_label(data["grid"]),
         lbl_bat=_battery_label(current_soc, data["battery"], main_state),
         color_grid=_grid_color(data["grid"]),
@@ -438,9 +440,34 @@ def _create_live_flow_sankey(
     return fig
 
 
+def dead_telemetry_warning_text() -> str:
+    """Warning when PV, grid, battery and house all read exactly 0 kW."""
+    label = backend_label(active_ehal_backend())
+    text = (
+        f"⚠️ Alle Live-Leistungswerte von {label} sind 0 kW (PV, Netz, Batterie, Haus) "
+        "– der Energiefluss kann nicht gezeichnet werden."
+    )
+    if not (ehal_live.is_loxone_backend() or ehal_live.is_ha_backend()):
+        return text
+    from runtime_store.ehal_push_inbox import expected_repeat_s
+
+    repeat_s = expected_repeat_s()
+    return (
+        f"{text} Earnie nimmt für einen Leistungswert 0 an, wenn er länger als "
+        f"{3 * repeat_s:.0f} s nicht neu gesendet wurde (Status „0 angenommen "
+        f"(verstummt)“). Bitte prüfen, ob {label} die Leistungswerte mindestens "
+        f"alle {repeat_s:.0f} s sendet – den Push-Status je Signal zeigt "
+        "EHAL-Com → Live-Lesen."
+    )
+
+
 @st.fragment(run_every=STATUS_FRAGMENT_RUN_EVERY)
 def render_live_power_flow(current_soc: float | None) -> None:
     """Rendert die Live-Leistungsfluss-Ansicht mit CSS-Fix gegen den Text-Glow."""
+    _render_live_power_flow_body(current_soc)
+
+
+def _render_live_power_flow_body(current_soc: float | None) -> None:
     reload_runtime_config()
     st.write("### ⚡ Energiefluss (Live)")
 
@@ -472,6 +499,10 @@ def render_live_power_flow(current_soc: float | None) -> None:
     # fresh optimizer snapshot that still omits house-profile known loads.
     flex_kw = live_consumption.fetch_live_flex_kw_for_ui(main_state)
     snapshot = live_consumption.build_consumption_snapshot(data, flex_kw)
+    if live_consumption.is_dead_telemetry_snapshot(snapshot):
+        # All meters 0 → no Sankey link; warn instead of drawing an empty figure (#89).
+        st.warning(dead_telemetry_warning_text())
+        return
 
     fig = _create_live_flow_sankey(
         data,
@@ -479,4 +510,4 @@ def render_live_power_flow(current_soc: float | None) -> None:
         breakdown=snapshot,
         main_state=main_state,
     )
-    st.plotly_chart(fig, width="stretch", key="live_power_flow_sankey")
+    st.plotly_chart(localized_figure(fig), width="stretch", key="live_power_flow_sankey")

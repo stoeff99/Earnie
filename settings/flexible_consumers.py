@@ -130,7 +130,7 @@ def consumer_has_daily_target(consumer: dict) -> bool:
     if consumer.get("generic_flex_window"):
         return True
     target_source = consumer.get("daily_target_source", "config")
-    if target_source == "thermal_annual":
+    if target_source in ("thermal_annual", "heating_rod"):
         return True
     sched = consumer.get("charging_schedule")
     if sched and sched.get("enabled"):
@@ -152,8 +152,15 @@ def load_flexible_consumers(
     resolved: dict,
     *,
     optimizer_only: bool = False,
+    raw_dynamic: bool = False,
 ) -> list:
-    """Flexible Verbraucher aus dem Hausprofil (``_planning_flex_consumers``)."""
+    """Flexible Verbraucher aus dem Hausprofil (``_planning_flex_consumers``).
+
+    Im Daemon ersetzt die Live-Zuordnung (``runtime_store.ev_assignments``) dynamisch
+    zugeordnete E-Autos durch ihr Paar mit der Wallbox oder lässt sie weg, solange sie
+    keiner Wallbox zugeordnet sind (multi-EV M3). ``raw_dynamic`` liefert die Ladersicht
+    ohne Live-Zuordnung (für die Zuordnung selbst).
+    """
     planning = resolved.get("_planning_flex_consumers") or []
     seen: set[str] = set()
     for consumer in planning:
@@ -167,6 +174,10 @@ def load_flexible_consumers(
     from house_config.planning_flex_bridge import merge_flexible_consumers
 
     consumers = merge_flexible_consumers([], planning)
+    if not raw_dynamic:
+        from runtime_store.ev_assignments import apply_live_assignments
+
+        consumers = apply_live_assignments(consumers)
     if optimizer_only:
         return [
             c for c in consumers

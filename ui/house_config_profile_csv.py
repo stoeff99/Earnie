@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS
 
+from ui.number_format import format_decimal
 from ui.house_config_profile_session import _SESSION_SELECTED_ID_KEY, _scoped_key
 
 import os
@@ -124,7 +125,7 @@ def _render_digital_csv_scale_prompt(
         return
     st.info(
         f"Digitales Ein/Aus-Signal (0/1) erkannt. "
-        f"Mit Nennleistung **{nominal_power_kw:.3f} kW** multiplizieren?"
+        f"Mit Nennleistung **{format_decimal(nominal_power_kw, 3)} kW** multiplizieren?"
     )
     col_yes, col_no = st.columns(2)
     with col_yes:
@@ -141,7 +142,7 @@ def _render_digital_csv_scale_prompt(
                     )
                     st.session_state[decision_key] = "yes"
                     st.success(
-                        f"CSV mit {nominal_power_kw:.3f} kW skaliert und gespeichert."
+                        f"CSV mit {format_decimal(nominal_power_kw, 3)} kW skaliert und gespeichert."
                     )
                     st.rerun()
                 except (ValueError, OSError, FileNotFoundError) as exc:

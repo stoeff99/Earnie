@@ -43,7 +43,7 @@
     },
     "earnie_data_model": {
       "type": "integer",
-      "const": 5,
+      "const": 6,
       "description": "Earnie data-model version for config pack import/export."
     }
   },
@@ -195,7 +195,7 @@
     },
     "ui": {
       "type": "object",
-      "description": "Streamlit-UI (Fragment-Auto-Refresh, Server-Port, Chart-Debug). Env: EARNIE_UI_FRAGMENT_CHARTS_SEC, EARNIE_UI_FRAGMENT_STATUS_SEC, EARNIE_UI_MAIN_SYNC_POLL_SEC, EARNIE_UI_STREAMLIT_PORT, EARNIE_UI_CHART_DEBUG_CAPTURE_ENABLED.",
+      "description": "Streamlit-UI (Fragment-Auto-Refresh, Server-Port, Support-Paket-Ablage). Env: EARNIE_UI_FRAGMENT_CHARTS_SEC, EARNIE_UI_FRAGMENT_STATUS_SEC, EARNIE_UI_MAIN_SYNC_POLL_SEC, EARNIE_UI_STREAMLIT_PORT.",
       "properties": {
         "fragment_refresh_charts_sec": {
           "type": "integer",
@@ -212,13 +212,9 @@
           "minimum": 1,
           "description": "Leichtgewichtiger main.py-Abgleich in Sekunden (Standard: 15)."
         },
-        "chart_debug_capture_enabled": {
-          "type": "boolean",
-          "description": "Button im Cockpit: Plot-Quelldaten als ZIP speichern (Verdachtsfall-Analyse). Optional maschinenspezifisch in runtime/local_settings.json überschreibbar. Env-Override: EARNIE_UI_CHART_DEBUG_CAPTURE_ENABLED=1."
-        },
         "chart_debug_capture_dir": {
           "type": "string",
-          "description": "Zielordner für Chart-Debug-ZIPs relativ zu runtime/ (Standard: chart_debug) oder absoluter Pfad."
+          "description": "Zielordner für Support-Paket-ZIPs relativ zu runtime/ (Standard: chart_debug) oder absoluter Pfad."
         },
         "streamlit_port": {
           "type": "integer",
@@ -432,11 +428,7 @@
             },
             "ess_component": {
               "type": "string",
-              "description": "ESS component id (default ess0)."
-            },
-            "evcs_component": {
-              "type": "string",
-              "description": "EVCS component id (default evcs0)."
+              "description": "ESS component id (default ess0). Wallboxes: the OpenEMS address is the wallbox binding set_evcs_max_current (<component>/SetChargePowerLimit)."
             }
           }
         },

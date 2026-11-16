@@ -46,7 +46,7 @@
     },
     "earnie_data_model": {
       "type": "integer",
-      "const": 5,
+      "const": 6,
       "description": "Earnie data-model version for config pack import/export."
     }
   },
@@ -88,6 +88,13 @@
                 "type": "string"
               }
             },
+            "heating_system_ids": {
+              "type": "object",
+              "description": "Heizsystem-Variante je thermal_annual-Verbraucher: {\"<consumer_id>\": \"<heating_systems[].id>\"} aus components.json. Ohne Eintrag gilt das Referenzsystem des Hauses; die Grundlast rechnet immer mit dem Referenzsystem.",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
             "battery_id": {
               "type": "string",
               "description": "Removed in earnie_data_model 4 — use battery_ids[].",
@@ -125,6 +132,21 @@
             "use_imported_pv": {
               "type": "boolean",
               "description": "Wenn true: Szenario-Explorer nutzt Hausprofil-pv_profile_csv statt PV aus Wetterdaten (Open-Meteo)."
+            },
+            "import_cap_kw": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "description": "Bezugsgrenze in kW für den Leistungspreis, je Viertelstunde. Weglassen = keine Grenze. Wirkt nur in Monaten, in denen der Netzbereich einen Leistungspreis hat. Nur zusammen mit import_cap_margin_kw."
+            },
+            "import_cap_margin_kw": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Sicherheitsmarge in kW: Der Plan zielt auf import_cap_kw minus diese Marge. Kleiner als import_cap_kw."
+            },
+            "import_cap_mode": {
+              "type": "string",
+              "enum": ["observe", "optimize"],
+              "description": "Nur Live: optimize = Earnie plant unter der Bezugsgrenze; observe = Earnie plant ohne sie und zeigt nur, wo und wie er eingegriffen hätte. Pflicht im Live-Szenario, sobald import_cap_kw gesetzt ist; die Szenario-Simulation plant immer mit der Grenze."
             },
             "pv_tilt": {
               "type": "number"

@@ -13,6 +13,7 @@ from ui.house_config_profile_session import (
     _house_profiles_file_stamp,
     _resolve_profile_id,
 )
+from ui.house_config_profile_house_thermal import house_heating_payload
 
 import os
 
@@ -92,10 +93,32 @@ _PASSTHROUGH_CONSUMER_KEYS = (
     ID_PROVISIONAL_LABEL_KEY,
 )
 
+def _drop_view_charger_bindings(item: dict) -> None:
+    """The form's EV carries the charger bindings of the loaded pair view (passthrough).
+
+    They belong to the wallbox and are edited there (EHAL-Com); with a changed wallbox
+    choice they would land on the new wallbox, so the form never hands them back.
+    """
+    from house_config.wallboxes import is_charger_binding_key
+
+    bindings = item.get("ehal_bindings")
+    if not isinstance(bindings, dict):
+        return
+    kept = {k: v for k, v in bindings.items() if not is_charger_binding_key(k)}
+    if kept:
+        item["ehal_bindings"] = kept
+    else:
+        item.pop("ehal_bindings", None)
+
+
 def _merge_passthrough_consumer_fields(original: dict, edited: dict) -> dict:
     merged = dict(edited)
     for key in _PASSTHROUGH_CONSUMER_KEYS:
         if key not in original or key in merged:
+            continue
+        # „Haus Wärme“ renders its min-on time for electric heat sources only; a fuel
+        # source has none (heating-system catalog), so the old value must not come back.
+        if key == "min_on_quarterhours" and edited.get("type") == "thermal_annual":
             continue
         value = original[key]
         merged[key] = dict(value) if isinstance(value, dict) else value
@@ -146,8 +169,19 @@ def _resolve_consumer_ids(consumers: list[dict], edited: list[dict]) -> list[dic
                 new_id=consumer_id,
                 consumer_type=str(item.get("type") or "").strip(),
             )
+            from house_config.heating_rod_bindings import (
+                ROD_BINDINGS_KEY,
+                rewrite_rod_bindings_slug,
+            )
+
+            if item.get(ROD_BINDINGS_KEY):
+                item[ROD_BINDINGS_KEY] = rewrite_rod_bindings_slug(
+                    item[ROD_BINDINGS_KEY], new_consumer_id=consumer_id
+                )
         item["id"] = consumer_id
         item["label"] = label or consumer_id
+        if str(item.get("type") or "") == "ev":
+            _drop_view_charger_bindings(item)
         # Avoid dirty-writing id_locked onto legacy rows (missing flag ⇒ locked)
         # so Hausprofil auto_persist does not rewrite every open.
         if not id_locked:
@@ -172,6 +206,14 @@ def _resolve_consumer_ids(consumers: list[dict], edited: list[dict]) -> list[dic
         resolved.append(activate_consumer_required(item))
     return resolved
 
+def _vat_payload(existing: dict) -> dict:
+    """D3a ``vat_deductible``: not edited in the form yet, the stored value passes through."""
+    from house_config.profile_schema_defaults import profile_default
+    from house_config.profiles_store import VAT_DEDUCTIBLE_KEY
+
+    value = existing.get(VAT_DEDUCTIBLE_KEY, profile_default(VAT_DEDUCTIBLE_KEY))
+    return {VAT_DEDUCTIBLE_KEY: bool(value)}
+
 def _perform_house_profile_save(
     *,
     is_new: bool,
@@ -183,6 +225,7 @@ def _perform_house_profile_save(
     resolved: list[dict],
     existing: dict,
     preview_id: str,
+    heating: dict,
     absent_mode: bool = False,
     from_auto: bool = False,
 ) -> str | None:
@@ -227,6 +270,8 @@ def _perform_house_profile_save(
                 "baseload_distribution": hist.get(
                     "baseload_distribution", "equal"
                 ),
+                **house_heating_payload(heating),
+                **_vat_payload(existing),
             }
         )
     except ValueError as exc:
@@ -260,13 +305,22 @@ def _render_house_profile_save(
     resolved: list[dict],
     existing: dict,
     preview_id: str,
+    heating: dict,
     absent_mode: bool = False,
+    held: bool = False,
 ) -> None:
-    from ui.auto_persist import auto_persist, require_saved
+    """Auto-save of the house profile; ``held`` while a heating-system change awaits a choice."""
+    from ui.auto_persist import (
+        auto_persist,
+        persisted_state_known,
+        require_saved,
+        seed_persisted,
+    )
+    from ui.house_config_io import house_profile_write_pending
     from ui.house_config_historical_csv import historical_csv_save_fields
 
     ready = bool(str(label or "").strip()) and location.get("latitude") is not None
-    if not ready:
+    if not ready or held:
         return
     hist = historical_csv_save_fields(preview_id, existing)
     profile_id = _resolve_profile_id(
@@ -295,6 +349,8 @@ def _render_house_profile_save(
         "grid_profile_csv": hist.get("grid_profile_csv", ""),
         "historical_csv_source": hist["historical_csv_source"],
         "baseload_distribution": hist.get("baseload_distribution", "equal"),
+        **house_heating_payload(heating),
+        **_vat_payload(existing),
     }
 
     if is_new:
@@ -321,16 +377,49 @@ def _render_house_profile_save(
             resolved=resolved,
             existing=existing,
             preview_id=preview_id,
+            heating=heating,
             from_auto=True,
         )
         require_saved(saved_id)
 
+    state_key = f"house_profile::{session_scope}::{profile_id}"
+    success_caption = "Gespeichert"
+    if not is_new and not persisted_state_known(state_key):
+        # First render of this profile in the session: opening the page must not
+        # rewrite the file. Only a file that does not yet hold the normalised form
+        # is written, and that write is named. A dry run that fails leaves the
+        # error to the save below (same message, same place).
+        from house_config.own_grid_fee import stored_own_grid_fee
+
+        try:
+            pending = house_profile_write_pending(
+                {
+                    **payload,
+                    "netznutzung": stored_own_grid_fee(
+                        payload["netznutzung"], profile_id=profile_id
+                    ),
+                }
+            )
+        except ValueError:
+            pending = True
+        if not pending:
+            seed_persisted(state_key, payload)
+            return
+        success_caption = "Gespeichert – Datei auf das aktuelle Format gebracht"
+    # The Profil dropdown lists labels from disk: rerun only when the label changed
+    # (every other auto-save already rendered the new values in this run).
+    label_changed = _label_changed(label, existing)
     wrote = auto_persist(
-        state_key=f"house_profile::{session_scope}::{profile_id}",
+        state_key=state_key,
         payload=payload,
         save=_save,
         ready=ready,
+        success_caption=success_caption,
+        rerun_follows=label_changed,
     )
-    # Refresh Profil dropdown labels from disk (auto-save previously skipped st.rerun).
-    if wrote:
+    if wrote and label_changed:
         st.rerun()
+
+
+def _label_changed(label: str, existing: dict) -> bool:
+    return str(label or "").strip() != str(existing.get("label") or "").strip()

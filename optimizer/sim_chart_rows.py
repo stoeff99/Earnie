@@ -6,6 +6,7 @@ from datetime import datetime
 from data.price_forecast_live import is_extrapolated_source
 from optimizer import battery as bat
 from optimizer.consumer_power import uses_pv_follow
+from optimizer.import_cap_report import SLOT_CAUSE_KEY, SLOT_LIMIT_KEY
 from optimizer.slot_duration import DEFAULT_DT_H
 from optimizer.targets import consumer_column_name, consumer_pv_follow_column_name
 
@@ -203,7 +204,7 @@ def _chart_row_from_schedule_slot(
         battery_params,
         dt_h=DEFAULT_DT_H,
     )
-    return _chart_row_from_controls(
+    result = _chart_row_from_controls(
         row,
         sim_soc,
         battery_params,
@@ -213,6 +214,10 @@ def _chart_row_from_schedule_slot(
         consumer_powers,
         consumer_pv_follow,
     )
+    if SLOT_LIMIT_KEY in slot:
+        result[1][SLOT_LIMIT_KEY] = slot[SLOT_LIMIT_KEY]
+        result[1][SLOT_CAUSE_KEY] = slot[SLOT_CAUSE_KEY]
+    return result
 
 
 def horizon_end_soc_from_chart_rows(chart_rows: list[dict]) -> float | None:
@@ -230,21 +235,23 @@ def horizon_end_soc_percent(
     initial_soc: float,
     battery_params: dict,
 ) -> float:
-    """SoC nach der letzten Horizontstunde (Kette über alle chart_rows)."""
-    soc = float(initial_soc)
-    for row in chart_rows:
-        displayed = float(row[COL_SOC])
-        soc = displayed
-        batt = float(row.get(COL_BATTERIE_AKTION, 0.0) or 0.0)
-        soc, _ = bat.apply_soc_change(
-            soc,
-            batt,
-            battery_params["battery_capacity_kwh"],
-            battery_params["efficiency"],
-            battery_params["min_soc"],
-            battery_params["max_soc"],
-            dt_h=DEFAULT_DT_H,
-        )
+    """SoC after the last slot: its displayed start SoC plus its battery action.
+
+    Every row shows the SoC at its start, so the last row alone gives the end;
+    ``initial_soc`` is the answer for a run without rows.
+    """
+    if not chart_rows:
+        return round(float(initial_soc), 1)
+    last = chart_rows[-1]
+    soc, _ = bat.apply_soc_change(
+        float(last[COL_SOC]),
+        float(last.get(COL_BATTERIE_AKTION, 0.0) or 0.0),
+        battery_params["battery_capacity_kwh"],
+        battery_params["efficiency"],
+        battery_params["min_soc"],
+        battery_params["max_soc"],
+        dt_h=DEFAULT_DT_H,
+    )
     return round(soc, 1)
 
 

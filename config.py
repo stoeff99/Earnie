@@ -230,11 +230,14 @@ class Config:
     def get_battery_params_list(self) -> list:
         return live_scenario.battery_params_list_snapshot(self.get)
 
-    def get_flexible_consumers(self, optimizer_only: bool = False) -> list:
+    def get_flexible_consumers(
+        self, optimizer_only: bool = False, *, raw_dynamic: bool = False
+    ) -> list:
         """Lädt alle konfigurierten flexiblen Verbraucher."""
         return fc_settings.load_flexible_consumers(
             self.get_resolved_runtime_settings(),
             optimizer_only=optimizer_only,
+            raw_dynamic=raw_dynamic,
         )
 
     def get_appliances(self) -> list[dict]:
@@ -361,13 +364,6 @@ class Config:
 
     def get_ui_main_sync_poll_sec(self) -> int:
         return int(self.get("UI_MAIN_SYNC_POLL_SEC", default=15))
-
-    def get_ui_chart_debug_capture_enabled(self) -> bool:
-        from runtime_store.env_vars import is_truthy
-
-        if is_truthy("UI_CHART_DEBUG_CAPTURE_ENABLED"):
-            return True
-        return bool(self.get("UI_CHART_DEBUG_CAPTURE_ENABLED", default=False))
 
     def get_ui_chart_debug_capture_dir(self) -> str:
         return str(self.get("UI_CHART_DEBUG_CAPTURE_DIR", default="chart_debug"))
@@ -582,8 +578,8 @@ def get_battery_params_list() -> list:
     return CONFIG.get_battery_params_list()
 
 
-def get_flexible_consumers(optimizer_only: bool = False) -> list:
-    return CONFIG.get_flexible_consumers(optimizer_only=optimizer_only)
+def get_flexible_consumers(optimizer_only: bool = False, *, raw_dynamic: bool = False) -> list:
+    return CONFIG.get_flexible_consumers(optimizer_only=optimizer_only, raw_dynamic=raw_dynamic)
 
 
 def get_appliances() -> list[dict]:
@@ -658,10 +654,6 @@ def get_ui_fragment_status_sec() -> int:
 
 def get_ui_main_sync_poll_sec() -> int:
     return CONFIG.get_ui_main_sync_poll_sec()
-
-
-def get_ui_chart_debug_capture_enabled() -> bool:
-    return CONFIG.get_ui_chart_debug_capture_enabled()
 
 
 def get_ui_chart_debug_capture_dir() -> str:

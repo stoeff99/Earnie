@@ -47,6 +47,11 @@ class CycleToken:
 def reset_for_tests() -> None:
     """Clear in-memory recorder state (unit tests only)."""
     global _lost_cycles, _next_token_id
+    from data.outdoor_forecast import close_forecast_capture
+    from runtime_store.push_read_replay import close_push_read_capture
+
+    close_forecast_capture()
+    close_push_read_capture()
     with _lock:
         _pending.clear()
         _lost_cycles = 0
@@ -361,17 +366,155 @@ def begin_cycle(
                 ),
             )
             _pending[token_id] = token
+        from data.outdoor_forecast import open_forecast_capture
+        from runtime_store.push_read_replay import open_push_read_capture
+
+        open_forecast_capture()
+        open_push_read_capture()
         return token
     except Exception as exc:  # noqa: BLE001
+        from data.outdoor_forecast import close_forecast_capture
+        from runtime_store.push_read_replay import close_push_read_capture
+
+        close_forecast_capture()
+        close_push_read_capture()
         _note_lost("begin_cycle", exc)
         return None
+
+
+def _attach_recorded_outdoor_forecast(token: CycleToken) -> None:
+    """Copy the series fetched after begin_cycle into the entry, then stop capture.
+
+    The key is always written. ``None`` means no forecast was read during the
+    cycle, so replay fails loud if it reads one. A missing key marks cycles
+    recorded before this field existed (replay may fetch live).
+    """
+    from data.outdoor_forecast import close_forecast_capture
+
+    bucket = close_forecast_capture()
+    token.start_state["outdoor_forecast"] = None
+    if not bucket:
+        return
+    values = bucket.get("values_c")
+    source = bucket.get("source")
+    if not isinstance(values, list) or not values or not isinstance(source, str):
+        return
+    token.start_state["outdoor_forecast"] = {
+        "values_c": values,
+        "source": source,
+    }
+
+
+def _attach_recorded_push_reads(token: CycleToken) -> None:
+    """Copy the inbox reads made after begin_cycle into the entry, then stop capture.
+
+    The live EV charging context (plugged in, SoC, ready time, limits) is built
+    from these reads after ``begin_cycle``; replay serves them back.
+    """
+    from runtime_store.push_read_replay import close_push_read_capture
+
+    bucket = close_push_read_capture()
+    if bucket is not None:
+        token.start_state["push_reads"] = _json_safe(bucket)
+
+
+def record_active_reserves(
+    token: CycleToken | None,
+    reserves: list[dict[str, Any]] | None,
+) -> None:
+    """Store the powerstation reserves the live MILP planned with.
+
+    They come from ``powerstation_reserves.json`` after the telemetry trigger
+    sync, and shape the battery params (virtual refill carve-out).
+    """
+    if token is None:
+        return
+    try:
+        token.start_state["active_reserves"] = _json_safe(list(reserves or []))
+    except Exception as exc:  # noqa: BLE001 — never abort the live run
+        logger.warning("cycle_recorder: record_active_reserves failed: %s", exc)
+
+
+_ESS_LIMIT_KEYS = (
+    "min_soc",
+    "max_soc",
+    "max_charge_power_kw",
+    "max_discharge_power_kw",
+    "max_power_kw",
+)
+
+
+def record_ess_limits(
+    token: CycleToken | None,
+    battery_params: dict[str, Any] | list[dict[str, Any]],
+) -> None:
+    """Store the effective SOC / power limits per ESS (HK ∩ live ``get_ess_*``).
+
+    Live telemetry tightens them when ``limits_from_live`` is set; replay has no
+    telemetry. Taken before the reserves are applied (replay applies those itself).
+    """
+    if token is None:
+        return
+    try:
+        batteries = battery_params if isinstance(battery_params, list) else [battery_params]
+        token.start_state["ess_limits"] = {
+            str(bat["id"]): {key: float(bat[key]) for key in _ESS_LIMIT_KEYS}
+            for bat in batteries
+        }
+    except Exception as exc:  # noqa: BLE001 — never abort the live run
+        logger.warning("cycle_recorder: record_ess_limits failed: %s", exc)
+
+
+def record_export_limits(
+    token: CycleToken | None,
+    export_ctx: dict[str, Any],
+) -> None:
+    """Store the export ceilings the live MILP planned with (HK + inbound EHAL limit).
+
+    The inbound limit comes from live telemetry; replay has none.
+    """
+    if token is None:
+        return
+    try:
+        token.start_state["export_limits"] = {
+            "hk_max_export_kw": _json_safe(export_ctx["hk_max_export_kw"]),
+            "inbound_export_limit_kw": _json_safe(export_ctx["inbound_export_limit_kw"]),
+        }
+    except Exception as exc:  # noqa: BLE001 — never abort the live run
+        logger.warning("cycle_recorder: record_export_limits failed: %s", exc)
+
+
+def record_import_caps(
+    token: CycleToken | None,
+    import_ctx: dict[str, Any],
+) -> None:
+    """Store the import limits the live MILP planned with, and the month peaks behind them.
+
+    ``limits_kw`` / ``months`` are kept as planned, so replay needs neither the scenario nor the
+    peak store of that time. ``None`` limits when the scenario has no cap or no active month.
+    ``mode``: ``observe`` or ``optimize`` (P6d), ``None`` without a cap; in observe mode the
+    limits are those of the shadow plan.
+    """
+    if token is None:
+        return
+    try:
+        caps = import_ctx["import_caps"]
+        token.start_state["import_caps"] = {
+            "limits_kw": None if caps is None else [_json_safe(v) for v in caps.limits_kw],
+            "months": None if caps is None else list(caps.months),
+            "mode": import_ctx["mode"],
+            "peak_by_month": {k: _json_safe(v) for k, v in import_ctx["peak_by_month"].items()},
+            "unknown_months": list(import_ctx["unknown_months"]),
+        }
+    except Exception as exc:  # noqa: BLE001 — never abort the live run
+        logger.warning("cycle_recorder: record_import_caps failed: %s", exc)
 
 
 def _default_flags() -> dict[str, bool]:
     return {
         "override": False,
         "immediate_charging": False,
-        "outage": False,
+        "out_of_band": False,
         "manual_intervention": False,
     }
 
@@ -386,6 +529,8 @@ def _build_cycle_entry(
     target_power_kw: Any,
     battery_plan_kw: Any,
     consumer_powers_kw: Any,
+    solver: list[dict[str, Any]] | None = None,
+    import_cap_report: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     resolved_hash = plan_hash or compute_plan_hash(
         mode=mode,
@@ -399,6 +544,16 @@ def _build_cycle_entry(
         "battery_plan_kw": _json_safe(battery_plan_kw),
         "consumer_powers_kw": _json_safe(consumer_powers_kw),
     }
+    outputs: dict[str, Any] = {
+        "setpoints": _json_safe(resolved_setpoints),
+        "plan_hash": resolved_hash,
+        "flags": _json_safe(flags or _default_flags()),
+    }
+    if solver is not None:
+        # One record per MILP solve of the cycle (stage, elapsed, time limit hit, objective).
+        outputs["solver"] = _json_safe(solver)
+    if import_cap_report is not None:
+        outputs["import_cap_report"] = _json_safe(import_cap_report)
     return {
         "schema": RECORDER_SCHEMA,
         "timestamp": token.timestamp,
@@ -407,11 +562,7 @@ def _build_cycle_entry(
         "optimization_matrix": token.optimization_matrix,
         "planning_window": token.planning_window,
         "start_state": token.start_state,
-        "outputs": {
-            "setpoints": _json_safe(resolved_setpoints),
-            "plan_hash": resolved_hash,
-            "flags": _json_safe(flags or _default_flags()),
-        },
+        "outputs": outputs,
     }
 
 
@@ -432,10 +583,14 @@ def finish_cycle(
     target_power_kw: Any = None,
     battery_plan_kw: Any = None,
     consumer_powers_kw: Any = None,
+    solver: list[dict[str, Any]] | None = None,
+    import_cap_report: dict[str, Any] | None = None,
 ) -> bool:
     """Append one cycle line with outputs. Soft-fails; never raises to caller."""
     if token is None:
         return False
+    _attach_recorded_outdoor_forecast(token)
+    _attach_recorded_push_reads(token)
     if not is_recorder_enabled():
         with _lock:
             _pending.pop(token.token_id, None)
@@ -450,6 +605,8 @@ def finish_cycle(
             target_power_kw=target_power_kw,
             battery_plan_kw=battery_plan_kw,
             consumer_powers_kw=consumer_powers_kw,
+            solver=solver,
+            import_cap_report=import_cap_report,
         )
         _append_cycle_line(entry, day=_segment_day_from_timestamp(token.timestamp))
         prune_old_segments()

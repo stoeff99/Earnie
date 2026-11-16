@@ -21,35 +21,30 @@ from runtime_store import bootstrap
 bootstrap.run()
 
 from runtime_store.migration.gate import (
-    abort_message_de,
     migration_blocks_normal_startup,
     plan_for_active_config,
 )
-from runtime_store.shadow.mode import is_shadow_mode
+from runtime_store.shadow.hooks import shadow_migration_mode_refusal
 
 _migration_plan = plan_for_active_config()
 _migration_mode = migration_blocks_normal_startup(_migration_plan)
 
-if _migration_mode and is_shadow_mode():
-    print(abort_message_de(_migration_plan), file=sys.stderr)
-    print(
-        "Abbruch (Shadow): geteilte Konfiguration muss zuerst auf Prod "
-        "migriert werden (Shadow migriert nie).",
-        file=sys.stderr,
-    )
+_shadow_refusal = shadow_migration_mode_refusal(_migration_plan)
+if _shadow_refusal:
+    print(f"Abbruch (Shadow): {_shadow_refusal}", file=sys.stderr)
     raise SystemExit(1)
 
 config = None
 if not _migration_mode:
     from runtime_store.config_load import load_config_or_exit, reinit_config_or_exit
-    from runtime_store.shadow import refuse_shadow_startup_or_exit
+    from runtime_store.shadow.hooks import refuse_shadow_startup_or_exit
 
     config = load_config_or_exit()
     reinit_config_or_exit(config)
     refuse_shadow_startup_or_exit()
 
 from ui.branding import render_app_logo
-from ui.shadow_banner import render_shadow_banner
+from runtime_store.shadow.mode import is_shadow_mode
 
 logger = logging.getLogger("app")
 
@@ -60,7 +55,9 @@ st.set_page_config(
     layout="wide",
 )
 render_app_logo()
-if not _migration_mode:
+if not _migration_mode and is_shadow_mode():
+    from ui.shadow_banner import render_shadow_banner
+
     render_shadow_banner()
 
 
@@ -110,7 +107,7 @@ def main() -> None:
         require_loxone_credentials_for_config,
     )
     from ui.chunk_load_recovery import inject_chunk_load_recovery
-    from ui.config_pack import render_config_pack_sidebar
+    from ui.config_pack import render_backup_transfer_sidebar
     from ui.flash import render_flash_notices
     from ui.info_sidebar import render_info_sidebar, render_missing_next_month_tariff_sidebar
     from ui.mode_selector import get_enabled_ui_mode_keys, render_ui_mode_env_notices
@@ -141,7 +138,7 @@ def main() -> None:
     inject_single_file_uploader_css()
     inject_checkbox_highlight_css()
     render_ui_mode_env_notices()
-    render_config_pack_sidebar()
+    render_backup_transfer_sidebar()
     render_setup_progress_notice()
     render_missing_next_month_tariff_sidebar()
     _render_downgrade_warning()

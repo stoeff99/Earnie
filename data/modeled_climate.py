@@ -9,6 +9,8 @@ import pandas as pd
 import config
 from data.heating_need import (
     daily_electric_kwh,
+    daily_fuel_kwh,
+    daily_heat_kwh,
     heating_params_from_thermal,
     hourly_profile_for_year,
     thermal_daily_pwm_hourly_profile,
@@ -82,6 +84,16 @@ def _surfaces_for_profile(
             continue
         seen.add(key)
         surfaces.append(surface)
+    from optimizer.house_gains import window_surfaces_for_thermal
+
+    for consumer in profile.get("consumers", []):
+        if consumer.get("type") != "thermal_annual":
+            continue
+        for surface in window_surfaces_for_thermal(consumer.get("thermal") or consumer):
+            key = (round(surface.tilt_deg, 3), round(surface.azimuth_deg, 3))
+            if key not in seen:
+                seen.add(key)
+                surfaces.append(surface)
     return surfaces
 
 
@@ -196,11 +208,17 @@ class ModeledClimateContext:
         default_factory=dict,
         repr=False,
     )
-    _thermal_year_profiles: dict[tuple[str, int], list[float]] = field(
+    # (consumer_id, heating_system_id, year): scenarios may swap the heating system.
+    _thermal_year_profiles: dict[tuple[str, str, int], list[float]] = field(
         default_factory=dict,
         repr=False,
     )
     _thermal_rc_year_profiles: dict[tuple[str, int], list[float]] = field(
+        default_factory=dict,
+        repr=False,
+    )
+    # (consumer_id, heating_system_id, heating switch, cooling block, year).
+    _cooling_year_profiles: dict[tuple, list[float]] = field(
         default_factory=dict,
         repr=False,
     )
@@ -342,45 +360,39 @@ class ModeledClimateContext:
         inflates every month. H is a building property: calibrate on the complete
         reference year and apply it to the weather of any year.
         """
+        from house_config.heating_systems import consumer_input_power_kw
         from optimizer.thermal_parameters import house_thermal_parameters
 
         thermal_with_nominal = dict(thermal)
         if "nominal_power_kw" not in thermal_with_nominal:
-            thermal_with_nominal["nominal_power_kw"] = float(
-                consumer.get("nominal_power_kw", 3.0) or 3.0
-            )
+            thermal_with_nominal["nominal_power_kw"] = consumer_input_power_kw(consumer)
         return house_thermal_parameters(
             thermal_with_nominal, house_profile=self.house_profile
         ).house_heat_loss_kw_per_k
 
     def _thermal_hourly_profile_for_year(self, consumer: dict, year: int) -> list[float]:
         consumer_id = str(consumer.get("id") or consumer.get("label") or "thermal")
-        key = (consumer_id, year)
+        key = (consumer_id, str(consumer.get("heating_system_id") or ""), year)
         if key in self._thermal_year_profiles:
             return self._thermal_year_profiles[key]
 
         bundle = self._bundle_for_calendar_year(year)
         thermal = consumer.get("thermal") or consumer
+        from house_config.heating_systems import consumer_input_power_kw
+
         params = heating_params_from_thermal(thermal)
         if "hp_electric_kw" not in params:
-            params["hp_electric_kw"] = float(consumer.get("nominal_power_kw", 3.0) or 3.0)
-        area_m2 = float(params.get("solar_thermal_area_m2", 0.0) or 0.0)
-        hourly_wm2 = None
-        if area_m2 > 0.0:
-            surface = collector_surface_from_thermal(
-                thermal,
-                self.house_profile or {},
-            )
-            hourly_wm2 = bundle.collector_surface_series(surface)
+            params["hp_electric_kw"] = consumer_input_power_kw(consumer)
+        from optimizer.house_gains import thermal_climate_kwargs
+
+        climate = thermal_climate_kwargs(
+            bundle, thermal, collector_surface_from_thermal(thermal, self.house_profile or {})
+        )
 
         house_h = self._reference_house_heat_loss(consumer, thermal)
         if house_h is not None and params.get("house_heat_loss_kw_per_k") is None:
             params["house_heat_loss_kw_per_k"] = house_h
-        daily = daily_electric_kwh(
-            **params,
-            hourly_temperature_c=bundle.temperature_c,
-            hourly_collector_wm2=hourly_wm2,
-        )
+        daily = daily_electric_kwh(**params, **climate)
         nominal = float(consumer.get("nominal_power_kw", 0.0) or 0.0)
         if nominal > 0.0:
             profile = thermal_daily_pwm_hourly_profile(
@@ -389,11 +401,7 @@ class ModeledClimateContext:
                 hours_per_year=8760,
             )
         else:
-            weekly = weekly_electric_kwh(
-                **params,
-                hourly_temperature_c=bundle.temperature_c,
-                hourly_collector_wm2=hourly_wm2,
-            )
+            weekly = weekly_electric_kwh(**params, **climate)
             profile = hourly_profile_for_year(weekly, hours_per_year=8760)
         self._thermal_year_profiles[key] = profile
         return profile
@@ -401,6 +409,35 @@ class ModeledClimateContext:
     def thermal_consumer_kw_at(self, consumer: dict, slot_dt: datetime) -> float:
         profile = self._thermal_hourly_profile_for_year(consumer, slot_dt.year)
         return float(profile[_slot_hour_index_in_year(slot_dt)])
+
+    def cooling_kw_at(self, consumer: dict, profile: dict, slot_dt: datetime) -> float:
+        """Air-conditioning kW at ``slot_dt`` with the weather of the slot's year.
+
+        H is the reference-year calibration (as for the heating, ``_reference_house_heat_loss``).
+        """
+        from optimizer.house_cooling import cooling_year_hourly_kw
+
+        year = slot_dt.year
+        key = (
+            str(consumer.get("id") or ""),
+            str(consumer.get("heating_system_id") or ""),
+            bool(profile.get("heating_enabled")),
+            tuple(sorted((consumer.get("cooling") or {}).items())),
+            year,
+        )
+        profile_kw = self._cooling_year_profiles.get(key)
+        if profile_kw is None:
+            thermal = consumer["thermal"]
+            profile_kw = cooling_year_hourly_kw(
+                consumer,
+                profile,
+                bundle=self._bundle_for_calendar_year(year),
+                collector=collector_surface_from_thermal(thermal, profile),
+                house_heat_loss_kw_per_k=self._reference_house_heat_loss(consumer, thermal),
+            )
+            self._cooling_year_profiles[key] = profile_kw
+        index = _slot_hour_index_in_year(slot_dt)
+        return float(profile_kw[index]) if index < len(profile_kw) else 0.0
 
     def _thermal_rc_archive_year(self, year: int) -> int:
         from data.open_meteo_solar_archive import archive_latest_complete_date
@@ -481,12 +518,14 @@ def reference_climate_for_thermal(
         "longitude": lon,
     }
     collector = collector_surface_from_thermal(thermal, profile_stub)
+    from optimizer.house_gains import thermal_bundle_surfaces
+
     bundle = build_open_meteo_climate_bundle_for_year(
         year,
         lat=lat,
         lon=lon,
         timezone=timezone,
-        surfaces=[collector],
+        surfaces=thermal_bundle_surfaces(thermal, collector),
     )
     return bundle, collector
 
@@ -502,16 +541,57 @@ def thermal_annual_kwh_from_archive(
 
     Returns (annual_kwh, reference_year).
     """
+    return _thermal_annual_from_archive(
+        thermal,
+        house_profile=house_profile,
+        reference_year=reference_year,
+        daily_fn=daily_electric_kwh,
+    )
+
+
+def thermal_annual_fuel_kwh_from_archive(
+    thermal: dict,
+    *,
+    house_profile: dict | None = None,
+    reference_year: int | None = None,
+) -> tuple[float, int]:
+    """Brennstoffbedarf (kWh/a Endenergie) aus dem Open-Meteo-Archiv; 0 bei elektrischer Quelle."""
+    return _thermal_annual_from_archive(
+        thermal,
+        house_profile=house_profile,
+        reference_year=reference_year,
+        daily_fn=daily_fuel_kwh,
+    )
+
+
+def thermal_annual_heat_kwh_from_archive(
+    thermal: dict,
+    *,
+    house_profile: dict | None = None,
+    reference_year: int | None = None,
+) -> tuple[float, int]:
+    """Wärme der Wärmequelle (kWh_th/a) aus dem Open-Meteo-Archiv, für jede Wärmequelle."""
+    return _thermal_annual_from_archive(
+        thermal,
+        house_profile=house_profile,
+        reference_year=reference_year,
+        daily_fn=daily_heat_kwh,
+    )
+
+
+def _thermal_annual_from_archive(
+    thermal: dict,
+    *,
+    house_profile: dict | None,
+    reference_year: int | None,
+    daily_fn,
+) -> tuple[float, int]:
     year = reference_year if reference_year is not None else last_full_archive_year()
     bundle, collector = reference_climate_for_thermal(
         thermal, house_profile=house_profile, year=year
     )
+    from optimizer.house_gains import thermal_climate_kwargs
+
     params = heating_params_from_thermal(thermal)
-    area_m2 = float(params.get("solar_thermal_area_m2", 0.0) or 0.0)
-    hourly_wm2 = bundle.collector_surface_series(collector) if area_m2 > 0.0 else None
-    daily = daily_electric_kwh(
-        **params,
-        hourly_temperature_c=bundle.temperature_c,
-        hourly_collector_wm2=hourly_wm2,
-    )
+    daily = daily_fn(**params, **thermal_climate_kwargs(bundle, thermal, collector))
     return round(sum(daily), 3), year

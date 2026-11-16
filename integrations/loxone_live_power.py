@@ -13,6 +13,7 @@ from settings.ehal_marker_resolve import (
     marker_flex_enable,
     marker_flex_power,
     marker_get_evcs_nominal_current,
+    marker_sens_consumer_active,
     marker_sens_evcs_active_power,
     marker_sens_evcs_bat_capacity,
 )
@@ -44,13 +45,13 @@ def fetch_filter_native_start_hour(io_name: str):
 
 
 def resolve_consumer_nominal_power_kw(consumer: dict) -> float:
-    """Nennleistung (kW) aus live ``get_evcs_nominal_current`` (A) via push inbox."""
+    """Nennleistung (kW) aus live ``get_evcs_nominal_current`` (A) via push inbox.
+
+    The marker resolves only the nominal *current* fields (bare or qualified, e.g.
+    ``evcs.<Wallbox>.get_evcs_nominal_current`` on a fixed pair's view), so the value is
+    always in amperes and is converted with the pair's voltage and phases.
+    """
     fallback = float(consumer.get("nominal_power_kw", 0.0) or 0.0)
-    bindings = ehal_bindings(consumer)
-    amp_binding = (
-        "get_evcs_nominal_current" in bindings
-        or "sens_evcs_nominal_current" in bindings
-    )
     io_name = marker_get_evcs_nominal_current(consumer)
     if not io_name:
         return fallback
@@ -65,11 +66,8 @@ def resolve_consumer_nominal_power_kw(consumer: dict) -> float:
         )
         return fallback
 
-    if amp_binding:
-        voltage_v, phases = ev_nominal_power_conversion(consumer)
-        live = ampere_to_kw(float(value), voltage_v=voltage_v, phases=phases)
-    else:
-        live = float(value)
+    voltage_v, phases = ev_nominal_power_conversion(consumer)
+    live = ampere_to_kw(float(value), voltage_v=voltage_v, phases=phases)
 
     if live <= 0:
         logger.warning(
@@ -189,7 +187,12 @@ def _read_consumer_meter_kw(consumer: dict) -> float | None:
     alt_filter = marker_sens_filter_active(consumer)
     signal_type = str(inputs.get("signal_type") or consumer.get("signal_type", "power")).lower()
     nominal = float(consumer.get("nominal_power_kw", 0.0) or 0.0)
-    if signal_type == "binary":
+    if consumer.get("daily_target_source") == "heating_rod" and not io_name:
+        # A rod without its own meter: the run state × nominal power (planned as binary).
+        return _binary_meter_kw(
+            inputs, nominal, primary_io_name=marker_sens_consumer_active(consumer)
+        )
+    if signal_type == "binary" and consumer.get("daily_target_source") != "heating_rod":
         return _binary_meter_kw(
             inputs,
             nominal,

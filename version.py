@@ -7,31 +7,45 @@ from pathlib import Path
 
 # Local/UI may append a temporary debug id after -dev.N (e.g. 2.7.0-dev.48D1).
 # Image/packaging always normalize that away via normalize_for_image_build().
-__version__ = "2.8.0-dev.20"
+# Fork builds (stoeff99/Earnie) use X.Y.Z-stoeff.N so they never collide with upstream -dev.N.
+__version__ = "2.8.0-stoeff.1"
 
 # SemVer core + optional pre-release used for community candidates.
 # Trailing debug letters on -dev.N (e.g. D1) are intentionally not captured.
 _IMAGE_VERSION_RE = re.compile(
-    r"^(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc|dev)\.\d+)?)",
+    r"^(\d+\.\d+\.\d+(?:-(?:alpha|beta|rc|dev|stoeff)\.\d+)?)",
 )
+
+
+# Pre-release tags of dev builds (no "candidate" label, dev release path in CI).
+DEV_PRERELEASE_TAGS = ("-dev.", "-stoeff.")
 
 
 def display_version() -> str:
     """UI label; community pre-releases are marked as release candidates."""
     # Local/dev builds (incl. debug suffix) keep the raw string; alpha/beta/rc get "(candidate)".
-    if "-" in __version__ and not ("-dev." in __version__):
+    if "-" in __version__ and not any(tag in __version__ for tag in DEV_PRERELEASE_TAGS):
         return f"{__version__} (candidate)"
     return __version__
 
 
 def normalize_for_image_build(raw: str) -> str:
-    """Keep X.Y.Z or X.Y.Z-(alpha|beta|rc|dev).N; strip debug ids and junk like `` (wip)``."""
+    """Keep X.Y.Z or X.Y.Z-(alpha|beta|rc|dev|stoeff).N; strip debug ids and junk like `` (wip)``."""
     match = _IMAGE_VERSION_RE.match(str(raw or "").strip())
     return match.group(1) if match else "0.0.0"
 
 
+_FORK_VERSION_RE = re.compile(r"^(\d+\.\d+\.\d+)-stoeff\.(\d+)$")
+
+
+def package_version(image_version: str) -> str:
+    """PEP 440 form for setuptools: ``X.Y.Z-stoeff.N`` becomes the local version ``X.Y.Z+stoeff.N``."""
+    match = _FORK_VERSION_RE.match(image_version)
+    return f"{match.group(1)}+stoeff.{match.group(2)}" if match else image_version
+
+
 # setuptools / PEP 440 cannot use letter suffixes on -dev.N; Docker rewrite uses the same core.
-__version_pkg__ = normalize_for_image_build(__version__)
+__version_pkg__ = package_version(normalize_for_image_build(__version__))
 
 
 def rewrite_version_file_for_image(path: str | Path = "version.py") -> str:

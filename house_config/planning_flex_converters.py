@@ -9,6 +9,7 @@ from settings.flexible_consumers import reject_legacy_id
 from house_config.consumption_csv import consumer_uses_profile_csv
 from house_config.earnie_role import is_earnie_flex, is_earnie_known, is_earnie_manual
 from house_config.generic_schedule import is_continuous_schedule
+from house_config.profile_schema_defaults import consumer_default, ev_schedule_default
 
 if TYPE_CHECKING:
     from data.modeled_climate import ModeledClimateContext
@@ -161,15 +162,22 @@ def _house_ev_consumers(house_profile: dict) -> list[dict]:
 def planning_ev_to_milp(consumer: dict) -> dict:
     """Hausprofil-EV → flexible_consumers-Shape für MILP; Live-Loxone aus Profil."""
     sched = consumer["charging_schedule"]
-    min_on = max(1, int(consumer.get("min_on_quarterhours", 1) or 1))
+    min_on_default = int(consumer_default("min_on_quarterhours", consumer_type="ev"))
+    min_on = max(1, int(consumer.get("min_on_quarterhours", min_on_default) or min_on_default))
     min_power = float(consumer.get("min_power_kw", 0.0) or 0.0)
     capacity = float(consumer["battery_capacity_kwh"])
     charging_schedule = merge_ev_power_conversion_fields(
         {
             "enabled": True,
-            "forecast_when_absent": bool(sched.get("forecast_when_absent", True)),
-            "target_soc_percent": float(sched.get("target_soc_percent", 100.0)),
-            "charging_efficiency": float(sched.get("charging_efficiency", 0.95)),
+            "forecast_when_absent": bool(
+                sched.get("forecast_when_absent", ev_schedule_default("forecast_when_absent"))
+            ),
+            "target_soc_percent": float(
+                sched.get("target_soc_percent", ev_schedule_default("target_soc_percent"))
+            ),
+            "charging_efficiency": float(
+                sched.get("charging_efficiency", ev_schedule_default("charging_efficiency"))
+            ),
             "weekday": dict(sched.get("weekday") or {}),
             "weekend": dict(sched.get("weekend") or {}),
             "battery_capacity_kwh": capacity,
@@ -217,7 +225,39 @@ def planning_ev_to_milp(consumer: dict) -> dict:
         )
     reject_legacy_id(consumer, str(consumer["id"]))
     _attach_ehal_bindings(result, consumer)
+    _attach_wallbox_fields(result, consumer)
     return result
+
+
+def _attach_wallbox_fields(result: dict, consumer: dict) -> None:
+    """Charger of a fixed pair; car currents, assignment and wallboxes of a dynamic EV.
+
+    A fixed pair carries its wallbox as ``charger_id`` (multi-EV M4): the live adapters
+    address ``evcs.<Wallbox>.*`` through it (``ehal.qualified_ids.charger_id_of_ev``).
+    The daemon's live assignment builds the pair of a dynamic EV from the dynamic fields
+    (``runtime_store.ev_assignments``, multi-EV M3).
+    """
+    from house_config.wallboxes import (
+        ASSIGNMENT_FIXED,
+        EV_MAX_CURRENT_KEY,
+        EV_MIN_CURRENT_KEY,
+        EV_PHASES_KEY,
+        VIEW_CHARGER_ID_KEY,
+        VIEW_DYNAMIC_KEY,
+        WALLBOX_ASSIGNMENT_KEY,
+        is_dynamic_ev,
+    )
+
+    if not is_dynamic_ev(consumer):
+        assignment = consumer.get(WALLBOX_ASSIGNMENT_KEY)
+        if isinstance(assignment, dict) and assignment.get("mode") == ASSIGNMENT_FIXED:
+            # The loader's pair view (resolve_ev_pair) always sets it; missing fails loud.
+            result[VIEW_CHARGER_ID_KEY] = consumer[VIEW_CHARGER_ID_KEY]
+        return
+    for key in (EV_PHASES_KEY, EV_MIN_CURRENT_KEY, EV_MAX_CURRENT_KEY):
+        result[key] = consumer[key]
+    result[WALLBOX_ASSIGNMENT_KEY] = dict(consumer[WALLBOX_ASSIGNMENT_KEY])
+    result[VIEW_DYNAMIC_KEY] = [dict(w) for w in consumer[VIEW_DYNAMIC_KEY]]
 
 
 def planning_ev_consumers(house_profile: dict) -> list[dict]:
@@ -243,7 +283,8 @@ def _thermal_rc_params(consumer: dict) -> dict:
 def planning_thermal_rc_to_milp(consumer: dict) -> dict:
     """Hausprofil thermal_rc → MILP-flex mit thermal_control (Loxone via legacy overlay)."""
     rc = _thermal_rc_params(consumer)
-    min_on = max(4, int(consumer.get("min_on_quarterhours", 8) or 8))
+    min_on_default = int(consumer_default("min_on_quarterhours", consumer_type="thermal_rc"))
+    min_on = max(4, int(consumer.get("min_on_quarterhours", min_on_default) or min_on_default))
     reject_legacy_id(consumer, str(consumer["id"]))
     entry = {
         "id": str(consumer["id"]),
@@ -406,8 +447,15 @@ def _house_thermal_consumers(house_profile: dict) -> list[dict]:
 
 
 def thermal_optimizer_flex_enabled(consumer: dict) -> bool:
-    """True wenn thermal_annual über MILP statt PWM-Overlay laufen soll."""
+    """True wenn thermal_annual über MILP statt PWM-Overlay laufen soll.
+
+    A fuel heat source (gas, oil, …) draws no power, so it is never an electric flex.
+    """
+    from house_config.heat_source import consumer_heat_source, heat_source_is_electric
+
     if consumer.get("type") != "thermal_annual":
+        return False
+    if not heat_source_is_electric(consumer_heat_source(consumer)):
         return False
     nominal = float(consumer.get("nominal_power_kw", 0.0) or 0.0)
     if nominal <= 0.0:
@@ -469,6 +517,74 @@ def planning_thermal_consumers(house_profile: dict) -> list[dict]:
     ]
 
 
+def planning_heating_rod_to_milp(consumer: dict, part: dict) -> dict:
+    """Heating rod part (D1) → flat binary MILP entry with ``parent_id`` (SUSI P1).
+
+    The rod has no target of its own: with an electric parent it shares the parent's day
+    heat target (rod kWh count as heat, the heat pump's as kWh × JAZ); with a fuel parent
+    it earns the avoided fuel cost per kWh, capped at the day's heat demand
+    (``optimizer.thermal_flex_context``). Live plans it only with its EHAL signals
+    (``house_config.heating_rod_bindings.missing_live_signals``).
+    """
+    from house_config.heat_source import (
+        consumer_heat_source,
+        heat_source_efficiency,
+        heat_source_is_electric,
+        heating_rod_fuel_credit_cent_per_kwh,
+        part_kennung,
+    )
+    from house_config.heating_rod_bindings import rod_binding_entity
+
+    parent_id = str(consumer["id"])
+    heat_source = consumer_heat_source(consumer)
+    electric_parent = heat_source_is_electric(heat_source)
+    if electric_parent and not thermal_optimizer_flex_enabled(consumer):
+        raise ValueError(
+            f"thermal_annual '{parent_id}': Heizstab braucht die MILP-Planung der "
+            "Wärmequelle (nominal_power_kw > 0, optimizer_flex nicht false)."
+        )
+    nominal = float(part["nominal_power_kw"])
+    entry: dict = {
+        "id": part_kennung(parent_id, str(part["id"])),
+        "name": "Heizstab",
+        "type": "heating_rod",
+        "parent_id": parent_id,
+        "nominal_power_kw": nominal,
+        "min_power_kw": nominal,
+        "min_on_quarterhours": 1,
+        "daily_target_kwh": 0.0,
+        "daily_target_source": "heating_rod",
+        "signal_type": "binary",
+        "log_signal_type": "binary",
+        "optimizer_enabled": True,
+        "path_historical_log": "",
+        "loxone_outputs": {},
+        "loxone_inputs": {},
+        "parent_heat_electric": electric_parent,
+        "parent_heat_efficiency": heat_source_efficiency(heat_source),
+    }
+    if not electric_parent:
+        entry["fuel_credit_cent_per_kwh"] = heating_rod_fuel_credit_cent_per_kwh(heat_source)
+    window = consumer.get("thermal_flex_window")
+    if isinstance(window, dict) and window:
+        entry["thermal_flex_window"] = dict(window)
+    entity = rod_binding_entity(consumer)
+    if entity is not None:
+        entry["ehal_bindings"] = entity["ehal_bindings"]
+    return entry
+
+
+def planning_heating_rod_consumers(house_profile: dict) -> list[dict]:
+    from house_config.heat_source import heating_rod_part
+
+    rods: list[dict] = []
+    for consumer in _house_thermal_consumers(house_profile):
+        part = heating_rod_part(consumer)
+        if part is not None:
+            rods.append(planning_heating_rod_to_milp(consumer, part))
+    return rods
+
+
 def collect_planning_flex_consumers(house_profile: dict) -> list[dict]:
     """Generic MILP-flex + EV + thermal_annual + thermal_rc + optional pool_filter.
 
@@ -492,6 +608,7 @@ def collect_planning_flex_consumers(house_profile: dict) -> list[dict]:
         flex_generic
         + planning_ev_consumers(house_profile)
         + planning_thermal_consumers(house_profile)
+        + planning_heating_rod_consumers(house_profile)
         + thermal_rc_flex
         + filters
     )

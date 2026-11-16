@@ -66,9 +66,57 @@ def house_doc_for_save(doc: dict) -> dict:
     return out
 
 def save_house_profiles(doc: dict) -> None:
-    save_house_profiles_document(
-        resolve_house_profiles_json_path(), house_doc_for_save(doc)
+    payload = merge_inline_heating_systems(
+        house_doc_for_save(doc), read_existing=resolve_house_profiles_json_path()
     )
+    payload = route_ev_wallboxes_for_save(payload)
+    save_house_profiles_document(resolve_house_profiles_json_path(), payload)
+
+
+def route_ev_wallboxes_for_save(doc: dict) -> dict:
+    """EVs as editors hand them back → file shape; their wallbox side saved to components.json."""
+    from house_config.components_store import load_components_document
+    from house_config.wallboxes import (
+        WALLBOXES_KEY,
+        normalize_wallboxes,
+        route_evs_to_wallboxes,
+    )
+
+    components = load_components_document(resolve_components_json_path())
+    before = list(components.get(WALLBOXES_KEY) or [])
+    profiles, wallboxes = route_evs_to_wallboxes(list(doc.get("profiles") or []), before)
+    if normalize_wallboxes(wallboxes) != normalize_wallboxes(before):
+        _save_components_document({**components, WALLBOXES_KEY: wallboxes})
+    return {**doc, "profiles": profiles}
+
+
+def merge_inline_heating_systems(doc: dict, *, read_existing: str) -> dict:
+    """Move inline heat generation of every profile into its catalog entry (saved here)."""
+    from house_config.components_store import load_components_document
+    from house_config.heating_systems import (
+        HEATING_SYSTEMS_KEY,
+        assert_reference_systems_unshared,
+        merge_inline_reference_systems,
+        reference_ids_by_profile,
+    )
+
+    existing_raw = read_json_document(read_existing) if os.path.isfile(read_existing) else {}
+    existing_refs = reference_ids_by_profile(existing_raw)
+    components = load_components_document(resolve_components_json_path())
+    before = list(components.get(HEATING_SYSTEMS_KEY) or [])
+    catalog = before
+    profiles: list[dict] = []
+    for profile in doc.get("profiles") or []:
+        merged, catalog = merge_inline_reference_systems(
+            profile,
+            catalog,
+            existing_refs=existing_refs.get(str(profile.get("id") or "")),
+        )
+        profiles.append(merged)
+    assert_reference_systems_unshared({"profiles": profiles})
+    if catalog != before:
+        _save_components_document({**components, HEATING_SYSTEMS_KEY: catalog})
+    return {**doc, "profiles": profiles}
 
 def tariffs_json_path() -> str:
     return resolve_tariffs_json_path()
@@ -135,7 +183,21 @@ def load_tariffs_catalog_meta() -> dict:
         meta["catalog_as_of"] = doc["catalog_as_of"]
     return meta
 
-def upsert_house_profile(profile: dict) -> None:
+def _house_profiles_payload(profile: dict) -> dict:
+    """Everything ``upsert_house_profile`` derives before it writes (no write, no side effect).
+
+    Keys: ``path``, ``payload`` (the document to save), ``components``, ``catalog``,
+    ``catalog_changed`` (components.json would be rewritten), ``consumers``.
+    """
+    from house_config.components_store import load_components_document
+    from house_config.heating_systems import (
+        HEATING_SYSTEMS_KEY,
+        assert_reference_systems_unshared,
+        heating_systems_by_id,
+        merge_inline_reference_systems,
+        normalize_heating_systems,
+        reference_ids_by_profile,
+    )
     from house_config.label_uniqueness import assert_unique_label, assert_unique_labels_in_list
 
     path = resolve_house_profiles_json_path()
@@ -151,23 +213,95 @@ def upsert_house_profile(profile: dict) -> None:
     assert_unique_label(profile.get("label"), profiles, exclude_id=profile_id)
     consumers = list(profile.get("consumers") or [])
     assert_unique_labels_in_list(consumers)
+    # The form edits the reference heating system in place (components.json catalog).
+    components_path = resolve_components_json_path()
+    components = load_components_document(components_path)
+    profile, catalog = merge_inline_reference_systems(
+        profile,
+        list(components.get(HEATING_SYSTEMS_KEY) or []),
+        existing_refs=reference_ids_by_profile(raw).get(profile_id),
+    )
     from house_config.baseload import ensure_baseload_not_over_allocated
     from house_config.profiles_store import normalize_house_profiles_document
+    from house_config.wallboxes import (
+        WALLBOXES_KEY,
+        normalize_wallboxes,
+        route_evs_to_wallboxes,
+        wallboxes_by_id,
+    )
 
-    normalized = normalize_house_profiles_document({"profiles": [profile]})
+    # The EV form edits its fixed wallbox inline (components.json wallboxes[]).
+    stored_wallboxes = list(components.get(WALLBOXES_KEY) or [])
+    (profile,), wallboxes = route_evs_to_wallboxes([profile], stored_wallboxes)
+    normalized = normalize_house_profiles_document(
+        {"profiles": [profile]},
+        heating_systems=heating_systems_by_id({HEATING_SYSTEMS_KEY: catalog}),
+        wallboxes=wallboxes_by_id({WALLBOXES_KEY: wallboxes}),
+    )
     ensure_baseload_not_over_allocated(normalized["profiles"][profile_id])
     profiles = [p for p in profiles if p.get("id") != profile["id"]]
     profiles.append(profile)
+    # Checked again on save; here before the catalog is written.
+    assert_reference_systems_unshared({"profiles": profiles})
     payload: dict = {"profiles": profiles}
     plant = raw.get("plant")
     if isinstance(plant, dict) and plant:
         payload["plant"] = dict(plant)
     if "earnie_data_model" in raw:
         payload["earnie_data_model"] = raw["earnie_data_model"]
-    save_house_profiles_document(path, payload)
+    return {
+        "path": path,
+        "payload": payload,
+        "components": components,
+        "catalog": catalog,
+        # Compared in the normalised form the save writes: the form leaves out keys the
+        # save fills in (e.g. a rod part's internal_gain_factor), which is no change.
+        "catalog_changed": normalize_heating_systems(catalog)
+        != normalize_heating_systems(list(components.get(HEATING_SYSTEMS_KEY) or [])),
+        "wallboxes": wallboxes,
+        "wallboxes_changed": normalize_wallboxes(wallboxes)
+        != normalize_wallboxes(stored_wallboxes),
+        "consumers": consumers,
+    }
+
+
+def house_profile_write_pending(profile: dict) -> bool:
+    """Would ``upsert_house_profile(profile)`` change a file? (dry run, nothing written)
+
+    False when ``house_profiles.json`` already holds exactly what the save would
+    write (normalised form) and the heating catalog is unchanged. Used on the
+    first render of a profile so that opening the page does not rewrite the file.
+    """
+    from house_config.profiles_store import serialize_house_profiles_document
+
+    built = _house_profiles_payload(profile)
+    if (
+        built["catalog_changed"]
+        or built["wallboxes_changed"]
+        or not os.path.isfile(built["path"])
+    ):
+        return True
+    would_write = serialize_house_profiles_document(built["path"], built["payload"])
+    return would_write != read_json_document(built["path"])
+
+
+def upsert_house_profile(profile: dict) -> None:
+    from house_config.heating_systems import HEATING_SYSTEMS_KEY
+    from house_config.wallboxes import WALLBOXES_KEY
+
+    built = _house_profiles_payload(profile)
+    if built["catalog_changed"] or built["wallboxes_changed"]:
+        _save_components_document(
+            {
+                **built["components"],
+                HEATING_SYSTEMS_KEY: built["catalog"],
+                WALLBOXES_KEY: built["wallboxes"],
+            }
+        )
+    save_house_profiles_document(built["path"], built["payload"])
     from ui.house_config_entities_io import sync_powerstation_attached_from_consumers
 
-    sync_powerstation_attached_from_consumers(consumers)
+    sync_powerstation_attached_from_consumers(built["consumers"])
 
 
 def _scenario_ids_using_house_profile(profile_id: str) -> tuple[list[str], bool]:

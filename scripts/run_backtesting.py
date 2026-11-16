@@ -1,5 +1,6 @@
 # scripts/run_backtesting.py
 import os
+import sys
 
 if __name__ == "__main__":
     # Nur im Backtesting-Prozess — nicht beim Import aus der Streamlit-UI setzen.
@@ -26,6 +27,8 @@ from simulation.engine_scenario import scenario_standby_power_kw
 from simulation.backtesting_horizon import BOOK_PERIOD_KEY
 from simulation.period_clip import clip_results_map_to_period
 from simulation.reference_costs import reference_standby_power_kw
+from house_config.import_cap import parse_import_cap
+from simulation.capacity_charge import capacity_by_result, check_capacity_coverage
 from simulation.monthly_fees import fee_breakdowns_by_result_id
 from simulation.se_invoice_markdown import write_se_invoices
 from data.data_loader import resolve_simulation_window
@@ -51,11 +54,23 @@ from simulation.engine import (
     window_anchor_for_date,
     window_slot_datetimes,
 )
+from simulation.reference_costs import LADDER_L2
+from simulation.forecast_mode import PLAN_PRICE, parse_plan_forecast
+from simulation.reference_ladder import (
+    LadderReferenceSpec,
+    compute_ladder_reference,
+    ladder_soc_correction,
+    plan_ladder_reference_tasks,
+    rule_share,
+)
 from simulation.backtesting_progress import (
+    EXIT_CANCELLED,
+    BacktestingCancelled,
     clear_progress_dir,
     ordered_backtesting_result_ids,
     prepare_progress_dir,
     reorder_results_by_ids,
+    worker_cancel_requested,
     worker_progress_path,
 )
 from simulation.horizon_mode import (
@@ -163,18 +178,76 @@ def _price_load_window(
     end: pd.Timestamp,
     price_strategy: str,
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Erweitert den Preisabruf für Spiegelung/Prognose (Lookback + 24h-Fenster vor start)."""
+    """Preisabruf: Lookback für Spiegelung/Prognose, plus der Tag nach dem Ende.
+
+    Die Preissperre der Standard-Regeln rangiert am letzten Nachmittag auch den dann
+    veröffentlichten Folgetag (Spec ``rule-based-reference.md`` § 4.2).
+    """
+    load_end = end + pd.Timedelta(days=1)
     if price_strategy == PRICE_STRATEGY_PERFECT:
-        return start, end
+        return start, load_end
     from data.market_prices import MAX_MIRROR_LOOKBACK_DAYS
 
     load_start = (start - pd.Timedelta(days=MAX_MIRROR_LOOKBACK_DAYS + 1)).normalize()
-    return load_start, end
+    return load_start, load_end
+
+
+def scenarios_for_period(
+    scenarios: dict[str, dict],
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    horizon_mode: str,
+) -> dict[str, dict]:
+    """First / last sunrise book reach over the period edges: book only the in-period part.
+
+    See ``BOOK_PERIOD_KEY``; this way no clip shifts energy.
+    """
+    if horizon_mode != SUNRISE_WINDOW:
+        return scenarios
+    book_period = (
+        start.normalize().to_pydatetime(),
+        (end.normalize() + pd.Timedelta(days=1)).to_pydatetime(),
+    )
+    return {
+        scenario_id: {**params, BOOK_PERIOD_KEY: book_period}
+        for scenario_id, params in scenarios.items()
+    }
+
+
+def _selected_scenarios(scenarios: dict[str, dict], selected: list[str] | None) -> dict[str, dict]:
+    if not selected:
+        return scenarios
+    unknown = [sid for sid in selected if sid not in scenarios]
+    if unknown:
+        raise SystemExit(
+            f"Unbekanntes Szenario: {', '.join(unknown)}. Vorhanden: {', '.join(scenarios)}."
+        )
+    return {sid: scenarios[sid] for sid in dict.fromkeys(selected)}
+
+
+def load_run_prices(
+    load_start: pd.Timestamp,
+    load_end: pd.Timestamp,
+    sim_cfg: dict,
+    live_params: dict | None,
+) -> pd.DataFrame:
+    return load_market_prices(
+        load_start,
+        load_end,
+        sim_cfg,
+        timeout=config.get_global_timeout(default=30),
+        market_zone=live_params.get("market_zone") if live_params is not None else None,
+    )
 
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Backtesting der Energie-Optimierung auf historischen Loxone-Daten.",
+    )
+    parser.add_argument(
+        "--skip-historical-reference",
+        action="store_true",
+        help="Referenz ohne PV und Batterie nicht rechnen (Studien). Jedes Szenario braucht dann own_reference.",
     )
     parser.add_argument(
         "--start-month",
@@ -224,6 +297,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--plan-forecast",
+        metavar="EINGABEN",
+        help=(
+            "Forecast-Modus (nur sunrise_window): der MILP plant diese Eingaben auf Prognosen, "
+            "gebucht wird auf Ist-Werten. Kommagetrennt aus price, pv, load; 'price' braucht "
+            "--price-strategy mirror|forecast. Leer = Plan auf Ist-Werten, gleiches Ergebnis wie "
+            "ohne Schalter. Siehe docs/dev/se-forecast-mode.md."
+        ),
+    )
+    parser.add_argument(
         "--feature-dataset",
         metavar="CSV",
         help="Training-CSV für price_strategy=forecast (Standard: neuestes data/cache/price_training_*.csv).",
@@ -246,6 +329,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Fortschrittsverzeichnis für UI (pro Worker eine JSON-Datei); "
             "Legacy: einzelne *.json-Datei → Sibling .backtesting_workers/."
         ),
+    )
+    parser.add_argument(
+        "--scenario",
+        action="append",
+        metavar="ID",
+        help="Nur dieses Szenario rechnen (mehrfach möglich; Standard: alle).",
     )
     parser.add_argument(
         "--allow-stale-cons-data",
@@ -334,6 +423,45 @@ def _run_reference_worker(
     return ref_id, df_result
 
 
+def _run_ladder_worker(
+    ref_id: str,
+    step: str,
+    start_iso: str,
+    end_iso: str,
+    prices: pd.DataFrame,
+    scenario_params: dict,
+    progress_file: str | None,
+    progress_label: str,
+    horizon_mode: str,
+) -> tuple[str, pd.DataFrame, dict]:
+    """Top-Level-Worker für L1 / L2 (ProcessPoolExecutor, Windows spawn)."""
+    from data.cons_data_season_mirror import is_season_mirror_enabled
+
+    start = pd.Timestamp(start_iso)
+    end = pd.Timestamp(end_iso)
+    mirror_window = (start, end) if is_season_mirror_enabled() else None
+    cache = HistoricalDataCache(season_mirror_window=mirror_window)
+    cache.load()
+    worker_path = worker_progress_path(progress_file, ref_id)
+    result = compute_ladder_reference(
+        step,
+        start,
+        end,
+        scenario_params,
+        prices,
+        cache,
+        horizon_mode=horizon_mode,
+        on_progress=(
+            _make_progress_printer(
+                progress_label, worker_path, phase="reference", result_id=ref_id
+            )
+            if worker_path
+            else None
+        ),
+    )
+    return ref_id, result.frame, result.report()
+
+
 def _run_scenario_worker(
     name: str,
     params: dict,
@@ -346,6 +474,7 @@ def _run_scenario_worker(
     forecast_model_path: str | None,
     progress_file: str | None = None,
     progress_label: str | None = None,
+    plan_forecast: tuple[str, ...] | None = None,
 ) -> tuple[str, pd.DataFrame, object, list[dict], list[dict]]:
     """Top-Level-Worker für ProcessPoolExecutor (Windows spawn)."""
     from pathlib import Path
@@ -383,6 +512,7 @@ def _run_scenario_worker(
         price_resources=price_resources,
         snapshot_collector=snapshots,
         on_progress=on_progress,
+        plan_forecast=plan_forecast,
     )
     return name, df_result, plausibility, cbc_events, snapshots
 
@@ -400,7 +530,17 @@ def _run_parallel_backtesting(
     feature_dataset_path: str | None,
     forecast_model_path: str | None,
     progress_file: str | None = None,
-) -> tuple[dict[str, pd.DataFrame], dict[str, object], dict[str, list[dict]], list[dict]]:
+    *,
+    ladder_specs: list[LadderReferenceSpec],
+    plan_forecast: tuple[str, ...] | None = None,
+) -> tuple[
+    dict[str, pd.DataFrame],
+    dict[str, object],
+    dict[str, list[dict]],
+    list[dict],
+    dict[str, dict],
+]:
+    ladder_report: dict[str, dict] = {}
     ref_results: dict[str, pd.DataFrame] = {}
     sim_results: dict[str, pd.DataFrame] = {}
     plausibility_by_scenario: dict[str, object] = {}
@@ -409,7 +549,7 @@ def _run_parallel_backtesting(
     start_iso = start.isoformat()
     end_iso = end.isoformat()
 
-    ref_count = len(reference_specs)
+    ref_count = len(reference_specs) + len(ladder_specs)
     sim_count = len(scenarios)
     print(
         f"Parallele Berechnung: {ref_count} Referenz(en) + {sim_count} Szenarien "
@@ -432,6 +572,21 @@ def _run_parallel_backtesting(
                     horizon_mode,
                 )
             ] = ("ref", ref_id, label)
+        for spec in ladder_specs:
+            futures[
+                pool.submit(
+                    _run_ladder_worker,
+                    spec.ref_id,
+                    spec.step,
+                    start_iso,
+                    end_iso,
+                    prices,
+                    dict(spec.params),
+                    progress_file,
+                    spec.label,
+                    horizon_mode,
+                )
+            ] = ("ladder", spec.ref_id, spec.label)
         for name, params in scenarios.items():
             futures[
                 pool.submit(
@@ -447,6 +602,7 @@ def _run_parallel_backtesting(
                     forecast_model_path,
                     progress_file,
                     labels.get(name, name),
+                    plan_forecast,
                 )
             ] = ("sim", name, labels.get(name, name))
         for future in as_completed(futures):
@@ -455,6 +611,10 @@ def _run_parallel_backtesting(
                 if kind == "ref":
                     result_name, df_result = future.result()
                     ref_results[result_name] = df_result
+                elif kind == "ladder":
+                    result_name, df_result, report = future.result()
+                    ref_results[result_name] = df_result
+                    ladder_report[result_name] = report
                 else:
                     result_name, df_result, plausibility, cbc_events, snapshots = (
                         future.result()
@@ -463,9 +623,13 @@ def _run_parallel_backtesting(
                     plausibility_by_scenario[result_name] = plausibility
                     cbc_events_by_scenario[result_name] = cbc_events
                     window_snapshots.extend(snapshots)
+            except BacktestingCancelled:
+                # The other workers see the same marker and stop at their next hour.
+                pool.shutdown(wait=True, cancel_futures=True)
+                raise
             except Exception as exc:
                 raise RuntimeError(
-                    f"{'Referenz' if kind == 'ref' else 'Szenario'} "
+                    f"{'Szenario' if kind == 'sim' else 'Referenz'} "
                     f"'{display}' ({name}) fehlgeschlagen: {exc}"
                 ) from exc
             print(f"  Fertig: {display}")
@@ -474,6 +638,7 @@ def _run_parallel_backtesting(
         plausibility_by_scenario,
         cbc_events_by_scenario,
         window_snapshots,
+        ladder_report,
     )
 
 
@@ -531,6 +696,9 @@ def _make_progress_printer(
 
     def progress(current: int, total: int) -> None:
         nonlocal last_write_at, last_written_current
+        # The UI cancels a run by a marker next to the worker snapshots; stop at this hour.
+        if worker_cancel_requested(progress_file):
+            raise BacktestingCancelled(f"{scenario_name}: abgebrochen bei {current}/{total} h")
         pct = 100 * current / total if total else 0.0
         bar_width = 30
         filled = int(bar_width * current / total) if total else 0
@@ -664,6 +832,42 @@ def print_total_summary(results, labels: dict[str, str]):
     print("================================================")
 
 
+def print_ladder_summary(
+    results: dict[str, pd.DataFrame],
+    labels: dict[str, str],
+    *,
+    ladder_by_scenario: dict[str, dict[str, str]],
+    reference_by_scenario: dict[str, str],
+    ladder_report: dict[str, dict],
+    soc_correction: dict[str, dict],
+) -> None:
+    """Earnie gegen Standard-Regeln (L2 − L3 mit SoC-Bewertung) über den gebuchten Zeitraum.
+
+    Dazu der Anteil der Regeln an der Gesamtersparnis; L0 hat keinen Speicher und bleibt
+    ohne SoC-Term.
+    """
+    print("\n=== ERSPARNIS GEGEN STANDARD-REGELN ===")
+    for scenario_id, steps in ladder_by_scenario.items():
+        correction = soc_correction[scenario_id]["steps"][LADDER_L2]["correction_eur"]
+        l3 = float(results[scenario_id]["sim_cost"].sum())
+        l2 = float(results[steps[LADDER_L2]]["sim_cost"].sum()) + correction
+        l0 = float(results[reference_by_scenario[scenario_id]]["sim_cost"].sum())
+        share_value = rule_share(l0, l2, l3)
+        share = f"{share_value:.0%}" if share_value is not None else "—"
+        print(
+            f"  {labels.get(scenario_id, scenario_id):30s}: {l2 - l3:>+10,.2f} € "
+            f"(davon SoC am Periodenende {correction:+,.2f} €; "
+            f"Anteil der Regeln an der Gesamtersparnis: {share})"
+        )
+    for ref_id, report in ladder_report.items():
+        if report["plausibility_failed_windows"]:
+            print(
+                f"  WARNUNG {labels.get(ref_id, ref_id)}: "
+                f"{report['plausibility_failed_windows']} Fenster mit abweichender Energie"
+            )
+    print("=======================================")
+
+
 def _warn_cons_data_balance(scenarios: dict, start, end) -> None:
     """Log (not abort) when cons_data in the run window misses a profile's Jahresverbrauch."""
     from data import cons_data_store
@@ -676,7 +880,12 @@ def _warn_cons_data_balance(scenarios: dict, start, end) -> None:
         if not isinstance(profile, dict) or profile.get("id") in seen:
             continue
         seen.add(profile.get("id"))
-        balance = cons_data_window_balance(cons_df, profile, window=(start, end))
+        from house_config.heating_systems import baseload_reference_profile
+
+        # cons_data is the real house: compare it with the installed heating system.
+        balance = cons_data_window_balance(
+            cons_df, baseload_reference_profile(profile), window=(start, end)
+        )
         if balance["status"] != "ok":
             logging.warning("Verbrauchsbilanz Profil '%s': %s", profile.get("id"), balance["message"])
 
@@ -761,6 +970,14 @@ def main(argv: list[str] | None = None):
         raise SystemExit(
             f"--price-strategy {price_strategy} erfordert --horizon-mode {SUNRISE_WINDOW}."
         )
+    plan_forecast = parse_plan_forecast(args.plan_forecast)
+    if plan_forecast is not None:
+        if horizon_mode != SUNRISE_WINDOW:
+            raise SystemExit(f"--plan-forecast erfordert --horizon-mode {SUNRISE_WINDOW}.")
+        if (PLAN_PRICE in plan_forecast) != (price_strategy != PRICE_STRATEGY_PERFECT):
+            raise SystemExit(
+                f"--plan-forecast {PLAN_PRICE} und --price-strategy mirror|forecast gehören zusammen."
+            )
     feature_dataset_path, forecast_model_path = _resolve_price_paths(args)
     feature_dataset_str = str(feature_dataset_path) if feature_dataset_path else None
     forecast_model_str = str(forecast_model_path) if forecast_model_path else None
@@ -795,6 +1012,8 @@ def main(argv: list[str] | None = None):
             f"{start.date()} – {end.date()}"
         )
 
+    if plan_forecast is not None:
+        print(f"Forecast-Modus: Plan auf {', '.join(plan_forecast) or 'Ist-Werten'}, Buchung auf Ist-Werten.")
     if price_strategy != PRICE_STRATEGY_PERFECT:
         print(f"Preisstrategie grüne Zone: {price_strategy}")
         if feature_dataset_path is not None:
@@ -843,18 +1062,11 @@ def main(argv: list[str] | None = None):
 
     scenario_labels = config.get_scenario_labels()
     labels = _all_labels(scenario_labels)
-    scenarios = config.get_backtesting_scenarios()
-    if horizon_mode == SUNRISE_WINDOW:
-        # First / last sunrise book reach over the period edges: book only the
-        # in-period part (see ``BOOK_PERIOD_KEY``), so no clip shifts energy.
-        book_period = (
-            start.normalize().to_pydatetime(),
-            (end.normalize() + pd.Timedelta(days=1)).to_pydatetime(),
-        )
-        scenarios = {
-            scenario_id: {**params, BOOK_PERIOD_KEY: book_period}
-            for scenario_id, params in scenarios.items()
-        }
+    # The Live scenario and the reference plan always see all scenarios; the run only the chosen.
+    all_scenarios = scenarios_for_period(
+        config.get_backtesting_scenarios(), start, end, horizon_mode
+    )
+    scenarios = _selected_scenarios(all_scenarios, args.scenario)
     from house_config.baseload import (
         BaseloadOverAllocatedError,
         ensure_baseload_not_over_allocated,
@@ -874,19 +1086,10 @@ def main(argv: list[str] | None = None):
         scenarios, anchors, horizon_mode, start=start, end=end, cache=cache
     )
     live_scenario_id = config.get_live_scenario_id()
-    live_params = scenarios.get(live_scenario_id) or (
-        next(iter(scenarios.values())) if scenarios else None
+    live_params = all_scenarios.get(live_scenario_id) or (
+        next(iter(all_scenarios.values())) if all_scenarios else None
     )
-    market_zone = None
-    if live_params is not None:
-        market_zone = live_params.get("market_zone")
-    prices = load_market_prices(
-        price_load_start,
-        price_load_end,
-        sim_cfg,
-        timeout=config.get_global_timeout(default=30),
-        market_zone=market_zone,
-    )
+    prices = load_run_prices(price_load_start, price_load_end, sim_cfg, live_params)
 
     first_window = window_slot_datetimes(anchors[0])[0]
     last_window = window_slot_datetimes(anchors[-1])[-1]
@@ -921,19 +1124,51 @@ def main(argv: list[str] | None = None):
     total_hours = len(anchors) * 24
     reference_by_scenario, extra_ref_labels, extra_ref_specs = (
         plan_per_scenario_reference_tasks(
-            scenarios,
+            all_scenarios,
             live_scenario_id=live_scenario_id,
             scenario_labels=scenario_labels,
             own_reference_by_scenario=config.get_own_reference_flags(),
         )
     )
+    reference_by_scenario = {sid: reference_by_scenario[sid] for sid in scenarios}
+    used_references = set(reference_by_scenario.values())
+    if args.skip_historical_reference and HISTORICAL_REFERENCE_ID in used_references:
+        raise SystemExit(
+            "--skip-historical-reference: Ein Szenario nutzt die Referenz ohne PV und Batterie "
+            "(own_reference fehlt): "
+            + ", ".join(sid for sid, ref in reference_by_scenario.items() if ref == HISTORICAL_REFERENCE_ID)
+        )
+    extra_ref_specs = [spec for spec in extra_ref_specs if spec[0] in used_references]
     labels.update(extra_ref_labels)
+    ladder_by_scenario, ladder_specs = plan_ladder_reference_tasks(
+        scenarios, scenario_labels=scenario_labels
+    )
+    labels.update({spec.ref_id: spec.label for spec in ladder_specs})
+    # L0, L1 and L2 alike for what every result series needs (fees, fuel, invoices).
+    all_ref_specs = [
+        *extra_ref_specs,
+        *((spec.ref_id, spec.params, spec.label) for spec in ladder_specs),
+    ]
+    # A gap in a grid area's capacity charge fails here, not after the run.
+    for params in (
+        *scenarios.values(),
+        *(params for _ref_id, params, _label in all_ref_specs),
+        reference_params,
+    ):
+        check_capacity_coverage(params, start, end)
+    ladder_report: dict[str, dict] = {}
     reference_specs: list[tuple[str, dict | None, str, str]] = [
-        (
-            HISTORICAL_REFERENCE_ID,
-            reference_params,
-            HISTORICAL_REFERENCE_LABEL,
-            "_reference",
+        *(
+            []
+            if args.skip_historical_reference
+            else [
+                (
+                    HISTORICAL_REFERENCE_ID,
+                    reference_params,
+                    HISTORICAL_REFERENCE_LABEL,
+                    "_reference",
+                )
+            ]
         ),
         *[
             (ref_id, params, label, ref_id)
@@ -954,6 +1189,17 @@ def main(argv: list[str] | None = None):
                     "result_id": ref_id,
                 },
             )
+        for spec in ladder_specs:
+            _write_progress_file(
+                worker_progress_path(progress_file, spec.ref_id),
+                {
+                    "current": 0,
+                    "total": total_hours,
+                    "scenario": spec.label,
+                    "phase": "reference",
+                    "result_id": spec.ref_id,
+                },
+            )
         for name in scenarios:
             _write_progress_file(
                 worker_progress_path(progress_file, name),
@@ -972,24 +1218,25 @@ def main(argv: list[str] | None = None):
     sim_results: dict[str, pd.DataFrame] = {}
 
     if args.workers == 1:
-        print(f"Berechne Referenz '{HISTORICAL_REFERENCE_LABEL}'...")
-        ref_progress_path = worker_progress_path(progress_file, "_reference")
-        ref_progress = _make_progress_printer(
-            HISTORICAL_REFERENCE_LABEL,
-            ref_progress_path,
-            phase="reference",
-            result_id=HISTORICAL_REFERENCE_ID,
-        )
-        sim_results[HISTORICAL_REFERENCE_ID] = compute_historical_reference_costs(
-            start,
-            end,
-            prices,
-            ref_settings,
-            cache=cache,
-            scenario_params=reference_params,
-            horizon_mode=horizon_mode,
-            on_progress=ref_progress,
-        )
+        if not args.skip_historical_reference:
+            print(f"Berechne Referenz '{HISTORICAL_REFERENCE_LABEL}'...")
+            ref_progress_path = worker_progress_path(progress_file, "_reference")
+            ref_progress = _make_progress_printer(
+                HISTORICAL_REFERENCE_LABEL,
+                ref_progress_path,
+                phase="reference",
+                result_id=HISTORICAL_REFERENCE_ID,
+            )
+            sim_results[HISTORICAL_REFERENCE_ID] = compute_historical_reference_costs(
+                start,
+                end,
+                prices,
+                ref_settings,
+                cache=cache,
+                scenario_params=reference_params,
+                horizon_mode=horizon_mode,
+                on_progress=ref_progress,
+            )
         extra_refs, _extra_labels, reference_by_scenario = (
             build_per_scenario_reference_costs(
                 start,
@@ -1004,6 +1251,25 @@ def main(argv: list[str] | None = None):
             )
         )
         sim_results.update(extra_refs)
+        for spec in ladder_specs:
+            print(f"Berechne Referenz '{spec.label}'...")
+            ladder = compute_ladder_reference(
+                spec.step,
+                start,
+                end,
+                spec.params,
+                prices,
+                cache,
+                horizon_mode=horizon_mode,
+                on_progress=_make_progress_printer(
+                    spec.label,
+                    worker_progress_path(progress_file, spec.ref_id),
+                    phase="reference",
+                    result_id=spec.ref_id,
+                ),
+            )
+            sim_results[spec.ref_id] = ladder.frame
+            ladder_report[spec.ref_id] = ladder.report()
         for name, params in scenarios.items():
             display = labels.get(name, name)
             print(f"Simuliere Szenario: '{display}'...")
@@ -1023,6 +1289,7 @@ def main(argv: list[str] | None = None):
                 horizon_mode=horizon_mode,
                 price_resources=price_resources,
                 snapshot_collector=scenario_snapshots,
+                plan_forecast=plan_forecast,
             )
             sim_results[name] = df_result
             plausibility_by_scenario[name] = plausibility
@@ -1030,7 +1297,13 @@ def main(argv: list[str] | None = None):
             window_snapshots.extend(scenario_snapshots)
             print_plausibility_report(plausibility)
     else:
-        sim_results, plausibility_by_scenario, cbc_events_by_scenario, window_snapshots = (
+        (
+            sim_results,
+            plausibility_by_scenario,
+            cbc_events_by_scenario,
+            window_snapshots,
+            ladder_report,
+        ) = (
             _run_parallel_backtesting(
                 reference_specs,
                 scenarios,
@@ -1044,6 +1317,8 @@ def main(argv: list[str] | None = None):
                 feature_dataset_str,
                 forecast_model_str,
                 progress_file=progress_file,
+                ladder_specs=ladder_specs,
+                plan_forecast=plan_forecast,
             )
         )
         for name in scenarios:
@@ -1052,7 +1327,7 @@ def main(argv: list[str] | None = None):
     ordered_ids = ordered_backtesting_result_ids(
         scenarios,
         live_scenario_id=live_scenario_id,
-        extra_ref_ids=[ref_id for ref_id, _params, _label in extra_ref_specs],
+        extra_ref_ids=[ref_id for ref_id, _params, _label in all_ref_specs],
     )
     sim_results = reorder_results_by_ids(sim_results, ordered_ids)
 
@@ -1079,13 +1354,17 @@ def main(argv: list[str] | None = None):
         "horizon_mode": horizon_mode,
         "start_month": args.start_month.month if args.start_month is not None else None,
         "end_month": args.end_month.month if args.end_month is not None else None,
-        "backtesting_year": BACKTESTING_YEAR,
+        "backtesting_year": start.year,
         "price_source": price_source,
         "price_strategy": price_strategy,
         "season_mirror_to_last_month": is_season_mirror_enabled(),
         "reference_by_scenario": reference_by_scenario,
+        "ladder_by_scenario": ladder_by_scenario,
+        "ladder_report": ladder_report,
         "live_scenario_id": live_scenario_id,
     }
+    if plan_forecast is not None:
+        period_meta["plan_forecast"] = list(plan_forecast)
     from simulation.engine import collect_imported_pv_scenario_meta
 
     used_pv, missing_pv = collect_imported_pv_scenario_meta(scenarios)
@@ -1093,11 +1372,16 @@ def main(argv: list[str] | None = None):
         period_meta["imported_pv_scenario_ids"] = used_pv
     if missing_pv:
         period_meta["imported_pv_missing_scenario_ids"] = missing_pv
+    from house_config.heating_systems import heating_result_hints_by_scenario
+
+    heating_hints = heating_result_hints_by_scenario(scenarios)
+    if heating_hints:
+        period_meta["heating_hints_by_scenario"] = heating_hints
     fee_breakdown_by_scenario = fee_breakdowns_by_result_id(
         scenarios=scenarios,
         historical_params=reference_params,
         historical_id=HISTORICAL_REFERENCE_ID,
-        extra_ref_specs=extra_ref_specs,
+        extra_ref_specs=all_ref_specs,
     )
     monthly_fee_by_scenario = {
         sid: breakdown.total_monthly_eur
@@ -1109,15 +1393,50 @@ def main(argv: list[str] | None = None):
         sid: scenario_standby_power_kw(params) for sid, params in scenarios.items()
     }
     standby_kw_by_result.update(
-        {ref_id: reference_standby_power_kw(params) for ref_id, params, _label in extra_ref_specs}
+        {ref_id: reference_standby_power_kw(params) for ref_id, params, _label in all_ref_specs}
     )
     standby_kw_by_result[HISTORICAL_REFERENCE_ID] = reference_standby_power_kw(
         reference_params
     )
+    clipped_results = clip_results_map_to_period(
+        sim_results, period_meta["start"], period_meta["end"]
+    )
+    period_meta["ladder_soc_correction"] = {
+        scenario_id: ladder_soc_correction(
+            sim_results, scenario_id, steps, scenarios[scenario_id], period_meta["end"]
+        )
+        for scenario_id, steps in ladder_by_scenario.items()
+    }
+    print_ladder_summary(
+        clipped_results,
+        labels,
+        ladder_by_scenario=ladder_by_scenario,
+        reference_by_scenario=reference_by_scenario,
+        ladder_report=ladder_report,
+        soc_correction=period_meta["ladder_soc_correction"],
+    )
     booked_consumption = booked_consumption_by_result(
-        clip_results_map_to_period(sim_results, period_meta["start"], period_meta["end"]),
+        clipped_results,
         standby_kw_by_result=standby_kw_by_result,
         reference_by_scenario=dict(period_meta.get("reference_by_scenario") or {}),
+    )
+    from simulation.heat_fuel import heat_fuel_by_result
+
+    params_by_result = {
+        **scenarios,
+        **{ref_id: params for ref_id, params, _label in all_ref_specs},
+        HISTORICAL_REFERENCE_ID: reference_params,
+    }
+    heat_fuel = heat_fuel_by_result(clipped_results, params_by_result)
+    capacity = capacity_by_result(
+        clipped_results,
+        params_by_result,
+        # Only the optimized runs plan with the cap, the references carry the same params.
+        {
+            scenario_id: cap.cap_kw
+            for scenario_id, params in scenarios.items()
+            if (cap := parse_import_cap(params)) is not None
+        },
     )
     log_path = save_backtesting_log(
         sim_results,
@@ -1134,6 +1453,8 @@ def main(argv: list[str] | None = None):
         },
         prices=prices if sim_cfg.get("export_price_series", False) else None,
         booked_consumption=booked_consumption,
+        heat_fuel=heat_fuel,
+        capacity_by_scenario=capacity,
     )
     from runtime_store.usage_ping import note_scenarios_calculated
 
@@ -1147,10 +1468,11 @@ def main(argv: list[str] | None = None):
         scenarios=scenarios,
         historical_params=reference_params,
         historical_id=HISTORICAL_REFERENCE_ID,
-        extra_ref_specs=extra_ref_specs,
+        extra_ref_specs=all_ref_specs,
         period_start=start.date().isoformat(),
         period_end=end.date().isoformat(),
         booked_consumption_by_scenario=booked_consumption,
+        capacity_by_scenario=capacity,
     )
     if progress_file:
         clear_progress_dir(progress_file)
@@ -1160,4 +1482,9 @@ def main(argv: list[str] | None = None):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except BacktestingCancelled as cancelled:
+        # No log is written; the previous run's results stay as they were.
+        print(f"\nSzenario-Explorer abgebrochen ({cancelled}). Kein Log geschrieben.", flush=True)
+        sys.exit(EXIT_CANCELLED)

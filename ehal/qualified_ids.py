@@ -83,6 +83,9 @@ EV_KINDS = frozenset(
         "get_evcs_limit_soc",
         "get_evcs_soc_min_immediate",
         "get_evcs_ready_by_time",
+        # Vehicle-side plug state and charge power (multi-EV M3: plug match, test charge).
+        "sens_ev_connected",
+        "sens_ev_charge_power",
     }
 )
 
@@ -99,7 +102,8 @@ def consumer_namespace(consumer_id: str, consumer_type: str = "", kind: str = ""
     ctype = str(consumer_type or "").strip()
     if ctype == "ev":
         return NS_EVCS if kind in EVCS_KINDS else NS_EV
-    if ctype == "thermal_annual":
+    # The heating rod is a part of the thermal_annual consumer (composite Kennung, D1).
+    if ctype in ("thermal_annual", "heating_rod"):
         return NS_HEATPUMP
     if ctype == "thermal_rc" or str(consumer_id or "").strip() == POOL_FILTER_ID:
         return NS_POOL
@@ -107,10 +111,48 @@ def consumer_namespace(consumer_id: str, consumer_type: str = "", kind: str = ""
 
 
 def qualified_consumer_id(consumer_id: str, consumer_type: str, key: str) -> str:
-    """``<namespace>.<Kennung>.<kind>`` for a consumer binding key (any stored spelling)."""
+    """``<namespace>.<Kennung>.<kind>`` for a consumer binding key (any stored spelling).
+
+    A charger key that already names its wallbox (``evcs.<Wallbox>.<kind>``) keeps that
+    Kennung: an EV's view carries the bindings of its wallbox (multi-EV M4).
+    """
+    if consumer_type == "ev" and evcs_field_kind(key):
+        return str(key).strip()
     kind = field_kind(key)
     slug = flex_ehal_slug(consumer_id)
     return f"{consumer_namespace(consumer_id, consumer_type, kind)}.{slug}.{kind}"
+
+
+def charger_id_of_ev(consumer: dict) -> str:
+    """Charger Kennung (``evcs.<Kennung>.*``) of an EV view or a charger entry.
+
+    EV views carry ``charger_id`` = their wallbox (fixed pairs: ``resolve_ev_pair``, M4;
+    assigned dynamic EVs: ``assigned_dynamic_ev_view``, M3). A charger entry of a wallbox
+    (``dynamic_charger_consumers``) is the wallbox itself, so its ``id``. An EV view without
+    a wallbox (a dynamic EV that is not assigned) has no charger: ValueError.
+    """
+    explicit = str(consumer.get("charger_id") or "").strip()
+    if explicit:
+        return flex_ehal_slug(explicit)
+    if consumer.get("wallbox_assignment") is None and consumer.get("wallbox"):
+        return flex_ehal_slug(str(consumer.get("id") or ""))
+    raise ValueError(
+        f"E-Auto '{consumer.get('id')}': keine Wallbox zugeordnet — kein Ladepunkt "
+        "(evcs.<Wallbox>.*) zum Lesen oder Schreiben."
+    )
+
+
+def qualified_charger_id(charger_id: str, key: str) -> str:
+    """``evcs.<Kennung>.<kind>`` for a charger binding key (any stored spelling)."""
+    return f"{NS_EVCS}.{str(charger_id).strip()}.{field_kind(key)}"
+
+
+def evcs_field_kind(key: str) -> str | None:
+    """Charger kind of an entity-scoped ``evcs.<Kennung>.<kind>`` key, else ``None``."""
+    parts = str(key or "").split(".")
+    if len(parts) == 3 and parts[0] == NS_EVCS and parts[1] and parts[2] in EVCS_KINDS:
+        return parts[2]
+    return None
 
 
 def qualified_battery_id(battery_id: str, key: str) -> str:
@@ -153,6 +195,7 @@ DIGITAL_KINDS = frozenset(
     {
         "sens_absent_mode",
         "sens_evcs_connected",
+        "sens_ev_connected",
         "sens_heating_active",
         "sens_filter_active",
         "sens_consumer_active",

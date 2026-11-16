@@ -129,6 +129,13 @@ def _write_id_only_config(config_dir, *, battery_wear_enabled: bool = False) -> 
                         "inverter_id": "wr_main",
                     }
                 ],
+                "heating_systems": [
+                    {
+                        "id": "heating_efh",
+                        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
+                        "heating_power_kw": 10.5,
+                    }
+                ],
             }
         ),
         encoding="utf-8",
@@ -145,11 +152,13 @@ def _write_id_only_config(config_dir, *, battery_wear_enabled: bool = False) -> 
                         "latitude": 48.2,
                         "longitude": 11.0,
                         "netznutzung": {"area_id": "user_no_grid_fee"},
+                        "heating_enabled": True,
+                        "thermal": {},
                         "consumers": [
                             {
                                 "id": "heat",
                                 "type": "thermal_annual",
-                                "nominal_power_kw": 3.0,
+                                "heating_system_id": "heating_efh",
                             }
                         ],
                     }

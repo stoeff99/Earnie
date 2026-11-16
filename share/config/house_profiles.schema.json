@@ -15,7 +15,7 @@
     },
     "earnie_data_model": {
       "type": "integer",
-      "const": 5,
+      "const": 6,
       "description": "Earnie data-model version for config pack import/export."
     }
   },
@@ -59,6 +59,13 @@
               "default": 20,
               "description": "Force duration re-issued each control cycle (minutes)."
             }
+          }
+        },
+        "ha_fail_safe_values": {
+          "type": "object",
+          "description": "Optional values the generated HA package writes while status.json is unreachable: qualified set_* ID with a unit → value in EHAL units (W, A). A signal without a value is left alone.",
+          "additionalProperties": {
+            "type": "number"
           }
         },
         "grid_meter": {
@@ -309,29 +316,21 @@
       "type": "object",
       "properties": {
         "target_soc_percent": {
+          "default": 100.0,
           "type": "number",
           "minimum": 0,
           "maximum": 100
         },
         "charging_efficiency": {
+          "default": 0.95,
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 1
         },
         "forecast_when_absent": {
+          "default": true,
           "type": "boolean",
           "description": "true = bei Abwesenheit Ladebedarf prognostizieren (Loxone- und Config-Pfad). ReadyAt: Live-FertigUm wenn parsebar, sonst Config ready_by_hour."
-        },
-        "nominal_power_voltage_v": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Nennspannung für A→kW-Umrechnung (Default 230 V)."
-        },
-        "nominal_power_phases": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 3,
-          "description": "Phasenzahl für A→kW-Umrechnung (Default 1)."
         },
         "weekday": {
           "$ref": "#/definitions/day_schedule"
@@ -372,21 +371,26 @@
       ],
       "properties": {
         "water_volume_liters": {
+          "default": 6000.0,
           "type": "number",
           "exclusiveMinimum": 0
         },
         "setpoint_c": {
+          "default": 36.5,
           "type": "number"
         },
         "tolerance_c": {
+          "default": 1.0,
           "type": "number",
           "minimum": 0
         },
         "heat_loss_kw_per_k": {
+          "default": 0.1,
           "type": "number",
           "minimum": 0
         },
         "heating_efficiency": {
+          "default": 0.95,
           "type": "number",
           "exclusiveMinimum": 0,
           "maximum": 1
@@ -411,6 +415,101 @@
               }
             }
           }
+        }
+      }
+    },
+    "heat_storage": {
+      "type": "object",
+      "description": "Optionaler Wärmespeicher eines Heizsystems in components.json heating_systems[]; volume_liters 0 = kein Speicher.",
+      "properties": {
+        "volume_liters": {
+          "default": 0.0,
+          "type": "number",
+          "minimum": 0
+        },
+        "heat_loss_kw_per_k": {
+          "default": 0.02,
+          "type": "number",
+          "minimum": 0
+        },
+        "setpoint_c": {
+          "default": 45.0,
+          "type": "number"
+        },
+        "tolerance_c": {
+          "default": 5.0,
+          "type": "number",
+          "minimum": 0.1
+        }
+      }
+    },
+    "heat_source": {
+      "type": "object",
+      "description": "Hauptwärmequelle eines Heizsystems in components.json heating_systems[] (SUSI P1). efficiency = JAZ (Wärmepumpe) bzw. Nutzungsgrad; ohne Angabe gilt der Standardwert aus share/config/heat_source_defaults.json. fuel_price nur bei Brennstoffen, in der Einheit des Energieträgers (Öl ct/l, Gas und Fernwärme ct/kWh, Pellets €/t, Holz €/rm).",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "enum": [
+            "heat_pump",
+            "oil",
+            "gas",
+            "pellets",
+            "district_heat",
+            "wood",
+            "electric_direct"
+          ]
+        },
+        "heat_pump_type": {
+          "enum": [
+            "luft",
+            "erde",
+            "grundwasser"
+          ],
+          "description": "Nur bei type heat_pump (Pflicht)."
+        },
+        "efficiency": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "fuel_price": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "consumer_part": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "nominal_power_kw"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "enum": [
+            "heating_rod"
+          ]
+        },
+        "type": {
+          "enum": [
+            "heating_rod"
+          ]
+        },
+        "nominal_power_kw": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Elektrische Leistung des Heizstabs (η = 1 in den Wärmespeicher)."
+        },
+        "internal_gain_factor": {
+          "default": 0.0,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 0,
+          "description": "Anteil der elektrischen Energie, der als interner Gewinn im beheizten Volumen landet (SUSI P2). Heizstab: immer 0 — seine Wärme geht in den Wärmespeicher und ist dort modelliert."
         }
       }
     },
@@ -455,9 +554,22 @@
           "type": "boolean",
           "description": "true = historisches Profil nutzen und von Basislast abziehen; false = synthetisches Modell/Schedule."
         },
+        "internal_gain_factor": {
+          "default": 0.8,
+          "x-earnie-type-defaults": {
+            "generic": 0.8,
+            "ev": 0.0,
+            "thermal_annual": 0.0,
+            "thermal_rc": 0.0
+          },
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Anteil der elektrischen Energie dieses Verbrauchers, der als interner Gewinn im beheizten Volumen landet (SUSI P2; senkt den Heizbedarf). Default je Typ: generic 0,8 (Poolfilter pool_filter 0); ev und thermal_rc 0 (außen); thermal_annual immer 0 (die Wärme ist das Hausmodell). Fehlt der Schlüssel, gilt der Typ-Default (Migration dm5.house_gains schreibt ihn aus)."
+        },
         "absent_mode_enabled": {
           "type": "boolean",
-          "description": "true = bei wirksamem Abwesenheitsmodus (Live) diesen Verbraucher berücksichtigen (Ausschluss bzw. Haus-Wärme-Absenktemperatur)."
+          "description": "true = bei wirksamem Abwesenheitsmodus (Live) diesen Verbraucher ausschließen. Für thermal_annual nicht am Verbraucher: die Absenkung steht im Hausprofil (thermal.absent_mode_enabled)."
         },
         "schedule": {
           "$ref": "#/definitions/schedule"
@@ -467,6 +579,10 @@
         },
         "ehal_bindings": {
           "$ref": "#/definitions/ehal_bindings"
+        },
+        "heating_rod_ehal_bindings": {
+          "$ref": "#/definitions/ehal_bindings",
+          "description": "Nur thermal_annual: EHAL-Felder des Heizstabs (heatpump.<consumer_id>_heating_rod.set_enable, .sens_power_act, .sens_consumer_active). Eigene Map, damit sie nicht als Felder des Wärmeerzeugers gelten."
         },
         "loxone_inputs": {
           "$ref": "#/definitions/loxone_inputs"
@@ -492,11 +608,44 @@
         },
         "min_power_kw": {
           "type": "number",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Nicht für type ev (Datenmodell 6: Ladegrenzen als Strom, min_current_a)."
+        },
+        "phases": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3,
+          "description": "Nur ev: Phasen, mit denen das Auto lädt."
+        },
+        "min_current_a": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Nur ev: kleinster Ladestrom des Autos (A). Für ein Paar gilt der größere Mindeststrom von Auto und Wallbox."
+        },
+        "max_current_a": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Nur ev: größter Ladestrom des Autos (A). Für ein Paar gilt der kleinere Höchststrom; Leistung = Strom × Spannung der Wallbox × kleinere Phasenzahl."
+        },
+        "wallbox_assignment": {
+          "type": "object",
+          "description": "Nur ev: Zuordnung zur Wallbox (components.json wallboxes[]). mode fixed = feste Wallbox (wallbox_id).",
+          "required": ["mode"],
+          "additionalProperties": false,
+          "properties": {
+            "mode": { "enum": ["fixed", "dynamic"] },
+            "wallbox_id": { "type": "string" },
+            "wallbox_ids": { "type": "array", "items": { "type": "string" } }
+          }
         },
         "min_on_quarterhours": {
+          "default": 1,
+          "x-earnie-type-defaults": {
+            "thermal_rc": 8
+          },
           "type": "integer",
-          "minimum": 0
+          "minimum": 0,
+          "description": "Mindestlaufzeit in Viertelstunden. Default je Verbrauchertyp: x-earnie-type-defaults vor default."
         },
         "battery_capacity_kwh": {
           "type": "number",
@@ -528,56 +677,28 @@
           "exclusiveMinimum": 0,
           "maximum": 1
         },
-        "living_area_m2": {
-          "type": "number"
+        "cooling": {
+          "$ref": "#/definitions/cooling"
         },
-        "building_class": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 4
-        },
-        "hwb_kwh_m2": {
-          "type": "number",
-          "exclusiveMinimum": 0,
-          "description": "Optional: genauer Heizwärmebedarf HWB in kWh/m²a (überschreibt Gebäudeklasse)."
-        },
-        "heat_pump_type": {
-          "enum": [
-            "luft",
-            "erde"
-          ]
-        },
-        "persons": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "target_temp_c": {
-          "type": "number"
-        },
-        "absent_temp_reduction_c": {
-          "type": "number",
-          "minimum": 0,
-          "description": "Temperaturabsenkung (K) bei aktivem Abwesenheitsmodus (Live); effektiv = target_temp_c − Absenkung."
-        },
-        "absent_temp_c": {
-          "type": "number",
-          "description": "Legacy absolute Absenk-Solltemperatur (°C); beim Laden zu absent_temp_reduction_c migriert."
-        },
-        "heating_limit_c": {
-          "type": "number"
+        "heating_system_id": {
+          "type": "string",
+          "description": "thermal_annual: Verweis auf das Referenz-Heizsystem in components.json heating_systems[] (das eingebaute System; Live und Grundlast rechnen damit). Wärmequelle, Wärmespeicher, Heizstab, Nennleistung und Mindestlaufzeit stehen im Katalogeintrag, nicht am Verbraucher."
         },
         "solar_thermal_area_m2": {
+          "default": 0.0,
           "type": "number",
           "minimum": 0,
           "description": "Kollektorfläche in m² (0 = kein Solarthermie-Kollektor)."
         },
         "solar_thermal_tilt_deg": {
+          "default": 18.0,
           "type": "number",
           "minimum": 0,
           "maximum": 90,
           "description": "Neigung Solar-Kollektor: 0° flach, 90° Fassade."
         },
         "solar_thermal_azimuth_deg": {
+          "default": 0.0,
           "type": "number",
           "minimum": -180,
           "maximum": 180,
@@ -603,6 +724,150 @@
         }
       }
     },
+    "house_thermal": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Wärmetechnische Eigenschaften des Gebäudes (Abschnitt „Gebäude / Wärmebedarf“). Gilt für den Heizungs-Verbraucher thermal_annual des Hauses; bleibt bei heating_enabled=false gespeichert.",
+      "properties": {
+        "living_area_m2": {
+          "default": 120.0,
+          "type": "number"
+        },
+        "hwb_kwh_m2": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Optional: genauer Heizwärmebedarf HWB in kWh/m²a laut Energieausweis, bezogen auf die Bruttogrundfläche (überschreibt Gebäudeklasse). Jahres-Heizwärme = HWB × Bruttogrundfläche."
+        },
+        "gross_floor_area_m2": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Optional: Bruttogrundfläche BGF in m² (Energieausweis). Fehlt = Wohnfläche × 1,25 (SUSI). Bezugsfläche des HWB; die Wärmekapazität rechnet weiter mit der Wohnfläche."
+        },
+        "building_class": {
+          "default": 3,
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        },
+        "building_mass": {
+          "default": "mittel",
+          "enum": [
+            "leicht",
+            "mittel",
+            "schwer"
+          ],
+          "description": "Bauweise (wirksame Wärmekapazität nach DIN V 18599-2)."
+        },
+        "target_temp_c": {
+          "default": 21.5,
+          "type": "number"
+        },
+        "heating_limit_c": {
+          "default": 15.0,
+          "type": "number"
+        },
+        "house_tolerance_c": {
+          "default": 0.5,
+          "type": "number",
+          "minimum": 0.05,
+          "description": "Heizband-Toleranz (K) um target_temp_c."
+        },
+        "house_heat_loss_kw_per_k": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Optional: Haus-Verlustkoeffizient H (kW/K); fehlt oder 0 = aus HWB abgeleitet."
+        },
+        "absent_mode_enabled": {
+          "default": false,
+          "type": "boolean",
+          "description": "true = bei wirksamem Abwesenheitsmodus (Live) die Raumtemperatur um absent_temp_reduction_c absenken; Warmwasser dann 0."
+        },
+        "absent_temp_reduction_c": {
+          "default": 2.5,
+          "type": "number",
+          "minimum": 0,
+          "description": "Temperaturabsenkung (K) bei aktivem Abwesenheitsmodus (Live) und absent_mode_enabled; effektiv = target_temp_c − Absenkung."
+        },
+        "solar_gains": {
+          "$ref": "#/definitions/solar_gains"
+        }
+      }
+    },
+    "solar_gains": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Solare Gewinne durch die Fenster (SUSI P2). Fehlt der Block, gilt enabled=false (Migration dm5.house_gains schreibt ihn aus; neue Häuser starten mit enabled=true).",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "type": "boolean",
+          "description": "true = Einstrahlung durch die Fenster heizt das Haus mit (verschiebt Heizbedarf aus sonnigen Stunden; H wird so kalibriert, dass die Jahres-Heizwärme beim HWB bleibt)."
+        },
+        "window_area_m2": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Fensterfläche (Glas + Rahmen) je Himmelsrichtung in m², senkrecht. s = Süd, e = Ost, w = West, n = Nord.",
+          "properties": {
+            "s": { "default": 0.0, "type": "number", "minimum": 0 },
+            "e": { "default": 0.0, "type": "number", "minimum": 0 },
+            "w": { "default": 0.0, "type": "number", "minimum": 0 },
+            "n": { "default": 0.0, "type": "number", "minimum": 0 }
+          }
+        },
+        "g_value": {
+          "default": 0.6,
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Gesamtenergiedurchlassgrad der Verglasung (SUSI-Bereich 0,55–0,65)."
+        },
+        "frame_shading_factor": {
+          "default": 0.5,
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1,
+          "description": "Abminderung für Rahmenanteil, Laibung, Vorsprünge und Verschmutzung (SUSI-Bereich 0,4–0,65); nicht die Topologie (Horizont)."
+        }
+      }
+    },
+    "cooling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ],
+      "description": "Klimaanlage des Hauses als umgekehrte Wärmequelle am Haus-Wärme-Verbraucher (thermal_annual). Gerechnet wird sie nur mit cooling_enabled=true am Hausprofil; der Block bleibt bei false gespeichert.",
+      "properties": {
+        "type": {
+          "enum": [
+            "split",
+            "heat_pump"
+          ],
+          "description": "split = eigenes Klimagerät (Split oder Monoblock); heat_pump = die Wärmepumpe des Heizsystems kühlt (reversibel, nur mit Wärmequelle heat_pump)."
+        },
+        "seer": {
+          "default": 5.0,
+          "x-earnie-type-defaults": {
+            "split": 5.0,
+            "heat_pump": 4.0
+          },
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Saisonale Kälteleistungszahl (Kälte / Strom). Ohne Angabe: split 5,0, heat_pump 4,0 [Annahme: typische Geräte; Datenblatt-Wert eintragen]."
+        },
+        "cooling_power_kw": {
+          "default": 3.5,
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Kälteleistung in kW (thermisch, nicht Stromaufnahme)."
+        },
+        "setpoint_c": {
+          "default": 26.0,
+          "type": "number",
+          "description": "Raumtemperatur, die die Klimaanlage hält (°C)."
+        }
+      }
+    },
     "profile": {
       "type": "object",
       "required": [
@@ -617,14 +882,47 @@
           "type": "string"
         },
         "annual_kwh": {
+          "default": 4500.0,
           "type": "number",
           "minimum": 0
+        },
+        "heating_enabled": {
+          "default": false,
+          "type": "boolean",
+          "description": "Schalter „Heizung betrachten“. false: Abschnitt „Gebäude / Wärmebedarf“ und Heizungs-Verbraucher (thermal_annual) werden nicht geplant, der Heizungsverbrauch bleibt in der Grundlast; gespeicherte Werte bleiben erhalten. Fehlt der Schlüssel, gilt false — nur zulässig ohne thermal_annual-Verbraucher (sonst Migration dm5.house_thermal)."
+        },
+        "cooling_enabled": {
+          "default": false,
+          "type": "boolean",
+          "description": "Schalter „Kühlung betrachten“. true: die Klimaanlage (cooling am Haus-Wärme-Verbraucher) kühlt das Hausmodell, ihr Strom ist ein fester Verbraucher und wird von der Grundlast abgezogen. Unabhängig von heating_enabled. Fehlt der Schlüssel, gilt false."
+        },
+        "persons": {
+          "default": 2,
+          "type": "integer",
+          "minimum": 1,
+          "description": "Personen im Haushalt: Warmwasserbedarf der Heizung und Richtwert Haushaltsstrom (SUSI) neben dem Jahresverbrauch."
+        },
+        "baseload_internal_gain_factor": {
+          "default": 0.8,
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Anteil der Grundlast (Jahresverbrauch minus modellierte Verbraucher), der als interner Gewinn im beheizten Volumen landet (SUSI P2). Haushaltsstrom wird fast vollständig zu Raumwärme; Abzug für Außenbeleuchtung, Abluft, Warmwasser im Abfluss."
+        },
+        "vat_deductible": {
+          "default": false,
+          "type": "boolean",
+          "description": "Der Betreiber kann die Vorsteuer abziehen (Preise netto rechnen). Noch nicht ausgewertet: Earnie liest das Feld erst mit dem USt-Modell; bis dahin rechnet es unverändert."
+        },
+        "thermal": {
+          "$ref": "#/definitions/house_thermal"
         },
         "absent_mode": {
           "type": "boolean",
           "description": "Earnie-seitiger Abwesenheits-/Urlaubsmodus (Live; OR mit plant EHAL sens_absent_mode)."
         },
         "land": {
+          "default": "AT",
           "type": "string",
           "enum": [
             "AT",
@@ -666,10 +964,12 @@
           "additionalProperties": false
         },
         "latitude": {
+          "default": 48.2,
           "type": "number",
           "description": "Breitengrad (Standort Heizung/PV)."
         },
         "longitude": {
+          "default": 11.0,
           "type": "number",
           "description": "Längengrad (Standort Heizung/PV)."
         },
@@ -678,12 +978,14 @@
           "description": "Optional, abgeleitet aus land (AT/DE/CH) beim Laden — nicht manuell pflegen."
         },
         "default_pv_tilt": {
+          "default": 25.0,
           "type": "number",
           "minimum": 0,
           "maximum": 90,
           "description": "Vorschlag Dachneigung für ein neues PV-Feld (überschreibbar)."
         },
         "default_pv_azimuth": {
+          "default": 0.0,
           "type": "number",
           "minimum": -180,
           "maximum": 180,

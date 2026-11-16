@@ -74,35 +74,6 @@ def test_savings_view_preserves_full_horizon_totals_in_dict():
     assert sum(view["hourly_matched_baseline_cost_euro"]) == 21.0
 
 
-def test_day_cost_totals_from_segmented_savings_view():
-    """Chart 2 KPIs sum aligned hourly costs for the visible SA-day."""
-    from ui.chart_day_costs import day_cost_totals_for_chart
-
-    now = _dt(2026, 6, 15, 14, 0)
-    chart = compute_ui_chart_window(now, LAT, LON, TZ)
-    matrix = [
-        {"slot_datetime": _dt(2026, 6, 15, hour, 0)} for hour in range(14, 20)
-    ]
-    savings = {
-        "matched_baseline_cost_euro": 99.0,
-        "optimized_cost_euro": 88.0,
-        "hourly_matched_baseline_cost_euro": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-        "hourly_optimized_cost_euro": [0.5, 1.5, 2.5, 3.5, 4.5, 5.5],
-        "hourly_savings_euro": [0.5] * 6,
-        "hourly_matched_baseline_consumption_kwh": [1.0] * 6,
-        "hourly_optimized_consumption_kwh": [1.0] * 6,
-    }
-    view = savings_view_for_chart(savings, matrix, chart)
-    days = day_cost_totals_for_chart(
-        chart,
-        view["hourly_matched_baseline_cost_euro"],
-        view["hourly_optimized_cost_euro"],
-    )
-    assert len(days) == 1
-    assert days[0].matched_baseline_cost_euro == 21.0
-    assert days[0].optimized_cost_euro == 18.0
-
-
 def test_max_sunrise_cycle_offset_accepts_naive_log_timestamp(monkeypatch):
     """JSONL completed_at ist oft naive lokale Zeit ohne TZ-Offset."""
     from ui.chart_context import max_sunrise_cycle_offset
@@ -192,8 +163,8 @@ def test_build_display_savings_series_keeps_forecast_and_actual_separate():
     assert view["hourly_optimized_cost_euro"][2] == 1.0
 
 
-def test_build_display_savings_series_overlays_history_plan_in_gray_zone():
-    """Gray slots use log savings_snapshot plan costs — not MILP fill zeros."""
+def test_build_display_savings_series_has_no_plan_values_in_gray_zone():
+    """Gray slots hold no plan costs: realised savings come from the ledger (Ledger P7)."""
     slots = (
         _dt(2026, 6, 15, 10, 0),
         _dt(2026, 6, 15, 10, 15),
@@ -212,9 +183,6 @@ def test_build_display_savings_series_overlays_history_plan_in_gray_zone():
         missing_slot_count=0,
         window_start=slots[0],
         window_end_exclusive=slots[2],
-        slot_planned_matched_cost_euro=(0.20, 0.20),
-        slot_planned_optimized_cost_euro=(0.05, 0.05),
-        slot_planned_savings_euro=(0.15, 0.15),
     )
     display_ctx = ChartDisplayContext(
         rows=[],
@@ -242,11 +210,12 @@ def test_build_display_savings_series_overlays_history_plan_in_gray_zone():
         chart,
         savings_info=savings_info,
     )
-    assert view["hourly_matched_baseline_cost_euro"][:2] == [0.20, 0.20]
-    assert view["hourly_optimized_cost_euro"][:2] == [0.05, 0.05]
-    assert view["hourly_savings_euro"][:2] == [0.15, 0.15]
+    assert view["hourly_matched_baseline_cost_euro"][:2] == [0.0, 0.0]
+    assert view["hourly_optimized_cost_euro"][:2] == [0.0, 0.0]
+    assert view["hourly_savings_euro"][:2] == [0.0, 0.0]
     assert view["hourly_optimized_cost_euro"][2] == 1.0
     assert view["slot_actual_cost_euro"][:2] == [0.11, 0.12]
+    assert "ledger_savings" in view
 
 
 def test_build_display_savings_series_sa1_sa2_uses_matrix_indexed_values():

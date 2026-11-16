@@ -7,14 +7,48 @@ import config
 from data.market_prices import epex_prices_for_slots
 
 
+def _scenario_base_consumers(scenario_params: dict, *, optimizer_only: bool) -> list:
+    """Live consumers to merge under a scenario's own ones.
+
+    A scenario on another house profile than Live (another house, or a heating-system
+    variant of the Live house) plans only its own consumers: the Live consumers come
+    from the Live profile, so merging them would put e.g. the Live heating rod into a
+    variant without one. On the Live profile both lists hold the same consumers.
+    """
+    profile = scenario_params.get("_house_profile")
+    if profile and profile != config.get_resolved_runtime_settings().get("_house_profile"):
+        return []
+    return config.get_flexible_consumers(optimizer_only=optimizer_only)
+
+
 def _flexible_consumers_from_scenario(scenario_params: dict | None) -> list:
+    """Optimizer consumers of a scenario; dynamic EVs assigned by D9 (multi-EV M4)."""
+    from simulation.ev_wallbox_fcfs import assign_dynamic_evs_fcfs
+
+    if not scenario_params:
+        return assign_dynamic_evs_fcfs(config.get_flexible_consumers(optimizer_only=True))
+    return assign_dynamic_evs_fcfs(_scenario_planning_consumers(scenario_params))
+
+
+def _scenario_planning_consumers(scenario_params: dict) -> list:
+    """Optimizer consumers of a scenario before the D9 assignment of dynamic EVs."""
     from house_config.planning_flex_bridge import merge_flexible_consumers
 
-    base = config.get_flexible_consumers(optimizer_only=True)
-    if not scenario_params:
-        return base
+    base = _scenario_base_consumers(scenario_params, optimizer_only=True)
     planning = scenario_params.get("_planning_flex_consumers") or []
     return merge_flexible_consumers(base, planning)
+
+
+def scenario_ev_wallbox_lines(scenario_params: dict | None) -> list[str]:
+    """German D9 lines (which car charges where) of a scenario; ``[]`` without dynamic EVs."""
+    from simulation.ev_wallbox_fcfs import describe_fcfs, fcfs_assignment
+
+    consumers = (
+        _scenario_planning_consumers(scenario_params)
+        if scenario_params
+        else config.get_flexible_consumers(optimizer_only=True)
+    )
+    return describe_fcfs(fcfs_assignment(consumers))
 
 
 def resolved_flexible_consumers(
@@ -27,7 +61,7 @@ def resolved_flexible_consumers(
         return config.get_flexible_consumers(optimizer_only=optimizer_only)
     if optimizer_only:
         return _flexible_consumers_from_scenario(scenario_params)
-    base = config.get_flexible_consumers(optimizer_only=False)
+    base = _scenario_base_consumers(scenario_params, optimizer_only=False)
     planning = scenario_params.get("_planning_flex_consumers") or []
     if not planning:
         return base

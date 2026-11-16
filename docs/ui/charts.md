@@ -7,7 +7,7 @@ Diese Seite beschreibt Charts und Panels der Seite **Monitor** (Sunset-2-Sunset;
 | Bereich | Inhalt |
 |---------|--------|
 | Kopf | Seitentitel mit **?** (Geltungsbereich des Modus: Sunset-2-Sunset bzw. Szenario-Explorer) |
-| Sidebar | Hinweise zu Env und Setup, Fortschritt der Ersteinrichtung, **Konfiguration speichern / laden** (ZIP); unten **Info / About** (Banner, Version, Kontakt). PV- und Batterie-Parameter liegen im **Szenarienkonfigurator** bzw. Hauskonfigurator, nicht in der Sidebar. |
+| Sidebar | Hinweise zu Env und Setup, Fortschritt der Ersteinrichtung, **Sichern & Übertragen** (Konfigurations-ZIP, Support-Paket); unten **Info / About** (Banner, Version, Kontakt). PV- und Batterie-Parameter liegen im **Szenarienkonfigurator** bzw. Hauskonfigurator, nicht in der Sidebar. |
 | Menü | `st.navigation` mit den Abschnitten Live-Cockpit, Konfiguration, Daemon Control |
 | Charts | Reihenfolge: Chart 1 → Navigation ←/→ → Sankey → Chart 2 → Simulations-Tabelle → Energievergleich (Expander) |
 | Sankey | Live-Energiefluss unter Chart 1 (nach der Navigation). Anlagenwerte (Plant) kommen über das EHAL-Backend; Flex und EV-SoC siehe [Energiefluss](#energiefluss-live-sankey). |
@@ -24,7 +24,7 @@ Wartet die Seite auf **main.py**, erscheint **über** den Charts ein blauer Sync
 | Spur | Darstellung | Bedeutung |
 |------|-------------|-----------|
 | PV | Gelbe Linie | PV-Prognose (durchgängig über grau, neutral und grün) |
-| Energiebilanz | Rauf/Runter-Balken (gestapelt) | **↑ kräftig:** PV (gelb), Netzbezug (blau). **↓ kräftig:** Grundlast (braun), Flex. **Gedämpft:** Batterie→Last grün, Netz→Batterie cyan, PV→Batterie gelb-grün, PV→Netz blassgelb. Rauf- und Runter-Säule sind gleich hoch. |
+| Energiebilanz | Rauf/Runter-Balken (gestapelt) | **↑ kräftig:** PV (gelb), Netzbezug (blau). **↓ kräftig:** Grundlast (braun), Flex. **Gedämpft:** Batterie→Last grün, Batterie→Netz cyan (↑ als Entladung, ↓ als Einspeisung), Netz→Batterie cyan, PV→Batterie gelb-grün, PV→Netz blassgelb. Rauf- und Runter-Säule sind gleich hoch. |
 
 ### Rauf/Runter-Algorithmus (Wasserfall)
 
@@ -50,6 +50,7 @@ Die gedämpften Segmente im Chart:
 | `export_pv` | Blassgelb | PV direkt ins Netz |
 | `export_battery` | Cyan | Einspeisung aus Entladung (Batterie→Netz) |
 | `battery_discharge_load` | Grün | Entladen in die Last (0-Bilanz) |
+| `battery_discharge_export` | Cyan | Entladen ins Netz (↑, gleiche kW wie `export_battery` ↓), z. B. bei Zwangsentladen |
 
 Dieselbe Slot-Zuordnung nutzt auch die Auswertung [Analyse Verbrauch & Kosten](#analyse-verbrauch--kosten-live-cockpit).
 
@@ -67,6 +68,7 @@ PV, Last, Netz, Batterieflüsse und **Flex-Verbraucher** zeigen im grauen Bereic
 - **Nutzung der Mittelwerte:** Chart 1, Verbrauch & Kosten und die Ist-Seite von Soll/Ist nutzen diese Mittelwerte, sobald `sample_count ≥ 3`. Andernfalls dient die Probe am Entscheidungspunkt (`consumption_snapshot`) als Fallback. Ältere Log-Zeilen ohne `closed_interval` bleiben Punktproben.
 - **Loxone-Zähler (optional, VO-Push):** Sind die Energie-Felder aktiviert (`sens_pv_energy` / `sens_grid_energy_*` bzw. `consumer.*.sens_energy_total`), liest der Sampler die vom Miniserver gepushten Zählerstände aus der Inbox. Für diese Kanäle setzt er die mittlere Slot-Leistung aus ΔkWh / 0,25 h (`ist_power_source`: `counter`). Veraltete oder fehlende Zähler (kein Push bzw. älter als 3 × VO-Repeat) lassen den Kanal auf dem Leistungsmittel. Dasselbe gilt für gemeinsame Zähler mit `subtract_consumer_ids`.
 - **HA-Energiezähler (optional):** Zusätzliche Entities `sens_pv_energy` / `sens_grid_energy_import` / `sens_grid_energy_export` in `plant.ehal_bindings` (`device_class=energy`, bevorzugt `state_class=total_increasing`). Für PV und Netz gilt derselbe Vertrag ΔE / 0,25 h; Batterie und Flex bleiben auf dem Leistungsmittel.
+- **Zähler im Ersparnis-Buch:** Stammt PV oder Netz einer Viertelstunde aus einem Zähler, rechnet das Ersparnis-Buch die Hauslast aus der Bilanz PV + Netz + Batterie. So haben beide Seiten des Vergleichs denselben Verbrauch.
 - **Batterie:** Die Aufteilung in Laden und Einspeisung ergibt sich aus der gemessenen Batterieleistung (`Ist Batterie-Leistung (kW)`), nicht aus `battery_plan_kw`. Widerspricht das Ist-Vorzeichen dem SoC-Schritt zum nächsten Log-Slot und fehlt ein brauchbares Slot-Mittel, leitet Earnie die Batterieleistung für die Balken aus dem SoC-Delta ab.
 
 **PV im grauen Bereich:** Eine Prognose-Linie läuft über alle Zonen. Sie zeigt die PV-Prognose (Forecast.Solar bzw. Solcast, siehe [MQTT-Anbindung](../einrichtung/mqtt.md#pv-prognose-von-solcast-loxberry-plugin-pv-solcast-ng)) **vor** dem Live-Overlay (Feld `forecast_pv_kw` im Log). Die PV-Balken (Rauf-Seite der Energiebilanz) nutzen im Log dagegen den **Ist**-Wert (`PV-Ist (kW)` aus `consumption_snapshot.pv_kw`). Die Abweichung ist ab dem nächsten Worker-Lauf nach dem Fix sichtbar. Ältere Log-Einträge können identische Werte haben, weil früher der Ist-Wert fälschlich als Prognose geloggt wurde.
@@ -85,9 +87,9 @@ PV, Last, Netz, Batterieflüsse und **Flex-Verbraucher** zeigen im grauen Bereic
 
 | Spur | Darstellung | Bedeutung |
 |------|-------------|-----------|
-| SoC (optimiert) | Grüne Linie (`_HSL_SOC` in `ui/chart_colors.py`). Bei ≥2 SoC-Trägern (Haus-ESS, physische Powerstation, virtuelle Powerstation) eine Linie pro Entität (`SoC · {Bezeichnung}`, Farbvarianten um `_HSL_SOC`). Virtuelle Powerstations erscheinen als sehr schmale **gestrichelte** Linien (Dash-Zyklus, nie durchgezogen), damit sich überlappende Reserven unterscheiden lassen. | Simulierter Batterie- bzw. Reserve-SOC: Haus-ESS live/MILP; physische `standby_backup`-PS live plus Forecast aus dem Standby-Plan (Inseln/Laden); virtuelle PS = `stored_kwh` / Kapazität, Forecast aus der Attribution des Haus-Batterieplans |
+| SoC (optimiert) | Grüne Linie (`_HSL_SOC` in `ui/chart_colors.py`). Bei ≥2 SoC-Trägern (Haus-ESS, physische Powerstation, virtuelle Powerstation) eine Linie pro Entität (`SoC · {Bezeichnung}`, Farbvarianten um `_HSL_SOC`). Die **Linienstärke** skaliert mit der Speicherkapazität (≤5 kWh: 1 px, ≤10 kWh: 1,5 px, ≤15 kWh: 2 px, darüber 2,5 px). Virtuelle Powerstations erscheinen zusätzlich als **gestrichelte** Linien (Dash-Zyklus, nie durchgezogen), damit sich überlappende Reserven unterscheiden lassen. | Simulierter Batterie- bzw. Reserve-SOC: Haus-ESS live/MILP; physische `standby_backup`-PS live plus Forecast aus dem Standby-Plan (Inseln/Laden); virtuelle PS = `stored_kwh` / Kapazität, Forecast aus der Attribution des Haus-Batterieplans |
 | ESS-Mode-Underlay | Dickere, halbtransparente Linie hinter dem SoC | Cyan = Entladesperre / Hold bzw. Zwangsleistung unter 5 % von `max_power_kw`; Blau = Zwangsladen ≥ 5 %; Magenta = Zwangsentladen ≥ 5 %; Automatik ohne Underlay. Das Underlay erscheint nur am Primär-SoC. |
-| SoC BL Ziel | Dieselbe Farbe, gestrichelt ab **Jetzt** (nicht davor) | Referenz-SOC (Baseline) der Primärbatterie; Anker ist der Log-SOC am Jetzt-Marker |
+| SoC BL Ziel | Dieselbe Farbe, gepunktet, eine durchgehende Linie | Speicherstand der Vergleichsbatterie aus dem Ersparnis-Buch: links von **Jetzt** der gebuchte Verlauf des laufenden SA-Tages, rechts davon der Plan, der an derselben Stelle weiterläuft. Die Linie springt deshalb weder bei **Jetzt** noch beim SA-Tageswechsel. Ohne Ersparnis-Buch (erster Start, nicht lesbar) gibt es keine Linie, ein Hinweis unter dem Chart sagt das. Im Szenario-Explorer gibt es kein Buch: Dort beginnt die Linie bei **Jetzt** am Log-SOC. |
 | Preis (rot) | Strompreis skaliert | Hover: Cent/kWh |
 | Einspeisepreis (orange, gestrichelt) | Einspeisevergütung skaliert | Hover: Cent/kWh |
 | Wärmepumpe: Komfort-Boost / Sperre | Schmales Band oberhalb von 100 % auf der SoC-/Preisachse, nur geplante Slots: orange = Boost, grau = Sperre | Entscheidungen von `set_heat_boost` / `set_enable` für taktende Wärmepumpen; Hover zeigt den Preis. Siehe [Komfort-Boost und Sperre](../konfiguration/flexible-verbraucher.md#waermepumpe-boost-sperre). |
@@ -110,11 +112,15 @@ Soll/Ist-Icons erscheinen im grauen Log-Bereich, und zwar nur für Slots mit ech
 
 | Symbol | Kategorie | Farbe | Bedeutung |
 |--------|-----------|-------|-----------|
-| ▲ | Hinweis | gelb | Unkritische Abweichung (z. B. Wärmepumpe: Freigabe ohne Anlauf) |
-| ◆ | Warnung | orange | Erwartete Abweichung – Loxone handelt bewusst anders |
+| ▲ | Hinweis | grün | Unkritische Abweichung (z. B. Wärmepumpe: Freigabe ohne Anlauf) |
+| ◆ | Warnung | gelb | Erwartete Abweichung (z. B. SwimSpa im Sollband, Zwangs-Laden lädt 60–80 % der Zielenergie) |
 | ⬡ | Fehler | rot | Anweisung von Earnie nicht befolgt |
 
 Die Marker liegen oberhalb der Chart-Fläche; beim **Hover** erscheinen Kategorie-Label und Regeltext. Pro Slot sind mehrere Icons möglich (verschiedene Scopes, z. B. Batterie und E-Auto).
+
+Beim Zwangs-Laden vergleicht Earnie die im Slot tatsächlich geladene Energie (mittlere Ladeleistung × Slotdauer) mit der Zielenergie (Soll-Leistung × Slotdauer). Ab 80 % gilt der Slot als erfüllt. Zwischen 60 % und 80 % erscheint eine gelbe Warnung, darunter ein roter Fehler. Beide Marker erscheinen nur, wenn im Slot zusätzlich mehr als 0,1 kWh fehlen. Kleine Zwangsladungen lösen deshalb keinen Marker aus, auch wenn der Anteil niedrig ist. Der Tooltip nennt den erreichten Anteil sowie Soll und Ist in kWh. Die Schwellen stehen je Regel als `params.max_ratio` (Anteil) und `params.min_shortfall_kwh` (Mindest-Fehlmenge) in den beiden Zwangs-Laden-Regeln. Fehlt für den Slot der gemessene Mittelwert, bewertet Earnie die Zwangsladung nicht, weil ein Momentanwert keine Energie ergibt.
+
+Die Wärmepumpe („Freigabe, aber nicht angesprungen“) bewertet Earnie genauso: Der grüne Hinweis erscheint, wenn die Wärmepumpe im Slot weniger als 50 % der geplanten Energie aufgenommen hat **und** mehr als 0,1 kWh fehlen. Läuft sie nur etwas schwächer als geplant, erscheint kein Hinweis. Beide Schwellen stehen getrennt von den Zwangs-Laden-Regeln als `params.max_ratio` und `params.min_shortfall_kwh` in der Wärmepumpen-Regel. Auch hier gibt es ohne gemessenen Slot-Mittelwert kein Urteil.
 
 **Regelwerk:** `config/deviation_rules.json` (Schema: `deviation_rules.schema.json`). Pflegehinweis: [Spec Soll-Ist §5.3](../dev/done/soll-ist-abweichung.md).
 
@@ -127,6 +133,7 @@ Die Marker liegen oberhalb der Chart-Fläche; beim **Hover** erscheinen Kategori
 | `eauto_should_charge` | eauto | Fehler |
 | `battery_forced_discharge_missing` | battery | Fehler |
 | `battery_forced_charge_missing` | battery | Fehler |
+| `battery_forced_charge_target_missed` | battery | Warnung |
 | `waermepumpe_enable_no_start` | waermepumpe | Hinweis |
 | `swimspa_filter_should_run_missing` | pool_filter | Fehler |
 | `swimspa_filter_runs_unexpectedly` | pool_filter | Fehler |
@@ -141,18 +148,47 @@ Die Marker liegen oberhalb der Chart-Fläche; beim **Hover** erscheinen Kategori
 
 Die kompakten Buttons stehen in einer Zeile **ohne** Fließtext dazwischen (mobil-tauglich) und liegen **zwischen Chart 1 und Sankey**; Chart 2 folgt darunter. Der Desktop zeigt standardmäßig SA₀→SA₂, mobil bleibt es bei 24-h-Segmenten.
 
-## Chart 2: Kumulierte Kosten & Verbrauch
+## Chart 2: Kontostand mit und ohne Earnie
 
-**Überschrift** mit **?** (Ist vs. Prognose, orange Lücken). Im Sunset-2-Sunset-Fenster sind Ist und Prognose getrennte Kurven:
+**Überschrift** „Kontostand: mit und ohne Earnie“ mit **?**. Chart 2 ist eine Kontoansicht: Die Linien zeigen den **Kontostand seit Fensterstart**, also Stromkosten und Einspeiseerlöse zu den Preisen des Ersparnis-Buchs, ohne Grund- und Netzgebühren. Beide Linien beginnen bei 0 €; fällt eine Linie, wird bezahlt, steigt sie, kommt Geld durch Einspeisung herein. Es ist weder ein Bankkonto noch die Stromrechnung.
 
-| Bereich | Kurven |
-|---------|--------|
-| Grau (Log) | **Ist bisher:** kumuliert aus dem Produktiv-Log. **Ersparnis bisher:** geplante Differenz BL−Opt der abgelaufenen Slots (pro SA-Tag, Neustart bei SA₁). |
-| Neutral/Grün | **Prognose:** BL Ziel / optimiert ab der Log-Grenze (an die Ist-Kurve angeschlossen) |
+| Bereich | Mit Earnie | Vergleich |
+|---------|------------|-----------|
+| Links von **Jetzt** | gebuchte Kosten aus dem Ersparnis-Buch („Mit Earnie (gebucht)“) | Vergleichsanlage des Buchs: gleiche PV, gleiche Preise, je Gerät der gleiche Tagesverbrauch zur gewohnten Zeit, Batterie im Herstellermodus („Ohne Earnie (gebucht)“) |
+| Rechts von **Jetzt** | Plan („Optimiert (Plan)“, gestrichelt) | **BL Ziel** ab dem Speicherstand der Vergleichsbatterie („BL Ziel (Plan)“, gestrichelt) |
 
-Fehlende Log-Slots sind orange markiert; die Ist-Kurven haben dort Lücken.
+Die Vergleichslinie ändert bei **Jetzt** also ihre Bedeutung: links die Vergleichsanlage des Buchs, rechts BL Ziel. Der **?**-Hilfetext sagt das ebenfalls.
 
-Die Kennzahlen **BL Ziel** und **Optimiert** (Annotationen) beziehen sich **pro SA-Tag**: mobil nur auf den sichtbaren Tag, am Desktop (SA₀→SA₂) auf zwei Spalten (SA₀→SA₁ | SA₁→SA₂). Am **laufenden Tag** kommen **Ersparnis bisher** (SA bis Jetzt, geplante Differenz der abgelaufenen Slots) und **Ersparnis erwartet** (ganzer SA-Tag bis SA₁ bzw. SA₂) hinzu. Der MILP-Matching-Horizont (Jetzt → SA₂) bleibt davon unberührt, siehe [Energievergleich](#expander-energievergleich-baseline-vs-optimierung). Linienfarben: `_HSL_COST_*` in `ui/chart_colors.py`.
+**Abgeschlossene Tage und laufender Tag.** Das Buch rechnet jeden Tag nach, wenn er abgeschlossen ist: Erst dann steht fest, wie viel Energie jedes Gerät an diesem Tag bekommen hat, und erst dann lässt sich diese Energie in die gewohnte Zeit legen. Für den laufenden Tag zählt bis dahin nur die Batterie; verschobene Geräte, E-Auto und Heizstab kommen beim Tagesabschluss dazu. Links von **Jetzt** kann sich die Vergleichslinie eines Tages deshalb mit seinem Abschluss noch ändern.
+
+**SoC am Ende.** Plan und BL Ziel starten bei **Jetzt** von verschiedenen Speicherständen. Der Abstand der Linien enthält deshalb auch den Wert der Energie, die der Plan zu Beginn mehr oder weniger im Speicher hat. Das Label „SoC am Ende“ nennt, wie sich der Wert dieses Speicherabstands bis zum Fensterende ändert, mit derselben Formel wie die SoC-Korrektur des Buchs. Es steckt wie diese in keinem Abstand: Erst „Erwartet“ und „SoC am Ende“ zusammen zeigen, was der Plan gegenüber BL Ziel bringt.
+
+**Verankerung.** Ein Umschalter über dem Chart wählt, wie die Vergleichslinie liegt; die Wahl bleibt für die Sitzung erhalten.
+
+- **Ist bei Jetzt** (Standard): Die Vergleichslinie ist so verschoben, dass sich beide Linien bei Jetzt treffen. Der Abstand am Fensterstart ist das **bisher** Gesparte, der Abstand am Fensterende das **erwartete**.
+- **Gemeinsamer Start**: Beide Linien beginnen bei 0 €. Der Abstand bei Jetzt ist das **bisher** Gesparte, am Fensterende das **Gesamte**.
+
+Die Fläche zwischen den Linien ist **grün**, wo gespart wurde, und **rot**, wo mehr ausgegeben wurde. Bei „Ist bei Jetzt“ liegt links und rechts von Jetzt jeweils eine andere Linie oben; Farbe und Labels sagen, was gemeint ist. Liegt das Fenster ganz in der Vergangenheit (Blättern), steht der Anker an seinem Ende; liegt es ganz in der Zukunft (Smartphone, zweiter Tag), gibt es keinen Umschalter und das Label heißt **Plan**.
+
+**Labels.** **Bisher**, **Erwartet** bzw. **Gesamt** stehen am jeweiligen Abstand. Die **SoC-Korrektur** des laufenden Tags (Speicherstand gegenüber der Vergleichsbatterie, bewertet zum mittleren Bezugspreis) steckt in keinem Abstand und steht als eigenes Label bei Jetzt. Abgeschlossene Tage im Fenster zeigen oben ihr **Ergebnis** aus dem Buch; Tage mit weniger als 80 % gebuchten Slots sind als „unvollständig“ markiert. Beträge stehen ohne Vorzeichen, die Bedeutung als Wort dabei: „gespart“ oder „mehr ausgegeben“, bei der SoC-Korrektur „gutgeschrieben“ oder „abgezogen“. Das Dezimalzeichen folgt der Sprache des Browsers: Steht in den Spracheinstellungen Englisch vor Deutsch, zeigt Earnie einen Punkt (`2.18 €`), sonst ein Komma (`2,18 €`). Das gilt auch für kWh, kW und Prozent, für Tabellen und für die Achsen der Charts. Nur Eingabefelder zeigen weiter einen Punkt.
+
+**Orange Slots** hat das Buch nicht gezählt (fehlende Messwerte, Buch nicht gelaufen, fehlende Log-Daten). Sie zählen auf beiden Seiten null. Die gerade laufende Viertelstunde erscheint erst, wenn sie gebucht ist. Läuft das Buch nicht oder ist es nicht lesbar, steht unter dem Chart ein kurzer Hinweis.
+
+**Verbrauchskontrolle.** Das kleine Panel darunter prüft nur, ob beide Seiten mit demselben Verbrauch gerechnet wurden; es ist kein zweites Ergebnis. Es zeigt Vergleich minus optimiert in kWh, **null am Horizontende** (auch wenn das sichtbare Fenster früher endet). Der Wert bei Jetzt ist der Energieunterschied des Plans über den restlichen Horizont. Rechts von Jetzt zeigt die Linie auch zeitlich verschobene Verbraucher: Sie verlässt null, solange eine Seite früher verbraucht, und kehrt zurück, wenn die andere aufholt. Links von Jetzt ist sie flach: Beide Seiten haben je Tag dieselbe Energie, das Buch verschiebt Geräte nur innerhalb eines Tages. Unterscheidet sich die Energie bei Jetzt um mindestens 0,5 kWh und mindestens 2 % des geplanten Verbrauchs, nennt ein Hinweis unter dem Chart den Unterschied: „Erwartet“ enthält dann auch den Preis dieser Energie.
+
+### Kachel „Mit Earnie gespart“
+
+Über Chart 2 zeigt der Monitor das Ergebnis aller abgeschlossenen SA-Tage seit Beginn der Zählung, mit Datum und Anzahl der Tage. War Earnie insgesamt teurer, heißt die Kachel „Mit Earnie mehr ausgegeben“. Verglichen wird mit einer Anlage ohne Earnie: gleiche PV, gleiche Preise und je Gerät der gleiche Tagesverbrauch, aber zur gewohnten Zeit: Geräte so, wie das Hausprofil sie beschreibt (eingestellte Startzeit, Wärmemodell), der Poolfilter in seinem eigenen Fenster, das E-Auto ab dem Einstecken mit voller Leistung, ein Heizstab neben Gas, Öl oder Pellets aus und seine Wärme aus dem Brennstoff; eine Hausbatterie im Herstellermodus (Eigenverbrauch).
+
+**Heute bisher (vorläufig)** nennt den laufenden Tag mit denselben Zahlen wie **Bisher** und **SoC** in Chart 2, beide stammen aus demselben Stand. Vorläufig heißt: Bis zum Tagesabschluss zählt nur die Batterie, verschobene Geräte, E-Auto und Heizstab kommen dann dazu. Der Tag geht erst mit seinem Abschluss in die Summe ein. Die Zeile fehlt, solange der Tag keine gebuchte Viertelstunde hat oder Chart 2 noch keine Daten zeigt, und sobald der Tag zu Ende ist.
+
+Der **?**-Hilfetext nennt den Vergleich, seine Grenzen und die Anzahl der unvollständigen Tage ([Handbuch](../user-manual/Benutzer-Handbuch-Earnie.md#monitor)). Er nennt auch die Geräte **ohne eigenen Zähler**: Ihr Verschieben ist nicht bewertet, sie zählen im Vergleich zur gemessenen Zeit. Auf Home Assistant zählt ein Gerät nur mit zugeordneter Leistung (`sens_power_act`, beim E-Auto die Ladeleistung der Wallbox) oder, bei Geräten ohne Leistungsvorgabe, mit Laufstatus (`sens_consumer_active`). Auf OpenEMS liest Earnie keine Leistung je Gerät; dort zählt nur die Batterie.
+
+**Ohne Hausbatterie** läuft das Buch auch: Die Vergleichsanlage hat dann ebenfalls keine Batterie, und eine SoC-Korrektur gibt es nicht.
+
+**Neue Zählung nach einem Update.** Ändert sich die Rechnung des Buchs, beginnt eine neue Zählung; die frühere Summe ist darin nicht enthalten. In der ersten Woche sagt das eine Zeile unter der Kachel. Wer die neue Zählung rückwirkend aus dem Verlauf füllen will, baut das Buch neu auf (Earnie vorher stoppen): `python -m scripts.build_savings_ledger --since <JJJJ-MM-TT> --rebuild`.
+
+Die Kachel und ihre Zeile **Heute bisher** bleiben beim Blättern in frühere Tage gleich. Fehlt ein Ergebnis, steht dort kein Betrag, sondern der Grund: Das Buch läuft noch nicht, es gibt noch keinen abgeschlossenen Tag oder keine gebuchte Viertelstunde. Ein unlesbares Buch erscheint als Warnung.
 
 ## Expander: Simulations-Details
 
@@ -160,7 +196,9 @@ Rohdaten-Tabelle aller Slots im sichtbaren Sunset-2-Sunset-Fenster (15-min-Log u
 
 ## Expander: Energievergleich Baseline vs. Optimierung
 
-Tabelle je flexiblem Verbraucher über den Horizont SA₀→SA₂ mit den Spalten **BL Profil**, **BL Ziel** und **Optimierung** (kWh).
+Tabelle je flexiblem Verbraucher über den Horizont SA₀→SA₂ mit den Spalten **BL Profil**, **BL Ziel**, **Profil ohne Ziel** und **Optimierung** (kWh).
+
+**Profil ohne Ziel:** Verbraucher mit Tagesziel 0 aus `config.json` und Energie im Flex-Profil plant der Optimierer nicht. BL Ziel simuliert ihre Profil-Energie trotzdem mit, damit **SoC BL Ziel** in Chart 1 die Konkurrenz um den Speicher zeigt. In die BL-Ziel-Kosten und den BL-Ziel-Verbrauch in Chart 2 geht diese Energie nicht ein. Dafür rechnet Earnie BL Ziel ein zweites Mal, nur mit den Zielen der Optimierung. So vergleicht **Ersparnis erwartet** gleiche Energie mit gleicher Energie.
 
 ## Energiefluss (Live-Sankey)
 
@@ -176,6 +214,8 @@ Der Sankey aktualisiert sich etwa alle 10 Sekunden (`STATUS`-Fragment). Die Flex
 
 Lädt ein E-Auto, zeigt der Flex-Knoten den aktuellen SoC in der Beschriftung, sofern der Loxone-Pfad den SoC liefert.
 
+Sind PV, Netz, Batterie und Haus alle exakt 0 kW, zeichnet Earnie keinen Sankey, sondern eine gelbe Warnung. Bei Loxone und Home Assistant ist die häufigste Ursache ein zu seltener Push: Bleibt ein Leistungswert länger als 3 × Wiederholintervall (Standard 30 s) aus, nimmt Earnie 0 an (Status „0 angenommen (verstummt)“, siehe [Push-Takt](../referenz/loxone-signals.md#push-cadence-sb-neutral)). Den Status je Signal zeigt **EHAL-Com → Live-Lesen**.
+
 ## Footer
 
 | Element | Inhalt |
@@ -186,11 +226,14 @@ Lädt ein E-Auto, zeigt der Flex-Knoten den aktuellen SoC in der Beschriftung, s
 
 ## Analyse Verbrauch & Kosten (Live-Cockpit)
 
-Die Auswertung nutzt dieselbe Slot-Zuordnung wie Chart 1 (`allocate_slot_flows`, siehe [Rauf/Runter-Algorithmus](#raufrunter-algorithmus-wasserfall)).
+**Kontostand mit und ohne Earnie** (oben): dieselbe Kontoansicht wie [Chart 2](#chart-2-kontostand-mit-und-ohne-earnie), für das gewählte 7- oder 28-Tage-Fenster und ganz aus dem Ersparnis-Buch (abgeschlossene Tage aus der Slot-Datei, der laufende Tag aus dem Buch-Zustand). Das Fenster liegt in der Vergangenheit, der Anker steht deshalb am Fensterende: Bei **Ist bei Jetzt** enden beide Linien dort, der Abstand am Fensterstart ist die Ersparnis des Zeitraums (Label **Zeitraum**); **Gemeinsamer Start** lässt beide bei 0 € beginnen. Der Umschalter ist unabhängig von dem im Monitor. Die y-Achse beginnt bei 0 € am Fensterstart, ihre Werte ändern sich also beim Blättern. Statt der Verbrauchskontrolle (links von Jetzt immer flach) zeigt das Panel darunter die **Ersparnis seit Fensterstart** auf eigener Skala, grün oder rot gefüllt; bei mehreren Wochen wäre der Abstand im oberen Panel sonst kaum zu sehen. Statt eines Ergebnis-Labels je Tag sind nur **unvollständige** Tage markiert; die SoC-Korrekturen der Tage, die ganz im Zeitraum liegen, nennt eine Zeile unter dem Chart. Orange Bereiche hat das Buch nicht gezählt (z. B. vor seinem Start).
+
+Die übrige Auswertung nutzt dieselbe Slot-Zuordnung wie Chart 1 (`allocate_slot_flows`, siehe [Rauf/Runter-Algorithmus](#raufrunter-algorithmus-wasserfall)).
 
 - **Verteilung:** Die Zuordnung wird anteilig (pro rata) auf Grundlast und gemessene Flex-Verbraucher verteilt.
 - **Kosten am Verbrauchsort:** Kosten entstehen nur für den **Netzanteil** (Netzanteil × Importpreis); PV und Batterie-Entladung zählen mit 0 €.
 - **Quelle und Zeitraum:** Grundlage ist das Produktiv-Log. Die Charts zeigen rollierende **7-** bzw. **28-Tage**-Fenster (mit Navigation), die Kennzahlen zusätzlich die letzten **365 Tage** vorhandener Log-Daten.
+- **Verbrauch vs. Preis & PV:** Gestapelte Verbrauchsbalken je Verbraucher, darunter (negativ) die **Einspeisung** aus PV und Batterie. Dazu kommen PV (kW) als Fläche und der Importpreis als Stufenlinie. Die Farben entsprechen Chart 1 im Monitor.
 - **Batterie-Energieflüsse:** Gestapelte Lade- und Entladebalken, inklusive **Standby** aus dem Hauskonfigurator (`standby_power_kw` × Fensterstunden).
 - **Caption zur Batterie:** Sie nennt den gemessenen Wirkungsgrad `η = √(E_Entladen / E_Laden)` als Empfehlung für den Hauskonfigurator; der Nominalwert bleibt genannt. Außerdem vergleicht sie den Standby laut Hauskonfigurator (A) mit dem Rest nach Roundtrip mit nominalem η (B) und empfiehlt konkret `Standby-Leistung ≈ B / Fensterstunden` in kW (Nominalwert genannt). Bei einer relativen Abweichung über 20 % erscheint ein Hinweis.
 - **Wärmeinhalt:** Darunter folgt ein Chart mit Sim `Q_sim` und Ist `Q_meas` aus `thermal_observability`. Dazu kommt ein Fächer der letzten 12 stündlichen Q-Prognosen (`horizon_q_sim_kwh`, gemeinsamer Horizont ≤ 24 h) für Wärmespeicher und Pools.

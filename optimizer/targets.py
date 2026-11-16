@@ -174,7 +174,9 @@ def resolve_thermal_annual_horizon_kwh(
     """
     if not optimization_matrix:
         return 0.0
-    profile = config.get_resolved_runtime_settings().get("_house_profile")
+    from optimizer.scenario_planning_scope import planning_runtime_settings
+
+    profile = planning_runtime_settings().get("_house_profile")
     if not profile:
         return 0.0
     from house_config.planning_flex_bridge import _house_thermal_consumers
@@ -222,6 +224,55 @@ def resolve_thermal_annual_horizon_kwh(
     return float(total)
 
 
+def resolve_heating_rod_horizon_kwh(
+    consumer: dict,
+    optimization_matrix: list | None,
+) -> float:
+    """Upper bound [kWh] for a heating rod: the parent's heat demand over the matrix days.
+
+    The rod has no delivery target; this only lets the MILP plan it (the store caps it, in the
+    SE ``optimizer.rod_store``). Live: the store's free heat, 0 while a signal of the rod is
+    missing. SE: the parent comes from the scenario's profile (``planning_scenario_scope``).
+    """
+    if not optimization_matrix:
+        return 0.0
+    from optimizer.live_cycle_scope import is_live_thermal_planning
+    from optimizer.scenario_planning_scope import planning_runtime_settings
+
+    # SE: the scenario's profile (heating-system variant, other house), not the Live one.
+    profile = planning_runtime_settings().get("_house_profile")
+    if not profile:
+        return 0.0
+    from house_config.planning_flex_bridge import _house_thermal_consumers
+    from optimizer.thermal_flex_context import thermal_daily_heat_kwh_for_date
+
+    parent = next(
+        (
+            item
+            for item in _house_thermal_consumers(profile)
+            if str(item["id"]) == str(consumer["parent_id"])
+        ),
+        None,
+    )
+    if parent is None:
+        raise ValueError(
+            f"Heizstab '{consumer['id']}': thermal_annual '{consumer['parent_id']}' fehlt "
+            "im Hausprofil."
+        )
+    if is_live_thermal_planning(optimization_matrix):
+        from optimizer.thermal_flex_context import live_rod_heat_cap_kwh, live_rod_ready
+
+        if not live_rod_ready(consumer, parent):
+            return 0.0
+        return live_rod_heat_cap_kwh(parent, profile, optimization_matrix)
+    dates = sorted(
+        {row.get("date") for row in optimization_matrix if isinstance(row.get("date"), date)}
+    )
+    return float(
+        sum(thermal_daily_heat_kwh_for_date(parent, profile, day) for day in dates)
+    )
+
+
 def resolve_horizon_target_kwh(
     consumer: dict,
     consumer_daily_targets_kwh: dict | None,
@@ -242,6 +293,9 @@ def resolve_horizon_target_kwh(
         return float(resolve_thermal_daily_target_kwh(consumer, horizon=horizon))
     if source == "thermal_annual" and not logged_targets_only:
         return resolve_thermal_annual_horizon_kwh(consumer, optimization_matrix)
+    if source == "heating_rod":
+        # No logged or booked target exists for the rod (it only replaces heat).
+        return resolve_heating_rod_horizon_kwh(consumer, optimization_matrix)
     return resolve_daily_target_kwh(
         consumer,
         consumer_daily_targets_kwh,
@@ -269,8 +323,10 @@ def resolve_horizon_consumer_targets_kwh(
     Flex-Zielenergie je Verbraucher für den gesamten Planungshorizont (einmalig).
     Kein erneutes Zählen bei Kalendertagwechsel im rollierenden Horizont.
     """
-    consumers_cfg = flexible_consumers or config.get_flexible_consumers(
-        optimizer_only=True
+    consumers_cfg = (
+        flexible_consumers
+        if flexible_consumers is not None
+        else config.get_flexible_consumers(optimizer_only=True)
     )
     if not optimization_matrix:
         return {c["id"]: 0.0 for c in consumers_cfg}
@@ -287,8 +343,14 @@ def resolve_horizon_consumer_targets_kwh(
             else planning_now()
         )
     if is_flat_target_override(consumer_daily_targets_kwh) and logged_targets_only:
+        # The book has no rod entry: its bound is the parent's heat demand, not a target.
         return {
-            c["id"]: round(float(consumer_daily_targets_kwh.get(c["id"], 0.0)), 3)
+            c["id"]: round(
+                resolve_heating_rod_horizon_kwh(c, optimization_matrix)
+                if c.get("daily_target_source") == "heating_rod"
+                else float(consumer_daily_targets_kwh.get(c["id"], 0.0)),
+                3,
+            )
             for c in consumers_cfg
         }
     horizon_flex_targets = None
@@ -322,9 +384,13 @@ def resolve_matched_baseline_horizon_targets(
     optimization_matrix: list,
     consumer_daily_targets_kwh: dict | None = None,
     charging_contexts: dict[str, dict] | None = None,
+    *,
+    consumers: list | None = None,
 ) -> dict[str, float]:
     """
     Horizont-Ziele für BL-Ziel-Simulation.
+
+    ``consumers``: flex consumers of the window (default: the live scenario's).
 
     Verbraucher mit daily_target_source=config und daily_target_kwh=0, aber
     Profil-Energie im Horizont, erhalten die Profil-Summe als Ziel — sonst
@@ -333,16 +399,22 @@ def resolve_matched_baseline_horizon_targets(
     """
     from data import consumer_targets
 
+    consumers_cfg = (
+        consumers
+        if consumers is not None
+        else config.get_flexible_consumers(optimizer_only=True)
+    )
     targets = resolve_horizon_consumer_targets_kwh(
         optimization_matrix,
         consumer_daily_targets_kwh,
+        flexible_consumers=consumers_cfg,
     )
     contexts = charging_contexts or {}
     targets = apply_horizon_charging_limits(targets, contexts)
     profile_totals = consumer_targets.resolve_horizon_flex_targets_kwh(
-        optimization_matrix
+        optimization_matrix, consumers=consumers_cfg
     )
-    for consumer in config.get_flexible_consumers(optimizer_only=True):
+    for consumer in consumers_cfg:
         cid = consumer["id"]
         if (consumer.get("charging_schedule") or {}).get("enabled"):
             continue
@@ -500,9 +572,14 @@ def build_energy_comparison_detail(
     consumer_daily_targets_kwh: dict | None = None,
     matched_flex_kwh: dict[str, float] | None = None,
     *,
+    profile_fallback_kwh: dict[str, float] | None = None,
     consumers: list | None = None,
 ) -> list[dict]:
-    """Kombiniert Profil-Baseline, Ziel-Baseline und Optimierung je Verbraucher inkl. Grundlast."""
+    """Kombiniert Profil-Baseline, Ziel-Baseline und Optimierung je Verbraucher inkl. Grundlast.
+
+    ``profile_fallback_kwh``: BL Ziel energy of config consumers with target 0 that the
+    matched baseline simulates for the SoC only; it is not part of BL Ziel € / kWh.
+    """
     baseload_kwh = resolve_baseload_kwh(optimization_matrix)
     consumption_mode = (
         optimization_matrix[0].get("consumption_mode") if optimization_matrix else None
@@ -529,10 +606,12 @@ def build_energy_comparison_detail(
         )
     }
     matched_flex = matched_flex_kwh or {}
+    fallback = profile_fallback_kwh or {}
     rows = [{
         "name": "Grundlast",
         "baseline_kwh": baseload_kwh,
         "matched_baseline_kwh": baseload_kwh,
+        "profile_fallback_kwh": 0.0,
         "optimization_kwh": baseload_kwh,
         "optimization_source": baseload_source,
     }]
@@ -544,6 +623,7 @@ def build_energy_comparison_detail(
             "name": consumer["name"],
             "baseline_kwh": base.get("target_kwh", 0.0),
             "matched_baseline_kwh": matched_flex.get(cid, opt.get("target_kwh", 0.0)),
+            "profile_fallback_kwh": float(fallback.get(cid, 0.0)),
             "optimization_kwh": opt.get("target_kwh", 0.0),
             "optimization_source": opt.get("source", ""),
         })

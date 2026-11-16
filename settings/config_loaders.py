@@ -79,6 +79,9 @@ def load_system_and_ui_params(
     config_path: str,
 ) -> dict[str, Any]:
     local_settings = load_local_settings_document(local_settings_path)
+    system_settings.reject_removed_debug_dump_flag(
+        raw_config, local_settings, local_settings_path
+    )
     return {
         "GLOBAL_TIMEOUT": get_strict(raw_config, ["system", "global_timeout"], config_path),
         "LOOP_TIMEOUT": get_strict(raw_config, ["system", "loop_timeout"], config_path),
@@ -96,9 +99,6 @@ def load_system_and_ui_params(
         ),
         "UI_MAIN_SYNC_POLL_SEC": system_settings.load_ui_fragment_refresh_sec(
             raw_config, "main_sync_poll_sec", 15
-        ),
-        "UI_CHART_DEBUG_CAPTURE_ENABLED": system_settings.load_ui_chart_debug_capture_enabled(
-            raw_config, local_settings, local_settings_path
         ),
         "UI_CHART_DEBUG_CAPTURE_DIR": system_settings.load_ui_chart_debug_capture_dir(
             raw_config
@@ -147,6 +147,13 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
     )
 
     reject_leftover_ha_transport(ha)
+    if "evcs_component" in openems:
+        raise ValueError(
+            "config.json: ehal.openems.evcs_component gehört seit Datenmodell 6 an die "
+            "Wallbox (Binding set_evcs_max_current = <Komponente>/SetChargePowerLimit) — "
+            "Konfiguration migrieren (Streamlit-Seite „Konfigurations-Migration“ oder "
+            "python -m scripts.migrate_config --config-dir <config>)."
+        )
     entities = ha.get("entities") if isinstance(ha.get("entities"), dict) else {}
     sign = ha.get("sign") if isinstance(ha.get("sign"), dict) else {}
     boolean_invert = (
@@ -160,7 +167,6 @@ def load_ehal_params(raw_config: dict) -> dict[str, Any]:
         "EHAL_OPENEMS_USERNAME": str(openems.get("username") or "x"),
         "EHAL_OPENEMS_PASSWORD": str(openems.get("password") or "admin"),
         "EHAL_OPENEMS_ESS_COMPONENT": str(openems.get("ess_component") or "ess0"),
-        "EHAL_OPENEMS_EVCS_COMPONENT": str(openems.get("evcs_component") or "evcs0"),
         # Deprecated: prefer house_profiles plant/consumer ehal_bindings.
         "EHAL_HA_ENTITIES": {
             str(key): str(value).strip()

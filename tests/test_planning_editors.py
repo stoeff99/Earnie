@@ -1,6 +1,7 @@
 """Tests für Planungs-Editoren und ID-Generierung (1.24.e)."""
 from __future__ import annotations
 
+from tests.fixtures.heating_catalog import save_inline_house, write_inline_house
 import json
 
 import pytest
@@ -666,9 +667,7 @@ def test_house_profile_hwb_normalization(tmp_path, monkeypatch):
 
     install_open_meteo_climate_mock(monkeypatch)
     path = tmp_path / "house_profiles.json"
-    path.write_text(
-        json.dumps(
-            {
+    write_inline_house(path, {
                 "profiles": [
                     {
                         "id": "home",
@@ -685,26 +684,27 @@ def test_house_profile_hwb_normalization(tmp_path, monkeypatch):
                                 "living_area_m2": 120,
                                 "building_class": 3,
                                 "hwb_kwh_m2": 62.0,
-                                "heat_pump_type": "luft",
+                                "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
                                 "persons": 2,
                             }
                         ],
                     }
                 ]
-            }
-        ),
-        encoding="utf-8",
-    )
+            })
     doc = load_house_profiles_document(str(path))
     thermal = doc["profiles"]["home"]["consumers"][0]["thermal"]
     assert thermal["hwb_kwh_m2"] == 62.0
+
+
+_HEATING_ON = {"heating_enabled": True, "persons": 2, "thermal": None}
 
 
 def test_default_consumer_is_thermal():
     consumer = _default_consumer()
     assert consumer["type"] == "thermal_annual"
     assert consumer["label"] == "Haus Wärme"
-    assert consumer["living_area_m2"] == 120.0
+    # Building fields live in the house section „Gebäude / Wärmebedarf“.
+    assert "living_area_m2" not in consumer
 
 
 def test_default_additional_consumer_is_generic():
@@ -737,15 +737,12 @@ def test_consumer_expander_title_includes_type_label():
     class _Session(dict):
         pass
 
-    session = _Session()
+    session = _Session({"home__house_heating_state": _HEATING_ON})
     consumer = {
         "label": "WP",
         "type": "thermal_annual",
         "nominal_power_kw": 5.0,
-        "living_area_m2": 120.0,
-        "building_class": 3,
-        "persons": 2,
-        "heat_pump_type": "luft",
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
     }
     import ui.house_config_profile_form as form
 
@@ -784,6 +781,27 @@ def test_consumer_expander_title_uses_live_type_from_session():
 
     assert c_type == "ev"
     assert title.startswith("Verbraucher 2 (E-Auto): Garage — ")
+
+
+def test_live_consumer_for_annual_type_switch_takes_heat_source_select_start():
+    """Switch to Haus Wärme: preview runs before the heat-source selectboxes exist."""
+    class _Session(dict):
+        pass
+
+    session = _Session(
+        {"home__hc_g0_type_0": "thermal_annual", "home__house_heating_state": _HEATING_ON}
+    )
+    consumer = {"label": "Wasch", "type": "generic", "nominal_power_kw": 2.0}
+    import ui.house_config_profile_form as form
+
+    original = form.st.session_state
+    form.st.session_state = session
+    try:
+        preview = form._live_consumer_for_annual(consumer, 0, session_scope="home")
+    finally:
+        form.st.session_state = original
+
+    assert preview["heat_source"] == {"type": "heat_pump", "heat_pump_type": "luft"}
 
 
 def test_live_consumer_for_annual_injects_thermal_rc_geo_from_profile():
@@ -851,10 +869,12 @@ def test_seed_ev_defaults_on_type_switch_overwrites_generic_power():
     assert seeded["label"] == "Garage"
     assert seeded["id"] == "e_auto"
     assert seeded["type"] == "ev"
-    assert seeded["nominal_power_kw"] == defaults["nominal_power_kw"]
-    assert seeded["min_power_kw"] == defaults["min_power_kw"]
-    assert session["home__hc_g0_nom_1"] == defaults["nominal_power_kw"]
-    assert session["home__hc_g0_ev_min_1"] == defaults["min_power_kw"]
+    assert "nominal_power_kw" not in seeded
+    assert seeded["max_current_a"] == defaults["max_current_a"]
+    assert seeded["min_current_a"] == defaults["min_current_a"]
+    assert session["home__hc_g0_ev_max_a_1"] == defaults["max_current_a"]
+    assert session["home__hc_g0_ev_min_a_1"] == defaults["min_current_a"]
+    assert session["home__hc_g0_ev_phases_1"] == defaults["phases"]
     assert session["home__hc_g0_ev_min_qh_1"] == defaults["min_on_quarterhours"]
 
 
@@ -917,9 +937,7 @@ def test_consumer_widget_gen_bump_changes_scoped_hc_keys():
 
 def test_profile_accepts_thermal_on_second_consumer(tmp_path):
     path = tmp_path / "house_profiles.json"
-    path.write_text(
-        json.dumps(
-            {
+    write_inline_house(path, {
                 "profiles": [
                     {
                         "id": "home",
@@ -932,15 +950,13 @@ def test_profile_accepts_thermal_on_second_consumer(tmp_path):
                             {
                                 "id": "heat2",
                                 "type": "thermal_annual",
+                                "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
                                 "living_area_m2": 100,
                             },
                         ],
                     }
                 ]
-            }
-        ),
-        encoding="utf-8",
-    )
+            })
     doc = load_house_profiles_document(str(path))
     consumers = doc["profiles"]["home"]["consumers"]
     assert consumers[1]["type"] == "thermal_annual"
@@ -950,9 +966,7 @@ def test_profile_accepts_thermal_on_second_consumer(tmp_path):
 
 def test_profile_rejects_two_thermal_annual_consumers(tmp_path):
     path = tmp_path / "house_profiles.json"
-    path.write_text(
-        json.dumps(
-            {
+    write_inline_house(path, {
                 "profiles": [
                     {
                         "id": "home",
@@ -960,24 +974,23 @@ def test_profile_rejects_two_thermal_annual_consumers(tmp_path):
                         "latitude": 48.2,
                         "longitude": 11.0,
                         "netznutzung": {"area_id": "user_no_grid_fee"},
+                        "heating_enabled": True,
+                        "thermal": {"living_area_m2": 100},
                         "consumers": [
                             {
                                 "id": "heat",
                                 "type": "thermal_annual",
-                                "living_area_m2": 100,
+                                "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
                             },
                             {
                                 "id": "heat2",
                                 "type": "thermal_annual",
-                                "living_area_m2": 80,
+                                "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
                             },
                         ],
                     }
                 ]
-            }
-        ),
-        encoding="utf-8",
-    )
+            })
     with pytest.raises(ValueError, match="nur ein Verbraucher"):
         load_house_profiles_document(str(path))
 
@@ -1007,23 +1020,27 @@ def test_initial_profile_index_prefers_runtime_house_profile_id(monkeypatch):
     assert sess._initial_profile_index(ids) == ids.index("alpha") + 1
 
 
-def test_flatten_consumer_for_edit_merges_thermal():
+def test_flatten_consumer_for_edit_merges_thermal_without_building_fields():
     flattened = _flatten_consumer_for_edit(
         {
             "id": "heat",
             "type": "thermal_annual",
+            "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
             "thermal": {
                 "living_area_m2": 150.0,
                 "building_class": 2,
                 "hwb_kwh_m2": 55.0,
+                "persons": 3,
+                "solar_thermal_area_m2": 6.0,
                 "latitude": 48.2,
                 "longitude": 11.0,
             },
         }
     )
-    assert flattened["living_area_m2"] == 150.0
-    assert flattened["building_class"] == 2
-    assert flattened["hwb_kwh_m2"] == 55.0
+    # The building fields belong to the house section, the collector to the consumer.
+    for key in ("living_area_m2", "building_class", "hwb_kwh_m2", "persons"):
+        assert key not in flattened
+    assert flattened["solar_thermal_area_m2"] == 6.0
     assert "thermal" not in flattened
     assert "latitude" not in flattened
 
@@ -1694,7 +1711,7 @@ def test_upsert_thermal_profile_roundtrip(tmp_path, monkeypatch):
 
     install_open_meteo_climate_mock(monkeypatch)
     path = tmp_path / "house_profiles.json"
-    save_house_profiles_document(
+    save_inline_house(
         str(path),
         {
             "profiles": [
@@ -1715,7 +1732,7 @@ def test_upsert_thermal_profile_roundtrip(tmp_path, monkeypatch):
                             "nominal_power_kw": 6.0,
                             "living_area_m2": 165.0,
                             "building_class": 2,
-                            "heat_pump_type": "erde",
+                            "heat_source": {"type": "heat_pump", "heat_pump_type": "erde"},
                             "persons": 3,
                             "hwb_kwh_m2": 58.0,
                             "solar_thermal_area_m2": 8.0,
@@ -1734,12 +1751,14 @@ def test_upsert_thermal_profile_roundtrip(tmp_path, monkeypatch):
     assert thermal["living_area_m2"] == 165.0
     assert thermal["building_class"] == 2
     assert thermal["hwb_kwh_m2"] == 58.0
-    assert thermal["heat_pump_type"] == "erde"
+    assert thermal["heat_source"] == {"type": "heat_pump", "heat_pump_type": "erde"}
     assert thermal["latitude"] == pytest.approx(47.8)
 
 
 def test_upsert_two_consumers_roundtrip(tmp_path, monkeypatch):
     config_dir = _bind_paths(tmp_path, monkeypatch)
+    # The EV's new wallbox is saved to components.json; no config.json to reload here.
+    monkeypatch.setattr(config, "reinit_config", lambda: None)
     path = config_dir / "house_profiles.json"
     upsert_house_profile(
         {
@@ -1761,8 +1780,11 @@ def test_upsert_two_consumers_roundtrip(tmp_path, monkeypatch):
                     "id": "ev",
                     "label": "E-Auto",
                     "type": "ev",
-                    "nominal_power_kw": 3.5,
-                    "min_power_kw": 1.4,
+                    # Form shape (data model 6): pair limits as current + wallbox voltage.
+                    "phases": 1,
+                    "min_current_a": 6.0,
+                    "max_current_a": 16.0,
+                    "wallbox_voltage_v": 230.0,
                     "min_on_quarterhours": 4,
                     "battery_capacity_kwh": 60.0,
                     "charging_schedule": {
@@ -1788,6 +1810,14 @@ def test_upsert_two_consumers_roundtrip(tmp_path, monkeypatch):
     consumers = doc["profiles"]["home"]["consumers"]
     assert len(consumers) == 2
     assert {consumer["id"] for consumer in consumers} == {"pool", "ev"}
+    ev = next(c for c in consumers if c["id"] == "ev")
+    assert ev["wallbox_assignment"] == {"mode": "fixed", "wallbox_id": "ev"}
+    assert ev["nominal_power_kw"] == pytest.approx(3.68)
+    assert ev["min_power_kw"] == pytest.approx(1.38)
+    components = json.loads((config_dir / "components.json").read_text(encoding="utf-8"))
+    (wallbox,) = components["wallboxes"]
+    assert wallbox["id"] == "ev" and wallbox["voltage_v"] == 230.0
+    assert wallbox["ehal_bindings"] == {"evcs.ev.set_evcs_max_current": ""}
 
 
 def test_schedule_defaults_preserves_zero_start_shift_h():

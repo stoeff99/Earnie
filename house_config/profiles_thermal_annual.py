@@ -1,14 +1,20 @@
 """Normalize thermal_annual consumer fields for house profiles."""
 from __future__ import annotations
 
-
-def absent_temp_reduction_c(raw: dict, target_temp_c: float) -> float:
-    """Resolve Kelvin reduction; migrate legacy absolute ``absent_temp_c``."""
-    if raw.get("absent_temp_reduction_c") not in (None, ""):
-        return max(0.0, float(raw["absent_temp_reduction_c"]))
-    if raw.get("absent_temp_c") not in (None, ""):
-        return max(0.0, float(target_temp_c) - float(raw["absent_temp_c"]))
-    return 6.5
+from house_config.heat_source import reject_legacy_heat_pump_type
+from house_config.heating_systems import (
+    HEATING_SYSTEM_ID_KEY,
+    apply_heating_system,
+    reject_inline_heating_fields,
+    reject_measured_rod_fields,
+    resolve_heating_system,
+)
+from house_config.house_cooling import COOLING_KEY, normalize_cooling
+from house_config.house_thermal import (
+    consumer_thermal_from_house,
+    reject_consumer_building_fields,
+)
+from house_config.profile_schema_defaults import consumer_default
 
 
 def int_or_default(value: object, default: int) -> int:
@@ -16,16 +22,6 @@ def int_or_default(value: object, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
-
-
-def _persons(raw: dict) -> int:
-    persons = int_or_default(_raw_thermal_field(raw, "persons"), 2)
-    if persons < 1:
-        raise ValueError(
-            f"thermal_annual: persons muss >= 1 sein (ist {persons}). "
-            "Abwesenheit wird über den Abwesenheitsmodus abgebildet, nicht über 0 Personen."
-        )
-    return persons
 
 
 def _raw_thermal_field(raw: dict, key: str):
@@ -37,69 +33,39 @@ def _raw_thermal_field(raw: dict, key: str):
     return None
 
 
-def _build_thermal_block(raw: dict) -> dict:
-    """``spec['thermal']`` dict of a thermal_annual consumer (defaults for missing fields)."""
-    from optimizer.thermal_coupled import normalize_heat_storage
-    from optimizer.thermal_house import (
-        DEFAULT_BUILDING_MASS,
-        DEFAULT_HOUSE_TOLERANCE_C,
-        normalize_building_mass,
-    )
+def _label(raw: dict) -> str:
+    return f"thermal_annual '{raw.get('id') or '?'}'"
 
-    hwb_raw = _raw_thermal_field(raw, "hwb_kwh_m2")
-    hwb_value = float(hwb_raw) if hwb_raw not in (None, "") else 0.0
-    target_temp_c = float(_raw_thermal_field(raw, "target_temp_c") or 21.5)
-    mass = normalize_building_mass(
-        _raw_thermal_field(raw, "building_mass") or DEFAULT_BUILDING_MASS
-    )
-    tol_raw = _raw_thermal_field(raw, "house_tolerance_c")
-    house_tol = (
-        max(0.05, float(tol_raw))
-        if tol_raw not in (None, "")
-        else DEFAULT_HOUSE_TOLERANCE_C
-    )
-    thermal = {
-        "living_area_m2": float(
-            _raw_thermal_field(raw, "living_area_m2") or 0.0
-        ),
-        "building_class": int(_raw_thermal_field(raw, "building_class") or 3),
-        "heat_pump_type": str(
-            _raw_thermal_field(raw, "heat_pump_type") or "luft"
-        )
-        .strip()
-        .lower(),
-        "persons": _persons(raw),
-        "target_temp_c": target_temp_c,
-        "absent_temp_reduction_c": absent_temp_reduction_c(raw, target_temp_c),
-        "heating_limit_c": float(
-            _raw_thermal_field(raw, "heating_limit_c") or 15.0
-        ),
+
+def _solar_thermal_fields(raw: dict) -> dict:
+    """Solar-thermal collector of the consumer (heat generation, not the building)."""
+    tilt = _raw_thermal_field(raw, "solar_thermal_tilt_deg")
+    return {
         "solar_thermal_area_m2": float(
-            _raw_thermal_field(raw, "solar_thermal_area_m2") or 0.0
+            _raw_thermal_field(raw, "solar_thermal_area_m2")
+            or consumer_default("solar_thermal_area_m2")
         ),
         "solar_thermal_tilt_deg": float(
-            18.0
-            if _raw_thermal_field(raw, "solar_thermal_tilt_deg") is None
-            else _raw_thermal_field(raw, "solar_thermal_tilt_deg")
+            consumer_default("solar_thermal_tilt_deg") if tilt is None else tilt
         ),
         "solar_thermal_azimuth_deg": float(
-            _raw_thermal_field(raw, "solar_thermal_azimuth_deg") or 0.0
+            _raw_thermal_field(raw, "solar_thermal_azimuth_deg")
+            or consumer_default("solar_thermal_azimuth_deg")
         ),
-        "building_mass": mass,
-        "house_tolerance_c": house_tol,
     }
-    if hwb_value > 0:
-        thermal["hwb_kwh_m2"] = hwb_value
-    h_override = _raw_thermal_field(raw, "house_heat_loss_kw_per_k")
-    if h_override not in (None, "") and float(h_override) > 0.0:
-        thermal["house_heat_loss_kw_per_k"] = float(h_override)
-    nested = raw.get("heat_storage")
-    if nested is None and isinstance(raw.get("thermal"), dict):
-        nested = raw["thermal"].get("heat_storage")
-    storage = normalize_heat_storage(nested)
-    if storage is not None:
-        thermal["heat_storage"] = storage
-    return thermal
+
+
+def _build_thermal_block(raw: dict, house_thermal: dict, persons: int) -> dict:
+    """``spec['thermal']``: the house's building block plus the consumer's collector.
+
+    The heat generation (``heat_source``, ``heat_storage``) comes from the heating-system
+    catalog, see ``apply_heating_system``.
+    """
+    reject_legacy_heat_pump_type(raw, label=_label(raw))
+    return {
+        **consumer_thermal_from_house(house_thermal, persons),
+        **_solar_thermal_fields(raw),
+    }
 
 
 # Heat pump boost / lock settings (optimizer.heat_control); kept on save and in the UI.
@@ -119,9 +85,10 @@ def preheat_storage_kwh(consumer: dict) -> float:
     """Electric kWh the building can take in advance (pre-heating across midnight).
 
     Heat capacity (Wohnfläche × Bauweise) × comfort band (``house_tolerance_c``) as
-    heat, divided by the heat pump's JAZ. 0 unless ``heat_preheat_enabled``.
+    heat, divided by the heating system's JAZ (``heat_source``). 0 unless
+    ``heat_preheat_enabled``.
     """
-    from data.heating_need import heat_pump_jaz
+    from house_config.heat_source import heat_source_efficiency
     from optimizer.thermal_house import DEFAULT_HOUSE_TOLERANCE_C, house_capacity_kwh_per_k
 
     if not bool(consumer.get("heat_preheat_enabled", False)):
@@ -131,7 +98,13 @@ def preheat_storage_kwh(consumer: dict) -> float:
         float(thermal.get("living_area_m2") or 0.0), thermal.get("building_mass")
     )
     tolerance = float(thermal.get("house_tolerance_c") or DEFAULT_HOUSE_TOLERANCE_C)
-    jaz = heat_pump_jaz(str(thermal.get("heat_pump_type") or "luft"))
+    heat_source = thermal.get("heat_source")
+    if not isinstance(heat_source, dict):
+        raise ValueError(
+            f"Wärmepumpe '{consumer.get('id')}': Vorheizen braucht ein Heizsystem "
+            "(heat_source) für die JAZ."
+        )
+    jaz = heat_source_efficiency(heat_source)
     return round(capacity * tolerance / jaz, 3)
 
 
@@ -140,15 +113,39 @@ def normalize_thermal_annual_consumer(
     spec: dict,
     *,
     copy_loxone_binding,
+    heating_systems: dict | None,
+    house_thermal: dict | None,
+    persons: int,
 ) -> None:
-    """Fill ``spec['thermal']`` and related flex fields for thermal_annual."""
-    spec["thermal"] = _build_thermal_block(raw)
+    """Fill ``spec['thermal']`` and related flex fields for thermal_annual.
+
+    The building fields come from the house profile (``house_thermal``, see
+    ``house_config.house_thermal``); building fields on the consumer fail loud. The reference
+    heating system (``heating_system_id``) is resolved against the catalog and placed into the
+    spec; inline generation fields and measured-rod fields fail loud.
+    """
+    reject_consumer_building_fields(raw, label=_label(raw))
+    if house_thermal is None:
+        raise ValueError(
+            f"{_label(raw)}: Hausprofil ohne Gebäude-Wärmedaten (thermal). Im "
+            "Hauskonfigurator „Heizung betrachten“ einschalten und den Abschnitt „Gebäude / "
+            "Wärmebedarf“ ausfüllen."
+        )
+    reject_inline_heating_fields(raw, label=_label(raw))
+    reject_measured_rod_fields(raw, label=_label(raw))
+    system = resolve_heating_system(
+        heating_systems, raw.get(HEATING_SYSTEM_ID_KEY), label=_label(raw)
+    )
+    spec[HEATING_SYSTEM_ID_KEY] = system["id"]
+    spec["thermal"] = _build_thermal_block(raw, house_thermal, persons)
+    # The absent-mode setback is a house property; the core reads it on the consumer.
+    spec["absent_mode_enabled"] = bool(house_thermal["absent_mode_enabled"])
+    apply_heating_system(spec, system)
     if "optimizer_flex" in raw:
         spec["optimizer_flex"] = bool(raw["optimizer_flex"])
     window = raw.get("thermal_flex_window")
     if isinstance(window, dict) and window:
         spec["thermal_flex_window"] = dict(window)
-    spec["min_on_quarterhours"] = max(1, int(raw.get("min_on_quarterhours", 1) or 1))
     if "max_on_quarterhours" in raw:
         spec["max_on_quarterhours"] = max(1, int(raw.get("max_on_quarterhours", 16) or 16))
     if "min_off_quarterhours" in raw:
@@ -164,12 +161,16 @@ def normalize_thermal_annual_consumer(
         spec["heat_preheat_enabled"] = bool(raw["heat_preheat_enabled"])
     if "max_pulses_per_day" in raw:
         spec["max_pulses_per_day"] = max(1, int(raw.get("max_pulses_per_day", 4) or 4))
+    min_on = int(spec.get("min_on_quarterhours", 1) or 1)
     if int(spec.get("min_off_quarterhours") or 0) > 1 and int(
         spec.get("max_on_quarterhours", 16)
-    ) < spec["min_on_quarterhours"]:
+    ) < min_on:
         raise ValueError(
             f"Wärmepumpe '{raw.get('id')}': max_on_quarterhours "
-            f"({spec['max_on_quarterhours']}) ist kleiner als min_on_quarterhours "
-            f"({spec['min_on_quarterhours']})."
+            f"({spec['max_on_quarterhours']}) ist kleiner als min_on_quarterhours ({min_on})."
+        )
+    if raw.get(COOLING_KEY) is not None:
+        spec[COOLING_KEY] = normalize_cooling(
+            raw[COOLING_KEY], label=_label(raw), heat_source=spec["thermal"].get("heat_source")
         )
     copy_loxone_binding(raw, spec)

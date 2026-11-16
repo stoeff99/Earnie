@@ -25,6 +25,7 @@ from data.planning_window import (
     official_sun_times,
     sunrise_anchor_slot_index,
 )
+from optimizer.milp_horizon_extras import LOOKAHEAD_ENV, lookahead_hours  # noqa: F401 (re-exported)
 from simulation.horizon_mode import BACKTESTING_STEP_HOURS
 
 
@@ -155,7 +156,7 @@ def resolve_ready_by_sunrise_step(
         )
     from optimizer.slot_duration import normalize_quarter_hour_slot
 
-    milp_slots = hourly_slots_inclusive(sa0, sa2)
+    milp_slots = hourly_slots_inclusive(sa0, sa2 + timedelta(hours=lookahead_hours()))
     book_slots = hourly_slots_half_open(sa1, sa2)
     if book_period is not None:
         period_start, period_end = book_period

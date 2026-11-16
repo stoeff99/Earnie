@@ -21,7 +21,8 @@ def test_migrate_ha_entities_to_plant_without_ev_consumer():
     assert plant["set_evcs_max_current"] == ""
     aggregated = aggregate_ha_entities(house)
     assert aggregated["ess.house.sens_ess_soc"] == ""
-    assert "sens_evcs_active_power" in aggregated
+    # Multi-EV M2: charger keys come from the EV ↔ wallbox pairs only, not from the plant.
+    assert not any("evcs" in key for key in aggregated)
 
 
 def test_migrate_ha_entities_ev_to_consumer():
@@ -47,7 +48,36 @@ def test_migrate_ha_entities_ev_to_consumer():
     ev = house["profiles"]["live"]["consumers"][0]["ehal_bindings"]
     assert ev["sens_evcs_active_power"] == ""
     assert ev["set_evcs_max_current"] == ""
-    assert aggregate_ha_entities(house)["sens_evcs_active_power"] == ""
+    # The result is a pre-dm6 EV: dm6.wallboxes moves these keys to the wallbox, and the
+    # charger keys are aggregated from the loader view (multi-EV M4,
+    # test_wallbox_dynamic_assignment.test_fixed_pair_uses_the_wallbox_kennung_as_charger).
+
+
+def test_aggregate_activates_the_charger_keys_of_every_ev():
+    house = {
+        "profiles": {
+            "live": {
+                "consumers": [
+                    # Loader views of fixed pairs: charger = the wallbox (M4).
+                    {
+                        "id": "auto_a",
+                        "type": "ev",
+                        "charger_id": "auto_a",
+                        "ehal_bindings": {"set_evcs_max_current": ""},
+                    },
+                    {
+                        "id": "auto_b",
+                        "type": "ev",
+                        "charger_id": "wb_b",
+                        "ehal_bindings": {"evcs.wb_b.set_evcs_mode": ""},
+                    },
+                ]
+            }
+        }
+    }
+    aggregated = aggregate_ha_entities(house)
+    assert "evcs.auto_a.set_evcs_max_current" in aggregated
+    assert "evcs.wb_b.set_evcs_mode" in aggregated
 
 
 def test_migrate_empty_only_does_not_overwrite_activation():

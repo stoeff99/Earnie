@@ -4,6 +4,7 @@ from __future__ import annotations
 from house_config.profiles_thermal_annual import HEAT_CONTROL_KEYS
 
 import os
+from collections.abc import Callable
 
 import streamlit as st
 
@@ -23,6 +24,7 @@ from house_config.generic_schedule import (
     reject_legacy_start_flexibility,
 )
 from house_config.id_slug import slug_id
+from house_config.profile_schema_defaults import profile_default
 from house_config.thermal_labels import (
     CONSUMER_TYPE_LABELS,
     building_class_option_label,
@@ -129,14 +131,12 @@ def _scoped_key(session_scope: str, base: str) -> str:
     return f"{session_scope}__{base}"
 
 def _default_consumer() -> dict:
+    """New „Haus Wärme“ consumer; the building fields live in the house section."""
     return {
         "label": "Haus Wärme",
         "type": "thermal_annual",
-        "nominal_power_kw": 3.5,
-        "living_area_m2": 120.0,
-        "building_class": 3,
-        "heat_pump_type": "luft",
-        "persons": 2,
+        "heating_power_kw": 10.0,
+        "heat_source": {"type": "heat_pump", "heat_pump_type": "luft"},
     }
 
 def _default_additional_consumer() -> dict:
@@ -162,18 +162,28 @@ def _live_markers_enabled() -> bool:
     return "live_environment" in get_enabled_ui_mode_keys()
 
 def _flatten_consumer_for_edit(consumer: dict) -> dict:
+    """Form row of a normalized consumer; the house's building fields stay at the house."""
+    from house_config.house_thermal import drop_house_fields
+
     item = dict(consumer)
     thermal = item.pop("thermal", None)
     if isinstance(thermal, dict):
-        for key, value in thermal.items():
+        for key, value in drop_house_fields(thermal).items():
             if key not in item and key not in {"latitude", "longitude"}:
                 item[key] = value
     return item
 
 def _consumers_from_existing(existing: dict) -> list[dict]:
-    consumers = list(existing.get("consumers", []))
-    if not consumers:
-        return []
+    """Form rows incl. the heating consumer of a house with „Heizung betrachten“ off.
+
+    The form keeps that consumer (hidden) so a save writes it back unchanged.
+    """
+    from house_config.house_thermal import INACTIVE_CONSUMERS_KEY
+
+    consumers = [
+        *(existing.get("consumers") or []),
+        *(existing.get(INACTIVE_CONSUMERS_KEY) or []),
+    ]
     return [_flatten_consumer_for_edit(consumer) for consumer in consumers]
 
 def _profile_session_scope(selected_id: str, *, is_new: bool) -> str:
@@ -185,6 +195,20 @@ def _house_profiles_file_stamp() -> str:
         return f"{os.path.abspath(path)}:{os.path.getmtime(path)}"
     except OSError:
         return os.path.abspath(path)
+
+def write_house_file_outside_profile_form(write: Callable[[], None]) -> None:
+    """Run ``write`` (a house-file write that leaves every profile as it is) and keep the form.
+
+    ``_sync_profile_session`` re-seeds the profile form when the file stamp differs from
+    the session's. This session's own write must not do that, or the user's unsaved edits
+    are lost. The new stamp is recorded right after the write, with no Streamlit call in
+    between, so a stopped run cannot leave it behind. A file that already changed before
+    the write (another writer) keeps the old stamp, so the next run still re-seeds.
+    """
+    before = _house_profiles_file_stamp()
+    write()
+    if st.session_state.get(_SESSION_FILE_STAMP_KEY) == before:
+        st.session_state[_SESSION_FILE_STAMP_KEY] = _house_profiles_file_stamp()
 
 def _clear_scoped_widget_keys(session_scope: str) -> None:
     prefix = f"{session_scope}__"
@@ -209,28 +233,30 @@ def _seed_profile_widget_state(
 
     if existing:
         label = str(existing.get("label", "Mein Haushalt"))
-        annual_kwh = float(existing.get("annual_kwh", 4500.0))
-        land = str(existing.get("land") or "AT").strip().upper()
+        annual_kwh = float(existing.get("annual_kwh", profile_default("annual_kwh")))
+        land = str(existing.get("land") or profile_default("land")).strip().upper()
         if land not in {"AT", "DE", "CH"}:
-            land = "AT"
+            land = profile_default("land")
         region = str(existing.get("region") or "").strip()
-        latitude = float(existing.get("latitude", 48.2))
-        longitude = float(existing.get("longitude", 11.0))
-        default_pv_tilt = int(existing.get("default_pv_tilt", 25))
-        default_pv_azimuth = int(existing.get("default_pv_azimuth", 0))
+        latitude = float(existing.get("latitude", profile_default("latitude")))
+        longitude = float(existing.get("longitude", profile_default("longitude")))
+        default_pv_tilt = int(existing.get("default_pv_tilt", profile_default("default_pv_tilt")))
+        default_pv_azimuth = int(
+            existing.get("default_pv_azimuth", profile_default("default_pv_azimuth"))
+        )
         netznutzung = normalize_netznutzung_config(existing.get("netznutzung"))
         profile_id = str(existing.get("id") or "").strip()
         absent_mode = bool(existing.get("absent_mode", False))
         eur_chf_rate = float(existing.get("eur_chf_rate") or 0.0)
     else:
         label = allocate_unique_label("Mein Haushalt", siblings or [])
-        annual_kwh = 4500.0
-        land = "AT"
+        annual_kwh = float(profile_default("annual_kwh"))
+        land = profile_default("land")
         region = ""
-        latitude = 48.2
-        longitude = 11.0
-        default_pv_tilt = 25
-        default_pv_azimuth = 0
+        latitude = float(profile_default("latitude"))
+        longitude = float(profile_default("longitude"))
+        default_pv_tilt = int(profile_default("default_pv_tilt"))
+        default_pv_azimuth = int(profile_default("default_pv_azimuth"))
         # No grid area preselected: the user picks one (no implicit "no grid fee").
         netznutzung = default_netznutzung_config()
         profile_id = ""
@@ -320,10 +346,10 @@ def _other_consumers_have_thermal_annual(
 
 
 def _consumer_type_options(
-    consumers: list[dict], consumer_index: int
+    consumers: list[dict], consumer_index: int, *, heating_enabled: bool = True
 ) -> list[str]:
-    """Offer Haus Wärme when no *other* consumer already has that type."""
-    if _other_consumers_have_thermal_annual(consumers, consumer_index):
+    """Offer Haus Wärme when „Heizung betrachten“ is on and no *other* consumer has it."""
+    if not heating_enabled or _other_consumers_have_thermal_annual(consumers, consumer_index):
         return [value for value in CONSUMER_TYPE_OPTIONS if value != "thermal_annual"]
     return list(CONSUMER_TYPE_OPTIONS)
 
