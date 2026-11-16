@@ -219,7 +219,9 @@ Details: [EHAL-Com](../ui/ehal-com.md), [Loxone-Signale](../referenz/loxone-sign
 | `min_off_quarterhours` | 4 | Pflichtpause nach jedem Lauf (60 min) |
 | `max_pulses_per_day` | 14 | Starts pro Tag; muss für taktende Geräte hoch genug sein |
 
-**In der Planung:** Nach jedem geplanten Lauf hält Earnie die Wärmepumpe mindestens `min_off_quarterhours` Slots aus. Das Tagesziel kappt Earnie auf die Energie, die das Taktmuster liefern kann. Im Beispiel sind das höchstens 3 von 7 Slots, also rund 43 % der Nennleistung.
+**In der Planung:** Nach jedem geplanten Lauf hält Earnie die Wärmepumpe mindestens `min_off_quarterhours` Slots aus. Das Tagesziel kappt Earnie auf die Energie, die das Taktmuster liefern kann. Im Beispiel sind das höchstens 3 von 7 Slots, also rund 43 % der Nennleistung. Das Taktmuster läuft über Mitternacht weiter: Ein Lauf kurz vor Mitternacht schiebt seine Pause in den nächsten Tag, und Earnie rechnet diese Pause beim Tagesziel des Folgetags mit ein. Kappt die Taktung ein Tagesziel, steht im Log „Taktung begrenzt Tagesenergie auf … kWh“.
+
+**Werte wählen:** Tragen Sie die Grenzen ein, die Ihre Wärmepumpe wirklich hat (Handbuch oder Regler, oft „Sperrzeit“ oder „Taktsperre“). Eine Wärmepumpe ohne festes Laufzeitende braucht keine kurze `max_on_quarterhours`; lange Läufe schonen den Verdichter, geschützt wird er durch die Pause. Eine zu kurze Laufzeit oder zu lange Pause begrenzt die Wärme an kalten Tagen (siehe 43 % oben). Lange Pflichtpausen machen die Rechnung außerdem schwer: Mit 60 Minuten Pause findet der Optimierer an kalten Tagen oft keinen Plan innerhalb seines Zeitlimits, und der Szenario-Explorer wird im Winter sehr langsam. Typisch für eine Erdsonden-Wärmepumpe mit Taktsperre von 20–30 Minuten: `max_on_quarterhours` 16, `min_off_quarterhours` 2.
 
 Mit Wärmespeicher und einer Komfort-Untergrenze, die bestimmte Stunden erzwingt, gelten wie bisher weder `max_on_quarterhours` noch die Pflichtpause innerhalb des Plans. Eine laufende Pause aus dem Taktgedächtnis bleibt aber auch dann gesperrt.
 
