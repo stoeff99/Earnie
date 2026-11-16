@@ -10,6 +10,7 @@ import pandas as pd
 
 from runtime_store.file_metadata import stamp_payload
 from runtime_store.live_optimization_debug import _json_safe
+from simulation.atomic_files import write_atomically
 from simulation.backtesting_horizon import geo_params_from_scenario
 from simulation.horizon_mode import FIXED_24H, SUNRISE_WINDOW
 
@@ -121,9 +122,13 @@ def write_window_snapshots_jsonl(
     if not snapshots:
         return None
     path = _snapshots_path(log_dir)
-    with open(path, "w", encoding="utf-8") as handle:
-        for snapshot in snapshots:
-            handle.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+
+    def write(tmp: str) -> None:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            for snapshot in snapshots:
+                handle.write(json.dumps(snapshot, ensure_ascii=False) + "\n")
+
+    write_atomically(path, write)
     _invalidate_snapshot_index(log_dir)
     return path
 

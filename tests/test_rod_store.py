@@ -370,7 +370,7 @@ def test_the_ladder_hands_each_window_the_level_of_the_one_before(monkeypatch):
     def fake_window(_anchor, soc, **kwargs):
         started_with.append(dict(kwargs["rod_store_kwh"]))
         level = kwargs["rod_store_kwh"].get("rod", 0.0) + 1.0
-        return reference_ladder._WindowResult([], {}, soc, [], [], 0, {"rod": level})
+        return reference_ladder._WindowResult([], {}, soc, [], [], 0, {"rod": level}, [])
 
     monkeypatch.setattr(engine, "list_simulation_anchors", lambda *_args: anchors)
     monkeypatch.setattr(engine_scenario, "_flexible_consumers_from_scenario", lambda _params: [])

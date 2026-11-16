@@ -325,3 +325,52 @@ def test_l0_sharing_key_is_unchanged_by_the_battery(ladder_env):
     assert reference_fingerprint(scenario) == reference_fingerprint(
         {**scenario, "battery_capacity_kwh": 10.0}
     )
+
+
+def test_window_target_capped_like_the_milp_when_the_charging_window_is_too_short(caplog):
+    """Regression: 41.3 kWh in a 3 h window (12 slots × 11 kW = 33 kWh) aborted the whole SE.
+
+    The MILP caps the target at what the window delivers; L1/L2 must use the same energy.
+    """
+    import logging
+    from datetime import datetime
+
+    from simulation import reference_ladder as rl
+
+    heat_pump = {
+        "id": "wp",
+        "name": "WP",
+        "nominal_power_kw": 3.0,
+        "daily_target_source": "thermal_annual",
+    }
+    eligible = {"ev": list(range(12)), "wp": list(range(4))}
+    with caplog.at_level(logging.WARNING, logger=rl.__name__):
+        targets, capped = rl._deliverable_targets(
+            datetime(2025, 11, 10, 7, 0),
+            {"ev": 41.295, "wp": 20.0},
+            [EV, heat_pump],
+            eligible,
+            list(range(96)),
+        )
+    assert targets["ev"] == pytest.approx(33.0)
+    assert targets["wp"] == 20.0  # thermal: capped in thermal_flex_context, not here
+    assert capped == ["ev"]
+    assert "41.295 kWh" in caplog.text and "33.000 kWh" in caplog.text
+
+
+def test_window_target_that_fits_is_unchanged():
+    from datetime import datetime
+
+    from simulation import reference_ladder as rl
+
+    targets, capped = rl._deliverable_targets(
+        datetime(2025, 11, 10, 7, 0), {"ev": 20.0}, [EV], {"ev": list(range(12))}, list(range(96))
+    )
+    assert targets == {"ev": 20.0} and capped == []
+
+
+def test_deliverable_target_counts_only_slots_in_the_book():
+    from optimizer.milp_consumer_delivery import deliverable_target_kwh
+
+    assert deliverable_target_kwh(EV, 41.3, list(range(12)), list(range(8)), dt_h=0.25) == pytest.approx(22.0)
+    assert deliverable_target_kwh(EV, 10.0, list(range(12)), None, dt_h=0.25) == 10.0

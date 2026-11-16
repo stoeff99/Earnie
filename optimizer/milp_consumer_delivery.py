@@ -85,6 +85,23 @@ def deliverable_indices(
     return indices
 
 
+def deliverable_target_kwh(
+    consumer: dict,
+    target_kwh: float,
+    eligible_indices: list[int],
+    book_indices: list[int] | None,
+    *,
+    dt_h: float,
+) -> float:
+    """The part of ``target_kwh`` the eligible slots can deliver at nominal power.
+
+    One rule for the MILP delivery constraint and the SE references (L1/L2), so both
+    plan the same energy when a charging window is too short for the target.
+    """
+    deliverable = deliverable_indices(consumer, eligible_indices, book_indices)
+    return min(float(target_kwh), _max_deliverable_kwh(consumer, deliverable, dt_h=dt_h))
+
+
 def _eligible_slot_labels(matrix: list, eligible_indices: list[int]) -> list[str]:
     from .charging_context import matrix_slot_datetime
 
@@ -427,11 +444,10 @@ def _add_one_consumer_delivery_constraints(
     # and a generic flex consumer needs room for a whole block. Otherwise the constraint
     # would be infeasible and the whole step would fall back to the automatic mode; the
     # undelivered energy stays in the remaining target of the next step.
-    deliverable = deliverable_indices(consumer, eligible, book_indices)
-    max_deliverable = _max_deliverable_kwh(
-        consumer, deliverable, dt_h=model.dt_h
+    effective_target = deliverable_target_kwh(
+        consumer, target, eligible, book_indices, dt_h=model.dt_h
     )
-    if max_deliverable <= 1e-9:
+    if effective_target <= 1e-9:
         if verbose:
             logger.warning(
                 "%s: Ziel (%.2f kWh) in diesem Schritt nicht lieferbar (%s zulässige Slots, "
@@ -442,7 +458,6 @@ def _add_one_consumer_delivery_constraints(
                 _min_on_hours(consumer),
             )
         return
-    effective_target = min(target, max_deliverable)
     model.prob += _delivery_energy_expr(model, consumer, eligible) >= effective_target
     _add_urgent_min_asap_constraint(
         model,

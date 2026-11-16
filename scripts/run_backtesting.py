@@ -9,6 +9,8 @@ if __name__ == "__main__":
 import argparse
 import json
 import logging
+import shutil
+import tempfile
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -66,10 +68,12 @@ from simulation.reference_ladder import (
 from simulation.backtesting_progress import (
     EXIT_CANCELLED,
     BacktestingCancelled,
+    clear_cancel_request,
     clear_progress_dir,
     ordered_backtesting_result_ids,
     prepare_progress_dir,
     reorder_results_by_ids,
+    request_cancel,
     worker_cancel_requested,
     worker_progress_path,
 )
@@ -555,84 +559,44 @@ def _run_parallel_backtesting(
         f"Parallele Berechnung: {ref_count} Referenz(en) + {sim_count} Szenarien "
         f"({workers} Worker)..."
     )
-    with ProcessPoolExecutor(max_workers=workers) as pool:
-        futures: dict = {}
-        for ref_id, params, label, worker_key in reference_specs:
-            futures[
-                pool.submit(
-                    _run_reference_worker,
-                    ref_id,
-                    start_iso,
-                    end_iso,
-                    prices,
-                    dict(params) if params is not None else None,
-                    progress_file,
-                    label,
-                    worker_key,
-                    horizon_mode,
-                )
-            ] = ("ref", ref_id, label)
-        for spec in ladder_specs:
-            futures[
-                pool.submit(
-                    _run_ladder_worker,
-                    spec.ref_id,
-                    spec.step,
-                    start_iso,
-                    end_iso,
-                    prices,
-                    dict(spec.params),
-                    progress_file,
-                    spec.label,
-                    horizon_mode,
-                )
-            ] = ("ladder", spec.ref_id, spec.label)
-        for name, params in scenarios.items():
-            futures[
-                pool.submit(
-                    _run_scenario_worker,
-                    name,
-                    dict(params),
-                    start_iso,
-                    end_iso,
-                    prices,
-                    horizon_mode,
-                    price_strategy,
-                    feature_dataset_path,
-                    forecast_model_path,
-                    progress_file,
-                    labels.get(name, name),
-                    plan_forecast,
-                )
-            ] = ("sim", name, labels.get(name, name))
-        for future in as_completed(futures):
-            kind, name, display = futures[future]
-            try:
-                if kind == "ref":
-                    result_name, df_result = future.result()
-                    ref_results[result_name] = df_result
-                elif kind == "ladder":
-                    result_name, df_result, report = future.result()
-                    ref_results[result_name] = df_result
-                    ladder_report[result_name] = report
-                else:
-                    result_name, df_result, plausibility, cbc_events, snapshots = (
-                        future.result()
-                    )
-                    sim_results[result_name] = df_result
-                    plausibility_by_scenario[result_name] = plausibility
-                    cbc_events_by_scenario[result_name] = cbc_events
-                    window_snapshots.extend(snapshots)
-            except BacktestingCancelled:
-                # The other workers see the same marker and stop at their next hour.
-                pool.shutdown(wait=True, cancel_futures=True)
-                raise
-            except Exception as exc:
-                raise RuntimeError(
-                    f"{'Szenario' if kind == 'sim' else 'Referenz'} "
-                    f"'{display}' ({name}) fehlgeschlagen: {exc}"
-                ) from exc
-            print(f"  Fertig: {display}")
+    # Workers stop via the cancel marker in the progress directory; without one from the
+    # caller a private directory gives the run the same early stop on a failed task.
+    own_progress_dir = None
+    if progress_file is None:
+        own_progress_dir = tempfile.mkdtemp(prefix="earnie_se_progress_")
+        progress_file = own_progress_dir
+    failure: RuntimeError | None = None
+    try:
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            failure = _collect_parallel_results(
+                pool,
+                reference_specs,
+                scenarios,
+                labels,
+                start_iso,
+                end_iso,
+                prices,
+                horizon_mode,
+                price_strategy,
+                feature_dataset_path,
+                forecast_model_path,
+                progress_file,
+                ladder_specs=ladder_specs,
+                plan_forecast=plan_forecast,
+                ref_results=ref_results,
+                sim_results=sim_results,
+                ladder_report=ladder_report,
+                plausibility_by_scenario=plausibility_by_scenario,
+                cbc_events_by_scenario=cbc_events_by_scenario,
+                window_snapshots=window_snapshots,
+            )
+    finally:
+        if own_progress_dir is not None:
+            shutil.rmtree(own_progress_dir, ignore_errors=True)
+    if failure is not None:
+        # The marker only stopped this run's workers; the next run must not see it.
+        clear_cancel_request(progress_file)
+        raise failure
     return (
         {**ref_results, **sim_results},
         plausibility_by_scenario,
@@ -640,6 +604,120 @@ def _run_parallel_backtesting(
         window_snapshots,
         ladder_report,
     )
+
+
+def _collect_parallel_results(
+    pool: ProcessPoolExecutor,
+    reference_specs: list[tuple[str, dict | None, str, str]],
+    scenarios: dict[str, dict],
+    labels: dict[str, str],
+    start_iso: str,
+    end_iso: str,
+    prices: pd.DataFrame,
+    horizon_mode: str,
+    price_strategy: str,
+    feature_dataset_path: str | None,
+    forecast_model_path: str | None,
+    progress_file: str,
+    *,
+    ladder_specs: list[LadderReferenceSpec],
+    plan_forecast: tuple[str, ...] | None,
+    ref_results: dict[str, pd.DataFrame],
+    sim_results: dict[str, pd.DataFrame],
+    ladder_report: dict[str, dict],
+    plausibility_by_scenario: dict[str, object],
+    cbc_events_by_scenario: dict[str, list[dict]],
+    window_snapshots: list[dict],
+) -> RuntimeError | None:
+    """Submit all tasks and collect their results; the first failure stops the others.
+
+    Returns the failure (the caller raises it once the pool has shut down) or ``None``.
+    Without the early stop a reference failing after a minute surfaced only when the
+    longest scenario had finished, often after an hour.
+    """
+    futures: dict = {}
+    for ref_id, params, label, worker_key in reference_specs:
+        futures[
+            pool.submit(
+                _run_reference_worker,
+                ref_id,
+                start_iso,
+                end_iso,
+                prices,
+                dict(params) if params is not None else None,
+                progress_file,
+                label,
+                worker_key,
+                horizon_mode,
+            )
+        ] = ("ref", ref_id, label)
+    for spec in ladder_specs:
+        futures[
+            pool.submit(
+                _run_ladder_worker,
+                spec.ref_id,
+                spec.step,
+                start_iso,
+                end_iso,
+                prices,
+                dict(spec.params),
+                progress_file,
+                spec.label,
+                horizon_mode,
+            )
+        ] = ("ladder", spec.ref_id, spec.label)
+    for name, params in scenarios.items():
+        futures[
+            pool.submit(
+                _run_scenario_worker,
+                name,
+                dict(params),
+                start_iso,
+                end_iso,
+                prices,
+                horizon_mode,
+                price_strategy,
+                feature_dataset_path,
+                forecast_model_path,
+                progress_file,
+                labels.get(name, name),
+                plan_forecast,
+            )
+        ] = ("sim", name, labels.get(name, name))
+    for future in as_completed(futures):
+        kind, name, display = futures[future]
+        try:
+            if kind == "ref":
+                result_name, df_result = future.result()
+                ref_results[result_name] = df_result
+            elif kind == "ladder":
+                result_name, df_result, report = future.result()
+                ref_results[result_name] = df_result
+                ladder_report[result_name] = report
+            else:
+                result_name, df_result, plausibility, cbc_events, snapshots = (
+                    future.result()
+                )
+                sim_results[result_name] = df_result
+                plausibility_by_scenario[result_name] = plausibility
+                cbc_events_by_scenario[result_name] = cbc_events
+                window_snapshots.extend(snapshots)
+        except BacktestingCancelled:
+            # The other workers see the same marker and stop at their next hour.
+            pool.shutdown(wait=True, cancel_futures=True)
+            raise
+        except Exception as exc:
+            failure = RuntimeError(
+                f"{'Szenario' if kind == 'sim' else 'Referenz'} "
+                f"'{display}' ({name}) fehlgeschlagen: {exc}"
+            )
+            failure.__cause__ = exc
+            print(f"  Fehlgeschlagen: {display} – übrige Berechnungen werden gestoppt.")
+            request_cancel(progress_file)
+            pool.shutdown(wait=False, cancel_futures=True)
+            return failure
+        print(f"  Fertig: {display}")
+    return None
 
 
 _PROGRESS_WRITE_MIN_INTERVAL_SEC = 1.0

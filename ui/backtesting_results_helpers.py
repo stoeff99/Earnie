@@ -398,6 +398,7 @@ def _ladder_report_hints(report: dict | None) -> list[str]:
     for key, text in (
         ("no_shape_windows", "ohne Lastprofil, läuft ab Fensterbeginn mit Nennleistung"),
         ("no_published_block_windows", "ohne veröffentlichte Preise, behält seine Startzeit"),
+        ("capped_target_windows", "mit zu kurzem Ladefenster, Ziel wie in der Optimierung begrenzt"),
     ):
         windows = report.get(key) or {}
         if windows:
