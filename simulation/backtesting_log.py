@@ -23,6 +23,7 @@ from .engine import (
     PlausibilityReport,
     PlausibilityResult,
 )
+from .atomic_files import append_lines_atomically, write_atomically
 from .backtesting_snapshots import (
     BACKTESTING_WINDOW_SNAPSHOTS_JSONL,
     remove_window_snapshots_jsonl,
@@ -210,7 +211,7 @@ def write_price_series_csv(prices: pd.DataFrame | None, target_dir: str) -> str 
     out = prices.copy()
     out.index.name = out.index.name or "ts_price"
     out.reset_index(inplace=True)
-    out.to_csv(csv_path, index=False, sep=";", decimal=",")
+    write_atomically(csv_path, lambda tmp: out.to_csv(tmp, index=False, sep=";", decimal=","))
     return csv_path
 
 
@@ -410,11 +411,14 @@ def _append_cbc_events_jsonl(
         "period_end": period.get("end"),
         "logged_at": datetime.now(timezone.utc).isoformat(),
     }
-    with open(path, "a", encoding="utf-8") as f:
-        for scenario_id, events in events_by_scenario.items():
-            for event in events:
-                line = {**run_meta, **event, "scenario_id": scenario_id}
-                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    append_lines_atomically(
+        path,
+        [
+            json.dumps({**run_meta, **event, "scenario_id": scenario_id}, ensure_ascii=False)
+            for scenario_id, events in events_by_scenario.items()
+            for event in events
+        ],
+    )
     return path
 
 
@@ -628,7 +632,9 @@ def save_backtesting_log(
         results = clip_results_map_to_period(results, period_start, period_end)
 
     hourly_df = _hourly_to_csv(results, labels)
-    hourly_df.to_csv(csv_path, index=False, sep=";", decimal=",")
+    write_atomically(
+        csv_path, lambda tmp: hourly_df.to_csv(tmp, index=False, sep=";", decimal=",")
+    )
 
     all_ts = _collect_all_timestamps(results)
     payload = _build_log_payload(
@@ -654,8 +660,12 @@ def save_backtesting_log(
     if heat_fuel:
         payload[HEAT_FUEL_KEY] = heat_fuel
 
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
+    def write_json(tmp: str) -> None:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    # Last on purpose: the JSON is the index the UI reads; it names the sidecars above.
+    write_atomically(json_path, write_json)
 
     return json_path
 

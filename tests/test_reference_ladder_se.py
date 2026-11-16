@@ -165,6 +165,7 @@ def test_ladder_worker_reports_progress_and_quality(ladder_env, tmp_path):
         "no_shape_windows",
         "no_published_block_windows",
         "truncated_lock_slots",
+        "capped_target_windows",
     }
 
 

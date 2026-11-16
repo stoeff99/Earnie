@@ -524,21 +524,68 @@ def _max_on_slots_cycling(
     run_left: int = 0,
     pause_left: int = 0,
 ) -> int:
-    """Upper bound on ON slots for a cycling heat pump (greedy: run max, pause min)."""
-    on_slots = 0
-    t = 0
-    if run_left > 0:
-        k = min(run_left, day_slots)
-        on_slots += k
-        t = k + min_off
-    t = max(t, pause_left)
-    starts = 0
-    while t < day_slots and starts < max_pulses:
-        k = min(max_hours, day_slots - t)
-        on_slots += k
-        t += k + min_off
-        starts += 1
-    return on_slots
+    """Upper bound on ON slots for a cycling heat pump in one day starting at slot 0."""
+    return _max_on_slots_cycling_by_day(
+        [(date.min, list(range(day_slots)))],
+        max_hours=max_hours,
+        min_off=min_off,
+        max_pulses=max_pulses,
+        run_left=run_left,
+        pause_left=pause_left,
+    ).get(date.min, 0)
+
+
+def _max_on_slots_cycling_by_day(
+    days: list[tuple[date, list[int]]],
+    *,
+    max_hours: int,
+    min_off: int,
+    max_pulses: int,
+    run_left: int = 0,
+    pause_left: int = 0,
+) -> dict[date, int]:
+    """ON slots per day of one greedy schedule (run max, pause min) over the whole horizon.
+
+    The run/pause state carries across midnight: a run that starts late in one day forces its
+    pause into the next. A per-day bound that starts every day fresh overstates the second day
+    and makes back-to-back capacity-bound targets infeasible. The greedy schedule obeys the
+    run, pause and per-day start limits, so it is a witness: every day can deliver at least its
+    count here at the same time. ``days`` holds each day's usable horizon indices; indices not
+    listed (before the first day, gaps) count as OFF. ``run_left``/``pause_left`` describe
+    horizon index 0 (live carry-in).
+    """
+    counts: dict[date, int] = {day: 0 for day, _ in days}
+    slots = sorted((index, day) for day, indices in days for index in indices)
+    running = run_left > 0
+    run_room = run_left
+    off_left = pause_left
+    starts: dict[date, int] = {}
+    previous = -1
+    for index, day in slots:
+        gap = index - previous - 1
+        if gap > 0:
+            if running:
+                running = False
+                off_left = min_off
+            off_left = max(0, off_left - gap)
+        previous = index
+        if running and run_room > 0:
+            run_room -= 1
+            counts[day] += 1
+            continue
+        if running:
+            running = False
+            off_left = min_off
+        if off_left > 0:
+            off_left -= 1
+            continue
+        if starts.get(day, 0) >= max_pulses:
+            continue
+        starts[day] = starts.get(day, 0) + 1
+        running = True
+        run_room = max_hours - 1
+        counts[day] += 1
+    return counts
 
 
 def add_min_off_constraints(
@@ -1003,13 +1050,31 @@ def _add_one_thermal_flex_consumer(
     )
     _force_thermal_on_slots(model, cid, on_vars, forced_indices, eligible_set)
     day_targets: list[tuple[date, pulp.LpAffineExpression, float]] = []
+    target_days: list[tuple[date, list[int]]] = []
     for day in sorted(set(daily_targets) | set(live_day_min)):
-        matrix_day_indices = _indices_for_date(matrix, day)
         day_indices = [
-            index for index in matrix_day_indices if index in eligible_set
+            index for index in _indices_for_date(matrix, day) if index in eligible_set
         ]
-        if not day_indices:
-            continue
+        if day_indices:
+            target_days.append((day, day_indices))
+    cycling_slots: dict[date, int] = {}
+    if not forced_indices and min_off > 1:
+        run_left = (
+            max(0, max_hours - int(carry.get("run_elapsed_slots") or 0))
+            if running_before
+            else 0
+        )
+        # A run already at its limit must stop at slot 0 and then pause.
+        pause_left = len(blocked) if run_left or not running_before else max(len(blocked), min_off)
+        cycling_slots = _max_on_slots_cycling_by_day(
+            [(day, [i for i in indices if i not in blocked]) for day, indices in target_days],
+            max_hours=max_hours,
+            min_off=min_off,
+            max_pulses=max_pulses,
+            run_left=run_left,
+            pause_left=pause_left,
+        )
+    for day, day_indices in target_days:
         _, max_kw = power_limits_kw(consumer)
         max_deliverable = _max_deliverable_kwh(
             consumer,
@@ -1020,26 +1085,22 @@ def _add_one_thermal_flex_consumer(
         if forced_indices:
             op_max_kwh = max_deliverable
         elif min_off > 1:
-            first_day = 0 in day_indices
-            op_slots = _max_on_slots_cycling(
-                len(day_indices),
-                max_hours=max_hours,
-                min_off=min_off,
-                max_pulses=max_pulses,
-                run_left=(
-                    max(0, max_hours - int(carry.get("run_elapsed_slots") or 0))
-                    if first_day and running_before
-                    else 0
-                ),
-                pause_left=len(blocked) if first_day else 0,
-            )
-            op_max_kwh = op_slots * float(max_kw) * float(model.dt_h)
+            op_max_kwh = cycling_slots.get(day, 0) * float(max_kw) * float(model.dt_h)
         else:
             op_slots = _max_on_slots_with_limits(
                 len(day_indices), max_hours=max_hours, max_pulses=max_pulses
             )
             op_max_kwh = op_slots * float(max_kw) * float(model.dt_h)
         effective = min(want, max_deliverable, op_max_kwh)
+        if op_max_kwh < min(want, max_deliverable) - 1e-6:
+            logger.info(
+                "%s %s: Taktung begrenzt Tagesenergie auf %.2f kWh (Bedarf %.2f kWh) — "
+                "max. Laufzeit / Mindest-Pause lassen nicht mehr zu.",
+                cid,
+                day.isoformat(),
+                op_max_kwh,
+                want,
+            )
         if effective <= 1e-9:
             continue
         effective_by_day[day] = effective

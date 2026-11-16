@@ -7,6 +7,7 @@ and flex windows of the optimized run and always book actual prices.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import NamedTuple
@@ -16,7 +17,10 @@ import pandas as pd
 from optimizer.charging_schedule import contexts_within_book
 from optimizer.consumer_power import power_limits_kw
 from optimizer.export_power_limit import clip_grid_kw_to_export_cap
-from optimizer.milp_consumer_delivery import consumer_delivery_eligible_indices
+from optimizer.milp_consumer_delivery import (
+    consumer_delivery_eligible_indices,
+    deliverable_target_kwh,
+)
 from optimizer.milp_inputs import _resolve_thermal_flex_contexts
 from optimizer.rod_store import ROD_STORE_START_KEY, STORE_BALANCE_CONTEXT_KEY
 from optimizer.scenario_planning_scope import planning_scenario_scope
@@ -31,6 +35,7 @@ from optimizer.sim_baseline import (
 from optimizer.sim_chart_rows import COL_EINSPEISEVERGUETUNG
 from optimizer.sim_costs import calculate_step_cost_parts_from_row
 from optimizer.sim_horizon_types import _HorizonOptions
+from optimizer.slot_duration import DEFAULT_DT_H
 from optimizer.thermal_flex_context import (
     consumer_thermal_eligible_indices,
     is_heating_rod_consumer,
@@ -61,6 +66,8 @@ _LADDER_LABELS = {
 }
 
 
+logger = logging.getLogger(__name__)
+
 @dataclass(frozen=True)
 class LadderReferenceResult:
     """One ladder step over the period.
@@ -68,6 +75,8 @@ class LadderReferenceResult:
     ``frame``: ``_REFERENCE_COST_COLUMNS`` plus ``sim_soc`` (start of slot). ``end_soc``: SoC
     after the last slot. ``no_shape_windows``: per consumer, the windows without a shape.
     ``no_published_block_windows``, ``truncated_lock_slots``: L2 only, see ``RuleBasedFlex``.
+    ``capped_target_windows``: per consumer, the windows whose target the eligible slots
+    could not deliver; capped like the optimized run (``deliverable_target_kwh``).
     """
 
     frame: pd.DataFrame
@@ -76,6 +85,7 @@ class LadderReferenceResult:
     no_shape_windows: dict[str, int]
     no_published_block_windows: dict[str, int]
     truncated_lock_slots: int
+    capped_target_windows: dict[str, int]
 
     def report(self) -> dict:
         """What the run log keeps of a ladder run."""
@@ -84,6 +94,7 @@ class LadderReferenceResult:
             "no_shape_windows": self.no_shape_windows,
             "no_published_block_windows": self.no_published_block_windows,
             "truncated_lock_slots": self.truncated_lock_slots,
+            "capped_target_windows": self.capped_target_windows,
         }
 
 
@@ -95,6 +106,7 @@ class _WindowResult(NamedTuple):
     no_published_block_ids: list[str]
     truncated_lock_slots: int
     rod_store_kwh: dict[str, float]
+    capped_ids: list[str]
 
 
 class LadderReferenceSpec(NamedTuple):
@@ -255,10 +267,13 @@ def _window_rows(
             [row["slot_datetime"] for row in setup.matrix], planned, shape_source
         )
         eligible = {c["id"]: _eligible_slots(setup, c, book) for c in planned}
+        targets, capped_ids = _deliverable_targets(
+            anchor, setup.horizon_limits, planned, eligible, book
+        )
         battery = _baseline_battery_params(battery_params)
         if rule_params is None:
             flex = build_shaped_flex_kw_per_slot(
-                len(setup.matrix), planned, setup.horizon_limits, shapes, eligible
+                len(setup.matrix), planned, targets, shapes, eligible
             )
             steuerbefehl = L1_STEUERBEFEHL
             no_published_block_ids: list[str] = []
@@ -267,7 +282,7 @@ def _window_rows(
             surplus_rods = _surplus_rods(setup, consumers, book)
             flex = build_rule_based_flex_kw_per_hour(
                 setup.matrix,
-                setup.horizon_limits,
+                targets,
                 eligible,
                 planned,
                 shapes,
@@ -309,7 +324,50 @@ def _window_rows(
         no_published_block_ids,
         truncated_lock_slots,
         {rod.cid: rod.level_kwh for rod in surplus_rods},
+        capped_ids,
     )
+
+
+def _deliverable_targets(
+    anchor: datetime,
+    horizon_limits: dict[str, float],
+    planned: list[dict],
+    eligible: dict[str, list[int]],
+    book: list[int],
+) -> tuple[dict[str, float], list[str]]:
+    """The optimized run's targets: a target its window cannot deliver is capped like the MILP.
+
+    Spec § 3.1 (same energy as L3). The MILP caps a non-thermal consumer's target at what
+    its eligible slots deliver at nominal power and plans the rest as undelivered; L1/L2
+    must use the same energy, or the window would fail although the run is consistent.
+    Thermal consumers keep their target: their day caps live in ``thermal_flex_context``.
+    """
+    targets = dict(horizon_limits)
+    capped: list[str] = []
+    for consumer in planned:
+        if is_thermal_flex_consumer(consumer):
+            continue
+        cid = consumer["id"]
+        target = float(targets.get(cid, 0.0) or 0.0)
+        if target <= 0.0:
+            continue
+        deliverable = deliverable_target_kwh(
+            consumer, target, eligible.get(cid, []), book, dt_h=DEFAULT_DT_H
+        )
+        if deliverable < target - 1e-6:
+            logger.warning(
+                "Referenz-Fenster %s: Verbraucher '%s' kann sein Ziel von %.3f kWh in %d "
+                "zulässigen Slots nicht erreichen – wie in der Optimierung auf %.3f kWh "
+                "begrenzt (Ladefenster zu kurz?).",
+                anchor,
+                cid,
+                target,
+                len(eligible.get(cid, [])),
+                deliverable,
+            )
+            targets[cid] = deliverable
+            capped.append(str(cid))
+    return targets, capped
 
 
 def curtail_negative_export(chart_row: dict, matrix_row: dict) -> None:
@@ -535,6 +593,7 @@ def _compute_ladder_step(
     no_shape_windows: dict[str, int] = {}
     no_published_block_windows: dict[str, int] = {}
     truncated_lock_slots = 0
+    capped_target_windows: dict[str, int] = {}
     total_hours = len(anchors) * BACKTESTING_STEP_HOURS
     soc = float(initial_soc)
     rod_store_kwh: dict[str, float] = {}
@@ -563,6 +622,8 @@ def _compute_ladder_step(
         for cid in window.no_published_block_ids:
             no_published_block_windows[cid] = no_published_block_windows.get(cid, 0) + 1
         truncated_lock_slots += window.truncated_lock_slots
+        for cid in window.capped_ids:
+            capped_target_windows[cid] = capped_target_windows.get(cid, 0) + 1
         for row in window.rows:
             _append_ladder_slot(series, row)
             timestamps.append(row["slot_datetime"])
@@ -590,6 +651,7 @@ def _compute_ladder_step(
         no_shape_windows,
         no_published_block_windows,
         truncated_lock_slots,
+        capped_target_windows,
     )
 
 

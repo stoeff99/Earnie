@@ -219,7 +219,9 @@ Details: [EHAL-Com](../ui/ehal-com.md), [Loxone-Signale](../referenz/loxone-sign
 | `min_off_quarterhours` | 4 | Pflichtpause nach jedem Lauf (60 min) |
 | `max_pulses_per_day` | 14 | Starts pro Tag; muss für taktende Geräte hoch genug sein |
 
-**In der Planung:** Nach jedem geplanten Lauf hält Earnie die Wärmepumpe mindestens `min_off_quarterhours` Slots aus. Das Tagesziel kappt Earnie auf die Energie, die das Taktmuster liefern kann. Im Beispiel sind das höchstens 3 von 7 Slots, also rund 43 % der Nennleistung.
+**In der Planung:** Nach jedem geplanten Lauf hält Earnie die Wärmepumpe mindestens `min_off_quarterhours` Slots aus. Das Tagesziel kappt Earnie auf die Energie, die das Taktmuster liefern kann. Im Beispiel sind das höchstens 3 von 7 Slots, also rund 43 % der Nennleistung. Das Taktmuster läuft über Mitternacht weiter: Ein Lauf kurz vor Mitternacht schiebt seine Pause in den nächsten Tag, und Earnie rechnet diese Pause beim Tagesziel des Folgetags mit ein. Kappt die Taktung ein Tagesziel, steht im Log „Taktung begrenzt Tagesenergie auf … kWh“.
+
+**Werte wählen:** Tragen Sie die Grenzen ein, die Ihre Wärmepumpe wirklich hat (Handbuch oder Regler, oft „Sperrzeit“ oder „Taktsperre“). Eine Wärmepumpe ohne festes Laufzeitende braucht keine kurze `max_on_quarterhours`; lange Läufe schonen den Verdichter, geschützt wird er durch die Pause. Eine zu kurze Laufzeit oder zu lange Pause begrenzt die Wärme an kalten Tagen (siehe 43 % oben). Lange Pflichtpausen machen die Rechnung außerdem schwer: Mit 60 Minuten Pause findet der Optimierer an kalten Tagen oft keinen Plan innerhalb seines Zeitlimits, und der Szenario-Explorer wird im Winter sehr langsam. Typisch für eine Erdsonden-Wärmepumpe mit Taktsperre von 20–30 Minuten: `max_on_quarterhours` 16, `min_off_quarterhours` 2.
 
 Mit Wärmespeicher und einer Komfort-Untergrenze, die bestimmte Stunden erzwingt, gelten wie bisher weder `max_on_quarterhours` noch die Pflichtpause innerhalb des Plans. Eine laufende Pause aus dem Taktgedächtnis bleibt aber auch dann gesperrt.
 
@@ -595,6 +597,18 @@ Ladeziel in kWh (vereinfacht; die Akkukapazität stammt aus Live-EHAL, wenn gebu
 | Ladeziel (Limit) | `get_evcs_limit_soc` / `Earnie_EAuto_LimitSOC` | Oberes SOC-Ziel bis FertigUm; die Restenergie plant Earnie preisoptimiert. |
 | SOC-Min Sofort | `get_evcs_soc_min_immediate` / `Earnie_EAuto_SOCMinSofort` | Sofort-Boden: Earnie erzwingt bis zu diesem SOC eine Lieferung so schnell wie möglich (MILP) und plant danach normal bis zum Limit. Ein Wert ≤ 0 oder ein fehlendes Binding = inaktiv; ein Wert über dem Limit wird auf das Limit begrenzt. |
 | Sofortladen | `set_evcs_mode=now` / Legacy-Sofortsignal | Volllast bis zum Limit, **außerhalb** der MILP-Planung (das Smarthome steuert). Unterscheidet sich von SOC-Min Sofort. |
+
+### Ladeauftrag (einmalig, Monitor)
+
+Für ein einzelnes Anstecken lassen sich Ziel-SOC und Fertig-bis-Zeit abweichend vom Hauskonfigurator setzen: **Monitor → Ladeauftrag (einmalig)**. Earnie plant weiter die günstigsten Viertelstunden, nur mit diesem Ziel und dieser Frist (statt `ready_by_hour` und `target_soc_percent` des Wochentags). Gilt für E-Autos mit Tagesziel aus der Config (`daily_target_source: config`), nur im Live-Betrieb; der Szenario-Explorer rechnet mit der Historie.
+
+- **Setzen:** Ziel-SOC (1–100 %), Datum und Uhrzeit „Fertig um“ (Vorschlag: nächste Fertig-bis-Stunde aus dem Hauskonfigurator). Earnie plant sofort neu.
+- **Vor dem Anstecken gesetzt:** Der Auftrag wartet auf das Auto und greift beim Anstecken.
+- **Ende:** beim Abstecken, zur Fertig-bis-Zeit oder mit **Ladeauftrag aufheben**. Danach gilt wieder der Hauskonfigurator.
+- **Bereits voll geladen** (Ladeziel im Plug-Zyklus erfüllt): Ein Auftrag mit höherem Ziel lädt trotzdem weiter.
+- **Aus Loxone:** Dieselbe Wirkung, aber dauerhaft statt einmalig, haben die EHAL-Felder `get_evcs_ready_by_time` (FertigUm) und `get_evcs_limit_soc` (Ladeziel), siehe oben. Ein Ladeauftrag im Monitor hat Vorrang. Sofort mit Höchststrom laden: „Sofortladen“.
+
+Gespeichert in `runtime/charge_overrides.json`.
 
 Der Block `charging_schedule.milp` am EV-Verbraucher ist **Pflicht**, sobald Earnie den Ladestrom vorgibt (`set_evcs_max_current` gebunden). Ohne ihn bricht die Live-Optimierung mit einer Meldung ab, die das E-Auto nennt. Der Szenario-Explorer braucht ihn nicht. Die Werte stehen im Hauskonfigurator beim E-Auto unter **MILP-Feintuning**:
 

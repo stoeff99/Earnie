@@ -7,7 +7,7 @@ import pytest
 
 from house_config.planning_flex_bridge import planning_thermal_to_milp
 from optimizer import heatpump_cycle
-from optimizer.thermal_flex_context import _max_on_slots_cycling
+from optimizer.thermal_flex_context import _max_on_slots_cycling, _max_on_slots_cycling_by_day
 
 _DAY = date(2026, 11, 12)
 
@@ -27,8 +27,14 @@ def _wp(**overrides) -> dict:
     return planning_thermal_to_milp(raw)
 
 
-def _solve(consumer: dict, n: int, ctx: dict, *, want_kwh: float = 100.0) -> list[int]:
-    """Solve a flat-price horizon; the default want exceeds what the cycle allows."""
+def _solve(
+    consumer: dict, n: int, ctx: dict, *, want_kwh: float = 100.0, split: int | None = None
+) -> list[int]:
+    """Solve a flat-price horizon; the default want exceeds what the cycle allows.
+
+    ``split``: slots from this index on belong to the next day (a midnight inside the horizon),
+    each day with its own target of ``want_kwh``.
+    """
     from optimizer.cbc_solver import solve_with_strict_fallback
     from optimizer.milp import _add_milp_objective
     from optimizer.milp_consumers import filter_feasible_consumers
@@ -38,7 +44,7 @@ def _solve(consumer: dict, n: int, ctx: dict, *, want_kwh: float = 100.0) -> lis
     matrix = [
         {
             "hour": (index // 4) % 24,
-            "date": _DAY,
+            "date": _DAY if split is None or index < split else _DAY + timedelta(days=1),
             "slot_datetime": datetime.combine(_DAY, time(0)) + timedelta(minutes=15 * index),
             "k_act": 20.0,
             "price_buy": 0.20,
@@ -50,7 +56,11 @@ def _solve(consumer: dict, n: int, ctx: dict, *, want_kwh: float = 100.0) -> lis
     ]
     contexts = {
         consumer["id"]: {
-            "daily_targets": {_DAY: want_kwh},
+            "daily_targets": (
+                {_DAY: want_kwh}
+                if split is None
+                else {_DAY: want_kwh, _DAY + timedelta(days=1): want_kwh}
+            ),
             "slot_energy_kwh": [want_kwh / n] * n,
             "targets_slot_aligned": True,
             **ctx,
@@ -110,6 +120,39 @@ def test_cycle_cap_is_greedy_run_max_pause_min():
     assert _max_on_slots_cycling(28, max_hours=3, min_off=4, max_pulses=2) == 6
     assert _max_on_slots_cycling(10, max_hours=3, min_off=4, max_pulses=14, pause_left=3) == 3
     assert _max_on_slots_cycling(10, max_hours=3, min_off=4, max_pulses=14, run_left=1) == 1 + 3
+
+
+def test_cycle_cap_carries_run_and_pause_across_midnight():
+    # 64 + 32 slots: a fresh day 2 would allow 15, but day 1's last run (starting at its
+    # final slot) pushes its pause past midnight, so together only 28 + 14 fit.
+    day1, day2 = _DAY, _DAY + timedelta(days=1)
+    counts = _max_on_slots_cycling_by_day(
+        [(day1, list(range(64))), (day2, list(range(64, 96)))],
+        max_hours=3,
+        min_off=4,
+        max_pulses=14,
+    )
+    assert counts == {day1: 28, day2: 14}
+    assert _max_on_slots_cycling(32, max_hours=3, min_off=4, max_pulses=14) == 15
+
+
+def test_cycle_cap_gap_counts_as_pause():
+    # Indices 0..2 are not in any target day (off): the first day starts after a 3-slot pause.
+    counts = _max_on_slots_cycling_by_day(
+        [(_DAY, list(range(3, 10)))], max_hours=3, min_off=4, max_pulses=14, run_left=3
+    )
+    # The gap stops the run (3 off slots), one more pause slot, then one 3-slot run fits.
+    assert counts == {_DAY: 3}
+
+
+def test_milp_two_capacity_bound_days_stay_feasible():
+    # Regression: per-day caps that ignored the midnight carry made this Infeasible.
+    on = _solve(_wp(), 96, {}, split=64)
+    assert sum(on[:64]) == 28
+    assert sum(on[64:]) == 14
+    runs, gaps = _runs_and_gaps(on)
+    assert all(1 <= run <= 3 for run in runs)
+    assert all(gap >= 4 for gap in gaps)
 
 
 def test_milp_keeps_mandatory_pause_and_reaches_cycle_cap():

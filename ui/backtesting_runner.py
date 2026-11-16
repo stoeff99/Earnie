@@ -1,7 +1,9 @@
 """Subprocess-Start für scripts/run_backtesting aus der Streamlit-UI."""
 from __future__ import annotations
 
+import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -17,6 +19,7 @@ from simulation.backtesting_progress import (
     read_progress_file,
     read_progress_snapshot,
     request_cancel,
+    resolve_progress_dir,
 )
 from simulation.horizon_mode import DEFAULT_HORIZON_MODE
 
@@ -32,6 +35,13 @@ _DEBUGPY_ENV_PREFIXES = (
     "VSCODE_DEBUGPY",
 )
 _PROGRESS_POLL_SEC = 0.5
+RUN_PID_FILENAME = "run.pid"
+_LEFTOVER_CANCEL_WAIT_SEC = 30.0
+_LEFTOVER_TERM_WAIT_SEC = 5.0
+_SE_SCRIPT_MARKER = "run_backtesting"
+_PROC_ROOT = Path("/proc")
+
+logger = logging.getLogger(__name__)
 
 
 def project_root() -> Path:
@@ -234,6 +244,9 @@ def start_backtesting_subprocess(
     script_path = backtesting_script_path()
     if not script_path.is_file():
         raise FileNotFoundError(f"Backtesting-Skript fehlt: {script_path}")
+    # A run whose session is gone (browser closed, Streamlit restarted the session) may still
+    # be computing into the same folders: stop it, the new run starts from scratch.
+    stop_leftover_backtesting_run(progress_file)
     # A marker left by an earlier cancel must not stop the new run.
     clear_cancel_request(progress_file)
     cmd = build_backtesting_command(
@@ -253,7 +266,10 @@ def start_backtesting_subprocess(
         text=True,
         encoding="utf-8",
         errors="replace",
+        # Own process group: a leftover run is stopped together with its workers.
+        **({"start_new_session": True} if os.name == "posix" else {}),
     )
+    _write_run_pid(progress_file, proc.pid)
     stdout_chunks: list[str] = []
     stdout_reader = threading.Thread(
         target=_drain_subprocess_stdout,
@@ -285,7 +301,108 @@ def finish_backtesting_run(run: BacktestingRun) -> tuple[int, str]:
     exit_code = _normalize_exit_code(run.proc.returncode or 0, output)
     if run.progress_file:
         clear_progress_dir(run.progress_file)
+        _remove_run_pid(run.progress_file)
     return exit_code, output
+
+
+def _run_pid_path(progress_file: str | None) -> Path | None:
+    progress_dir = resolve_progress_dir(progress_file)
+    return None if progress_dir is None else progress_dir / RUN_PID_FILENAME
+
+
+def _write_run_pid(progress_file: str | None, pid: int) -> None:
+    path = _run_pid_path(progress_file)
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(pid), encoding="utf-8")
+
+
+def _remove_run_pid(progress_file: str | None) -> None:
+    path = _run_pid_path(progress_file)
+    if path is not None:
+        path.unlink(missing_ok=True)
+
+
+def _se_run_alive(pid: int) -> bool:
+    """True if ``pid`` is a running (not zombie) SE subprocess. Linux ``/proc`` only."""
+    proc_dir = _PROC_ROOT / str(pid)
+    try:
+        cmdline = (proc_dir / "cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        status = (proc_dir / "status").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if _SE_SCRIPT_MARKER not in cmdline:
+        return False  # PID reused by another process
+    state = next((line for line in status.splitlines() if line.startswith("State:")), "")
+    return "Z" not in state.split(":", 1)[-1].split()[:1]
+
+
+def _reap(pid: int) -> None:
+    """Collect the exit status of a finished child so it does not stay a zombie."""
+    try:
+        os.waitpid(pid, os.WNOHANG)
+    except (ChildProcessError, OSError):
+        pass
+
+
+def _wait_until_gone(pid: int, timeout_sec: float) -> bool:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        _reap(pid)
+        if not _se_run_alive(pid):
+            return True
+        time.sleep(_PROGRESS_POLL_SEC)
+    return False
+
+
+def stop_leftover_backtesting_run(progress_file: str | None) -> bool:
+    """Stop an SE run still writing into ``progress_file`` from an earlier session.
+
+    First the cancel marker (workers stop at their next simulated hour), then SIGTERM and
+    SIGKILL to the run's process group. Returns True if a run was stopped. Only on Linux
+    (``/proc``); elsewhere a leftover run is reported but not stopped.
+    """
+    path = _run_pid_path(progress_file)
+    if path is None or not path.is_file():
+        return False
+    try:
+        pid = int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        path.unlink(missing_ok=True)
+        return False
+    if not _PROC_ROOT.is_dir():
+        logger.warning(
+            "SE: PID-Datei eines früheren Laufs (%s) gefunden; ob er noch läuft, lässt sich "
+            "auf diesem System nicht prüfen. Der neue Lauf startet trotzdem.",
+            pid,
+        )
+        path.unlink(missing_ok=True)
+        return False
+    _reap(pid)
+    if not _se_run_alive(pid):
+        path.unlink(missing_ok=True)
+        return False
+    logger.warning(
+        "SE: ein früherer Lauf (PID %s) rechnet noch, ohne dass ihn eine Sitzung verfolgt — "
+        "er wird gestoppt, der neue Lauf startet von vorn.",
+        pid,
+    )
+    request_cancel(progress_file)
+    if not _wait_until_gone(pid, _LEFTOVER_CANCEL_WAIT_SEC):
+        for sig in (signal.SIGTERM, getattr(signal, "SIGKILL", signal.SIGTERM)):
+            try:
+                os.killpg(pid, sig)
+            except (ProcessLookupError, PermissionError, AttributeError):
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    break
+            if _wait_until_gone(pid, _LEFTOVER_TERM_WAIT_SEC):
+                break
+    clear_progress_dir(progress_file)
+    path.unlink(missing_ok=True)
+    return True
 
 
 def poll_backtesting_progress(
