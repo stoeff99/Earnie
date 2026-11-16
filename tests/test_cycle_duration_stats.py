@@ -167,6 +167,49 @@ def test_prune_drops_records_beyond_retention(runtime):
     assert ticks == [keep["tick"], now.isoformat()]
 
 
+def test_damaged_line_is_moved_aside_and_reported(runtime, caplog):
+    path = stats_path()
+    a = {"tick": "2026-10-15T09:00:00", "on_time": True}
+    b = {"tick": "2026-10-15T09:15:00", "on_time": True}
+    path.write_bytes(
+        json.dumps(a).encode() + b"\n" + b"\x00" * 64 + b"\n"
+        + b'{"tick": "2026-10-15T09:0' + b"\n" + json.dumps(b).encode() + b"\n"
+    )
+    with caplog.at_level(logging.ERROR, logger="cycle_stats"):
+        rows = load_records()
+    assert rows == [a, b]
+    assert "2 beschädigte Zeile(n)" in caplog.text and "Zeile 2, 3" in caplog.text
+    assert [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] == [a, b]
+    assert stats_mod.damaged_path(path).read_bytes().count(b"\n") == 2
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="cycle_stats"):
+        assert load_records() == [a, b]
+    assert caplog.text == ""
+
+
+def test_prune_due_with_damaged_line_does_not_raise(runtime):
+    """Regression: a NUL line from a cut-off write crashed every live cycle once pruning was due."""
+    path = stats_path()
+    now = datetime(2026, 10, 15, 9, 0)
+    old = {"tick": (now - timedelta(days=9)).isoformat(), "on_time": False}
+    keep = {"tick": (now - timedelta(days=1)).isoformat(), "on_time": False}
+    path.write_bytes(
+        json.dumps(old).encode() + b"\n" + b"\x00" * 1030 + b"\n" + json.dumps(keep).encode() + b"\n"
+    )
+    stats_mod.append_record({"tick": now.isoformat(), "on_time": True})
+    assert [row["tick"] for row in load_records()] == [keep["tick"], now.isoformat()]
+
+
+def test_prune_with_damaged_first_line(runtime):
+    path = stats_path()
+    now = datetime(2026, 10, 15, 9, 0)
+    keep = {"tick": (now - timedelta(days=1)).isoformat(), "on_time": False}
+    path.write_bytes(b"\x00\x00\x00\n" + json.dumps(keep).encode() + b"\n")
+    stats_mod.append_record({"tick": now.isoformat(), "on_time": True})
+    assert [row["tick"] for row in load_records()] == [keep["tick"], now.isoformat()]
+    assert stats_mod.damaged_path(path).is_file()
+
+
 def test_regular_cycle_logs_punctuality_line(runtime, caplog):
     tick = datetime.now().replace(microsecond=0)
     with caplog.at_level(logging.INFO, logger="cycle_stats"):

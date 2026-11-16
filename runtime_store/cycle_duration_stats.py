@@ -291,27 +291,78 @@ def append_record(record: dict, *, path: Path | None = None) -> None:
         logger.warning("cycle_stats: write to %s failed: %s", target, exc)
 
 
+def _parse_line(raw: bytes) -> dict | None:
+    """One stats record, or ``None`` if the line is not a JSON object."""
+    try:
+        row = json.loads(raw.decode("utf-8"))
+    except ValueError:  # JSONDecodeError and UnicodeDecodeError
+        return None
+    return row if isinstance(row, dict) else None
+
+
+def damaged_path(path: Path) -> Path:
+    return path.with_name(path.name + ".damaged")
+
+
 def load_records(path: Path | None = None) -> list[dict]:
+    """All records; damaged lines are moved to ``<file>.damaged`` and logged as an error.
+
+    A cut-off write (container killed mid-append, power loss) can leave a line of
+    NUL bytes or half a JSON object. Such a line must not break the live cycle,
+    so it is taken out of the file once, kept for diagnosis, and reported loudly.
+    """
     source = path or stats_path()
     if not source.is_file():
         return []
     rows: list[dict] = []
-    for line in source.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line:
-            rows.append(json.loads(line))
+    good: list[bytes] = []
+    damaged: list[tuple[int, bytes]] = []
+    for lineno, raw in enumerate(source.read_bytes().splitlines(), start=1):
+        if not raw.strip():
+            continue
+        row = _parse_line(raw)
+        if row is None:
+            damaged.append((lineno, raw))
+        else:
+            rows.append(row)
+            good.append(raw)
+    if damaged:
+        _quarantine_damaged(source, good, damaged)
     return rows
+
+
+def _quarantine_damaged(
+    path: Path, good: list[bytes], damaged: list[tuple[int, bytes]]
+) -> None:
+    target = damaged_path(path)
+    with target.open("ab") as fh:
+        for _lineno, raw in damaged:
+            fh.write(raw + b"\n")
+    tmp = path.with_suffix(".jsonl.tmp")
+    tmp.write_bytes(b"".join(raw + b"\n" for raw in good))
+    os.replace(tmp, path)
+    logger.error(
+        "cycle_stats: %d beschädigte Zeile(n) in %s (Zeile %s) nach %s verschoben "
+        "— vermutlich ein abgebrochener Schreibvorgang (Container hart gestoppt?).",
+        len(damaged),
+        path,
+        ", ".join(str(lineno) for lineno, _raw in damaged),
+        target,
+    )
 
 
 def _prune_if_due(path: Path, *, now: datetime) -> None:
     """Drop records older than ``RETENTION_DAYS``; rewrite at most once per day."""
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("rb") as fh:
         first = fh.readline().strip()
     if not first:
         return
-    oldest = datetime.fromisoformat(json.loads(first)["tick"])
-    if now - oldest <= timedelta(days=RETENTION_DAYS + 1):
-        return
+    head = _parse_line(first)
+    if head is not None:
+        oldest = datetime.fromisoformat(head["tick"])
+        if now - oldest <= timedelta(days=RETENTION_DAYS + 1):
+            return
+    # Damaged first line: load_records below moves it aside, then prune as usual.
     cutoff = now - timedelta(days=RETENTION_DAYS)
     kept = [
         row for row in load_records(path)
