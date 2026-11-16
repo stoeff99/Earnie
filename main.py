@@ -267,6 +267,26 @@ def _prefetch_for_next_cycle(tick: datetime, start_at: datetime) -> None:
         logger.warning("Prefetch für %s abgebrochen (%s).", tick.strftime("%H:%M"), exc)
 
 
+def _log_plan_discharge_cap(cap_kw: float, milp_plan: dict, matrix: list[dict]) -> None:
+    """Log the Automatik discharge cap and the later slot it keeps the energy for."""
+    from optimizer.automatik_cap import AUTOMATIK_CAP_REASON_KEY
+
+    reason = milp_plan.get(AUTOMATIK_CAP_REASON_KEY) or {}
+    slot = reason.get("slot")
+    when = "?"
+    if isinstance(slot, int) and 0 <= slot < len(matrix):
+        slot_dt = matrix[slot].get("slot_datetime")
+        when = slot_dt.strftime("%d.%m. %H:%M") if isinstance(slot_dt, datetime) else str(slot)
+    logger.info(
+        "Automatik discharge limit capped at %.2f kW (plan %.2f kW; battery reserved for "
+        "%s at %s ct)",
+        cap_kw,
+        float(milp_plan.get("p_discharge") or 0.0),
+        when,
+        reason.get("price_cent", "?"),
+    )
+
+
 def _live_heat_controls(
     live_consumers: list[dict],
     milp_plan: dict | None,
@@ -804,6 +824,11 @@ def _main_cycle(
             primary_battery = aggregate_battery_params_for_load(battery_params)
         else:
             primary_battery = battery_params
+        from optimizer.automatik_cap import automatik_cap_for_mode, lowest_cap_kw
+
+        plan_discharge_cap = automatik_cap_for_mode(
+            mode, milp_plan if isinstance(milp_plan, dict) else None
+        )
         battery_plan_kw = optimizer.battery_plan_kw_from_control(
             mode,
             target_power,
@@ -811,6 +836,7 @@ def _main_cycle(
             optimization_matrix[0]["expected_p_act"],
             sum(consumer_powers.values()),
             primary_battery["max_power_kw"],
+            automatik_discharge_cap_kw=plan_discharge_cap,
         )
         advance_virtual_reserves_from_plan(
             battery_plan_kw=float(battery_plan_kw),
@@ -828,6 +854,9 @@ def _main_cycle(
                 "Automatik discharge limit capped at %.2f kW (virtual reserve floor)",
                 automatik_discharge_cap,
             )
+        if plan_discharge_cap is not None:
+            _log_plan_discharge_cap(plan_discharge_cap, milp_plan, optimization_matrix)
+        automatik_discharge_cap = lowest_cap_kw(automatik_discharge_cap, plan_discharge_cap)
         reserve_charges = physical_charge_setpoints_kw(active_reserves)
         standby_sources, standby_charges = live_source_and_charge(standby_plans, slot=0)
         # Hard clamp to effective pack max (HK ∩ live) — never write above resolve.

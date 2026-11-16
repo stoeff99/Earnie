@@ -5,6 +5,7 @@ from datetime import datetime
 
 from data.price_forecast_live import is_extrapolated_source
 from optimizer import battery as bat
+from optimizer.automatik_cap import automatik_cap_for_mode
 from optimizer.consumer_power import uses_pv_follow
 from optimizer.import_cap_report import SLOT_CAUSE_KEY, SLOT_LIMIT_KEY
 from optimizer.slot_duration import DEFAULT_DT_H
@@ -133,16 +134,21 @@ def _chart_row_from_controls(
     target_power: float,
     consumer_powers: dict[str, float],
     consumer_pv_follow: dict[str, int],
+    automatik_discharge_cap_kw: float | None = None,
 ) -> tuple[float, dict, int, float]:
-    """Baut Chart-Zeile aus Modus/Flex-Leistungen (gemeinsam für MPC und commit-K)."""
+    """Baut Chart-Zeile aus Modus/Flex-Leistungen (gemeinsam für MPC und commit-K).
+
+    ``automatik_discharge_cap_kw``: plan cap in Automatik (``optimizer.automatik_cap``).
+    """
     pv = row["expected_p_pv"]
     con = bat.effective_p_act(row, battery_params)
     total_flex_power = sum(consumer_powers.values())
     max_power = battery_params["max_power_kw"]
     batt_action = bat.battery_plan_kw_from_control(
-        mode, target_power, pv, con, total_flex_power, max_power
+        mode, target_power, pv, con, total_flex_power, max_power,
+        automatik_discharge_cap_kw=automatik_discharge_cap_kw,
     )
-    action_text = bat.steuerbefehl_for_mode(mode, target_power)
+    action_text = bat.steuerbefehl_for_mode(mode, target_power, automatik_discharge_cap_kw)
     old_soc = sim_soc
     sim_soc, batt_action = bat.apply_soc_change(
         old_soc,
@@ -213,6 +219,7 @@ def _chart_row_from_schedule_slot(
         target_power,
         consumer_powers,
         consumer_pv_follow,
+        automatik_discharge_cap_kw=automatik_cap_for_mode(mode, slot),
     )
     if SLOT_LIMIT_KEY in slot:
         result[1][SLOT_LIMIT_KEY] = slot[SLOT_LIMIT_KEY]
@@ -267,8 +274,14 @@ def finalize_chart_row_energy(
     con = float(chart_row[COL_VERBRAUCH_PROGNOSE])
     total_flex = flexible_consumer_power_kw(chart_row)
     max_power = battery_params["max_power_kw"]
+    cap = (
+        bat.automatik_cap_from_steuerbefehl(chart_row.get("Steuerbefehl", ""))
+        if mode == bat.MODE_AUTOMATIK
+        else None
+    )
     batt_action = bat.battery_plan_kw_from_control(
-        mode, target_power, pv, con, total_flex, max_power
+        mode, target_power, pv, con, total_flex, max_power,
+        automatik_discharge_cap_kw=cap,
     )
     new_soc, batt_action = bat.apply_soc_change(
         old_soc,

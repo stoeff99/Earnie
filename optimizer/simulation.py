@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 
 import config
+from .automatik_cap import automatik_cap_for_mode
 from .cbc_events import (
     begin_cbc_event_collection,
     cbc_event_collection_active,
@@ -159,6 +160,7 @@ def _simulate_single_hour_optimizer(
         target_power,
         consumer_powers,
         consumer_pv_follow,
+        automatik_discharge_cap_kw=automatik_cap_for_mode(mode, plan),
     )
     mark = first_slot_mark(plan, import_caps) if import_caps is not None else None
     if mark is not None:
