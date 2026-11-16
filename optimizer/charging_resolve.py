@@ -7,6 +7,7 @@ from datetime import datetime
 import config
 from integrations import ehal_live
 from optimizer.charging_schedule import (
+    _align_like,
     _facade_loxone_ready_raw,
     charging_schedule_enabled,
     config_day_schedule,
@@ -318,7 +319,9 @@ def _config_path_apply_live_ist_soc(
     )
     updated = dict(out)
     updated["target_kwh"] = round(target_kwh, 3) if target_kwh is not None else None
-    if from_loxone:
+    if out.get("charge_override") is not None:
+        updated["source_label"] = f"{out['source_label']} (Ist-SOC → kWh)"
+    elif from_loxone:
         updated["source_label"] = "config.json (Ist-SOC → kWh, FertigUm Loxone)"
     else:
         updated["source_label"] = "config.json (Ist-SOC → kWh)"
@@ -372,6 +375,17 @@ def _resolve_config_path_charging_context(
         ready_raw,
         open_cycle_deadline=open_cycle_deadline,
     )
+    job = _active_charge_override(consumer, horizon_start, out)
+    if job is not None:
+        limit_soc = float(job.target_soc_percent)
+        out = _apply_charge_override(
+            out,
+            job,
+            horizon_start,
+            target_kwh=config.Config.target_kwh_from_rest_soc(
+                consumer, rest_soc, capacity_kwh=capacity_kwh, limit_soc_percent=limit_soc
+            ),
+        )
     return _config_path_apply_live_ist_soc(
         out,
         consumer,
@@ -379,6 +393,45 @@ def _resolve_config_path_charging_context(
         limit_soc=limit_soc,
         from_loxone=from_loxone,
     )
+
+
+def _active_charge_override(consumer: dict, horizon_start: datetime, ctx: dict):
+    """The one-off charge job of this EV (Monitor page), or ``None``.
+
+    Ends the job on unplug or a passed ready-by time (``runtime_store.charge_overrides``).
+    """
+    from runtime_store import charge_overrides
+
+    plugged = ctx.get("plugged_in")
+    job = charge_overrides.active_override(
+        consumer["id"],
+        now=horizon_start,
+        plugged_in=None if plugged is None else bool(plugged),
+    )
+    if job is None or plugged is False:
+        return None  # a job waits for the car while it is away
+    return job
+
+
+def _apply_charge_override(
+    ctx: dict, job, horizon_start: datetime, *, target_kwh: float | None
+) -> dict:
+    """Replace deadline and target of the plugged-in context with the one-off job."""
+    out = dict(ctx)
+    out["active"] = True
+    out["deadline"] = _align_like(horizon_start, job.ready_by)
+    out["target_kwh"] = round(target_kwh, 3) if target_kwh is not None else None
+    out["use_time_window"] = False
+    out["charge_override"] = {
+        "target_soc_percent": float(job.target_soc_percent),
+        "ready_by": job.ready_by.isoformat(),
+        "source": job.source,
+    }
+    out["source_label"] = (
+        f"Ladeauftrag (einmalig): Ziel {job.target_soc_percent:.0f} % bis "
+        f"{job.ready_by.strftime('%d.%m. %H:%M')}"
+    )
+    return out
 
 
 def resolve_charging_context(
@@ -476,7 +529,7 @@ def apply_plug_cycle_fulfilled_contexts(
             continue
         if ctx.get("plugged_in") is not True:
             continue
-        if ctx.get("immediate_charge"):
+        if ctx.get("immediate_charge") or ctx.get("charge_override") is not None:
             continue
         out[cid] = _plugged_in_fulfilled_context()
     return out

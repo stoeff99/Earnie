@@ -49,6 +49,9 @@ def render() -> None:
     from ui.ev_assignment_panel import render_ev_assignment_panel
 
     render_ev_assignment_panel()
+    from ui.charge_override_panel import render_charge_override_panel
+
+    render_charge_override_panel()
 
     current_soc = ehal_live.read_ess_soc()
     render_optimization_savings_and_chart(current_soc)
