@@ -12,6 +12,7 @@ from .battery import (
     MODE_ZWANGS_ENTLADEN,
     MODE_ZWANGS_LADEN,
     apply_soc_change as _apply_soc_change,
+    automatik_cap_from_steuerbefehl,
     battery_plan_kw_from_control,
 )
 from .slot_duration import DEFAULT_DT_H
@@ -209,8 +210,14 @@ def check_mode_battery_alignment(
         pv = float(row["PV-Prognose (kW)"])
         con = float(row["Verbrauch-Prognose (kW)"])
         flex = _flexible_consumer_power_kw(row)
+        cap = (
+            automatik_cap_from_steuerbefehl(row.get("Steuerbefehl", ""))
+            if mode == MODE_AUTOMATIK
+            else None
+        )
         expected = battery_plan_kw_from_control(
-            mode, target_power, pv, con, flex, max_power
+            mode, target_power, pv, con, flex, max_power,
+            automatik_discharge_cap_kw=cap,
         )
         actual = float(row["Geplante Batterie-Aktion (kW)"])
         old_soc = float(row["Simulierter SoC (%)"])

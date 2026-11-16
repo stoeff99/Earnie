@@ -1,6 +1,8 @@
 """Batterie-Steuerung, SoC-Berechnung und Loxone-Modi."""
 from __future__ import annotations
 
+import re
+
 import config
 
 MODE_AUTOMATIK = 0
@@ -29,15 +31,35 @@ def effective_p_act(matrix_row: dict, battery_params: dict) -> float:
     return float(matrix_row["expected_p_act"]) + standby_power_kw(battery_params)
 
 
-def steuerbefehl_for_mode(mode: int, target_power_kw: float = 0.0) -> str:
-    """Steuerbefehl-Text für Chart und Simulations-Tabelle."""
+AUTOMATIK_CAP_TEXT = "Automatikbetrieb (Entladung max. {cap} kW)"
+_AUTOMATIK_CAP_RE = re.compile(r"^Automatikbetrieb \(Entladung max\. ([-\d.]+) kW\)")
+
+
+def steuerbefehl_for_mode(
+    mode: int,
+    target_power_kw: float = 0.0,
+    automatik_discharge_cap_kw: float | None = None,
+) -> str:
+    """Steuerbefehl-Text für Chart und Simulations-Tabelle.
+
+    Automatik with a discharge cap (``optimizer.automatik_cap``) names the cap, so rows
+    recomputed from the text (``finalize_chart_row_energy``, consistency) keep it.
+    """
     if mode == MODE_ZWANGS_LADEN:
         return f"Zwangsladen ({target_power_kw} kW)"
     if mode == MODE_ENTLADESPERRE:
         return "Entladesperre aktiv"
     if mode == MODE_ZWANGS_ENTLADEN:
         return f"Zwangsentladen ({target_power_kw} kW)"
+    if mode == MODE_AUTOMATIK and automatik_discharge_cap_kw is not None:
+        return AUTOMATIK_CAP_TEXT.format(cap=round(float(automatik_discharge_cap_kw), 2))
     return "Automatikbetrieb"
+
+
+def automatik_cap_from_steuerbefehl(steuerbefehl: str) -> float | None:
+    """Discharge cap named in an Automatik Steuerbefehl, else ``None``."""
+    match = _AUTOMATIK_CAP_RE.match(str(steuerbefehl or "").strip())
+    return None if match is None else float(match.group(1))
 
 
 def battery_plan_kw_from_control(
@@ -47,8 +69,13 @@ def battery_plan_kw_from_control(
     p_con: float,
     total_flex_power: float,
     max_power_kw: float,
+    automatik_discharge_cap_kw: float | None = None,
 ) -> float:
-    """Batterieplan für run_state – abgeleitet aus Steuermodus (Huawei-Logik vereinfacht)."""
+    """Batterieplan für run_state – abgeleitet aus Steuermodus (Huawei-Logik vereinfacht).
+
+    ``automatik_discharge_cap_kw`` limits the Automatik discharge like the written
+    discharge limit does on the plant; the rest of the deficit comes from the grid.
+    """
     net_pv_surplus = p_pv - p_con - total_flex_power
     if mode == MODE_ZWANGS_LADEN:
         return round(clamp_power(target_power_kw, max_power_kw), 3)
@@ -58,7 +85,10 @@ def battery_plan_kw_from_control(
         if net_pv_surplus > power_threshold_kw(max_power_kw):
             return round(clamp_power(net_pv_surplus, max_power_kw), 3)
         return 0.0
-    return round(clamp_power(net_pv_surplus, max_power_kw), 3)
+    action = clamp_power(net_pv_surplus, max_power_kw)
+    if automatik_discharge_cap_kw is not None:
+        action = max(action, -max(0.0, float(automatik_discharge_cap_kw)))
+    return round(action, 3)
 
 
 def automatik_discharge_kw(net_pv_surplus: float, max_power_kw: float) -> float:

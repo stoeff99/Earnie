@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import config
+from .automatik_cap import attach_to_milp_plan, attach_to_schedule, plan_discharge_caps
 from . import battery as bat
 from .cbc_events import record_cbc_event, update_cbc_milp_context_from_row
 from .cbc_solver import solve_with_strict_fallback
@@ -629,6 +630,7 @@ def milp_optimizer(
         model, matrix, preset_by_slot, current_soc, primary
     )
     _attach_heat_control_horizon(controls.milp_plan, model)
+    attach_to_milp_plan(controls.milp_plan, plan_discharge_caps(model, matrix, primary))
     if import_caps is not None and import_cap_observe:
         controls.milp_plan["import_cap_report"] = shadow_import_cap_report(
             model, matrix, import_caps, solve_args, fallback_k_push
@@ -762,6 +764,7 @@ def milp_horizon_schedule(
         return _with_slot_marks(fallback, not_planned_slot_marks(import_caps, 1))
     model, preset_by_slot, remaining, _, _, _ = solved
     schedule = extract_horizon_schedule(model, primary, preset_by_slot)
+    attach_to_schedule(schedule, plan_discharge_caps(model, matrix, primary))
     if import_caps is None:
         return schedule
     return _with_slot_marks(schedule, plan_slot_marks(model, matrix, import_caps, remaining))
