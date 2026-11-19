@@ -243,6 +243,17 @@ def _add_flex_side_constraints(
     )
 
 
+def _buffer_refill_needs_grid(model: MilpHorizonModel) -> bool:
+    """A battery refills its buffer and may not charge from the grid before sunrise."""
+    from .battery_buffer import refill_pending
+
+    return any(
+        refill_pending(model.battery_params_by_id[eid])
+        and not grid_charge_before_sunrise(model.battery_params_by_id[eid])
+        for eid in (model.ess_ids or [])
+    )
+
+
 def _add_soc_anchor_constraints(
     model: MilpHorizonModel,
     matrix: list[dict[str, Any]],
@@ -287,6 +298,15 @@ def _add_soc_anchor_constraints(
                     sunrise_soc_min_index,
                     float(current_soc),
                     min_soc,
+                )
+        elif _buffer_refill_needs_grid(model):
+            # Buffer refill deadline may need grid charge before sunrise; PV-only would
+            # make it infeasible (optimizer.battery_buffer).
+            if verbose:
+                logger.warning(
+                    "MILP SOC-Anker Sonnenaufgang: Slot %d — Batterie-Puffer wird nachgeladen; "
+                    "skip PV-only so grid can refill it",
+                    sunrise_soc_min_index,
                 )
         elif refill_kwh > 1e-9:
             # Virtual reserve refill may need grid-side p_charge before sunrise;

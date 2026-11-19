@@ -339,6 +339,15 @@ def _render_battery_limit_fields(
         max_value=100.0,
         key=_scoped_key(session_scope, "planning_battery_max_soc"),
     )
+    buffer_soc = labeled_number_input(
+        "Puffer über Min.-SoC (%)",
+        min_value=0.0,
+        max_value=100.0,
+        help="Earnie plant den Puffer nicht ein. Er deckt Unerwartetes, wenn der Strom "
+        "gerade mehr kostet als das Nachladen; danach lädt Earnie ihn innerhalb von 24 h "
+        "zum günstigsten Zeitpunkt nach. 0 = aus.",
+        key=_scoped_key(session_scope, "planning_battery_buffer_soc"),
+    )
     threshold_percent = labeled_number_input(
         "Leistungs-Schwelle (%)",
         min_value=1.0,
@@ -367,6 +376,7 @@ def _render_battery_limit_fields(
         "limits_from_live": limits_from_live,
         "min_soc": min_soc,
         "max_soc": max_soc,
+        "buffer_soc": buffer_soc,
         "threshold_percent": threshold_percent,
         "standby_power": standby_power,
         "control": control,
