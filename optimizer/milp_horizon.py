@@ -22,6 +22,7 @@ from .milp_inverter import (
     house_balance_pv_kw,
     add_inverter_slot_constraints,
 )
+from .battery_buffer import add_buffer_refill_constraints
 from .milp_soc_recovery import add_soc_recovery_constraints
 from .slot_duration import DEFAULT_DT_H, validate_dt_h
 from optimizer.milp_horizon_extras import (  # noqa: F401  (re-exported)
@@ -443,6 +444,9 @@ def _add_power_balance_and_soc_dynamics(
         capacity = float(bat.get("battery_capacity_kwh") or 0.0)
         e_init_by_ess[eid] = (soc / 100.0) * capacity
     relaxed_soc_bounds = add_soc_recovery_constraints(prob, grid_vars, e_init_by_ess)
+    add_buffer_refill_constraints(
+        prob, grid_vars, matrix, e_init_by_ess, horizon=horizon, dt_h=dt_h
+    )
     for t in range(horizon):
         cap = None
         if export_caps_kw is not None and t < len(export_caps_kw):

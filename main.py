@@ -267,6 +267,54 @@ def _prefetch_for_next_cycle(tick: datetime, start_at: datetime) -> None:
         logger.warning("Prefetch für %s abgebrochen (%s).", tick.strftime("%H:%M"), exc)
 
 
+def _apply_live_battery_buffer(
+    battery_params: dict | list[dict],
+    current_soc: float,
+    current_soc_by_id: dict[str, float] | None,
+) -> dict | list[dict]:
+    """Plan floor ``min_soc + buffer`` and the 24 h refill deadline (``optimizer.battery_buffer``)."""
+    from optimizer.battery_buffer import apply_buffer_to_battery_params, update_below_floor_since
+
+    batteries = battery_params if isinstance(battery_params, list) else [battery_params]
+    if not any(float(b.get("buffer_soc") or 0.0) > 0.0 for b in batteries):
+        return battery_params
+    soc_by_id = dict(current_soc_by_id or {})
+    if len(batteries) == 1:
+        soc_by_id.setdefault(str(batteries[0].get("id") or "ess_0"), float(current_soc))
+    since = update_below_floor_since(battery_params, soc_by_id, now=datetime.now())
+    return apply_buffer_to_battery_params(battery_params, since)
+
+
+def _buffer_chart_battery_params(battery_params):
+    """The live plan's battery params for the chart when a buffer is active, else ``None``."""
+    from optimizer.battery_buffer import FLOOR_KEY
+
+    batteries = battery_params if isinstance(battery_params, list) else [battery_params]
+    return battery_params if any(FLOOR_KEY in b for b in batteries) else None
+
+
+def _live_buffer_release(battery_params, mode: int, current_soc: float, matrix: list[dict]):
+    """Buffer release for this slot (single battery), logged; ``None`` without one."""
+    from optimizer.battery_buffer import buffer_release
+    from optimizer.slot_duration import DEFAULT_DT_H
+
+    if isinstance(battery_params, list):
+        if len(battery_params) != 1:
+            return None
+        battery_params = battery_params[0]
+    release = buffer_release(battery_params, mode, current_soc, matrix, dt_h=DEFAULT_DT_H)
+    if release is not None:
+        logger.info(
+            "Batterie-Puffer freigegeben: %.2f ct >= Nachladen %.2f ct + Marge; "
+            "Automatik, Entladung max. %.2f kW bis Min.-SoC %.0f %%",
+            release.price_cent,
+            release.refill_cent,
+            release.discharge_cap_kw,
+            float(battery_params.get("_buffer_hard_min_soc", 0.0)),
+        )
+    return release
+
+
 def _log_plan_discharge_cap(cap_kw: float, milp_plan: dict, matrix: list[dict]) -> None:
     """Log the Automatik discharge cap and the later slot it keeps the energy for."""
     from optimizer.automatik_cap import AUTOMATIK_CAP_REASON_KEY
@@ -722,6 +770,9 @@ def _main_cycle(
             battery_params = apply_effective_ess_limits(
                 config.get_battery_params(), telemetry=telemetry_for_export
             )
+        battery_params = _apply_live_battery_buffer(
+            battery_params, current_soc, current_soc_by_id
+        )
         cycle_recorder.record_ess_limits(recorder_token, battery_params)
         from optimizer.powerstation_live import (
             advance_virtual_reserves_from_plan,
@@ -829,6 +880,11 @@ def _main_cycle(
         plan_discharge_cap = automatik_cap_for_mode(
             mode, milp_plan if isinstance(milp_plan, dict) else None
         )
+        release = _live_buffer_release(battery_params, mode, current_soc, optimization_matrix)
+        if release is not None:
+            # Rule (b): the buffer covers this slot down to the hard minimum.
+            mode, target_power, target_soc = 0, 0.0, 99.0
+            plan_discharge_cap = release.discharge_cap_kw
         battery_plan_kw = optimizer.battery_plan_kw_from_control(
             mode,
             target_power,
@@ -854,7 +910,7 @@ def _main_cycle(
                 "Automatik discharge limit capped at %.2f kW (virtual reserve floor)",
                 automatik_discharge_cap,
             )
-        if plan_discharge_cap is not None:
+        if plan_discharge_cap is not None and release is None:
             _log_plan_discharge_cap(plan_discharge_cap, milp_plan, optimization_matrix)
         automatik_discharge_cap = lowest_cap_kw(automatik_discharge_cap, plan_discharge_cap)
         reserve_charges = physical_charge_setpoints_kw(active_reserves)
@@ -1046,6 +1102,7 @@ def _main_cycle(
                 consumers=live_consumers,
                 current_soc_by_id=current_soc_by_id or None,
                 baseline_initial_soc=savings_ledger_daemon.planning_shadow_soc(closed_interval),
+                optimized_battery_params=_buffer_chart_battery_params(battery_params),
             )
             savings_snapshot = optimizer.build_savings_snapshot(savings_info)
             from house_config.currency_display import active_units, display_label
