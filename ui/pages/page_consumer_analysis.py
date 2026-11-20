@@ -58,10 +58,10 @@ def _render_cost_section(
     render_window_analysis(series, window=window, now=now)
 
 
-def _render_account_section(window: TimeWindow) -> None:
+def _render_account_section(window: TimeWindow, *, now: datetime) -> None:
     """Mit und ohne Earnie im gewählten Zeitraum (Account view P3)."""
     try:
-        render_period_account_chart(window.start, window.end)
+        render_period_account_chart(window.start, window.end, now=now)
     except ValueError as exc:
         st.error(f"Kontostand kann nicht gezeichnet werden: {exc}")
 
@@ -129,7 +129,7 @@ def render() -> None:
         st.info("Keine Zeitfenster im Produktiv-Log.")
         return
 
-    _render_account_section(selected)
+    _render_account_section(selected, now=now)
     st.divider()
     _render_cost_section(series, selected, now=now)
     st.divider()

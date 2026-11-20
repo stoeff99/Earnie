@@ -47,6 +47,7 @@ from ui.chart_legend_mobile import (
     inject_mobile_legend_css,
     render_collapsible_legend_from_figure,
 )
+from house_config.currency_display import active_units, display_label
 from ui.chart_slot_axis import ChartSlotAxis, _chart_xaxis_config
 from ui.help_hint import render_title_with_help
 from ui.number_format import format_decimal, localized_figure
@@ -206,7 +207,7 @@ def _line_trace(
             mode="lines",
             name=name,
             line=dict(color=color, width=2.5, dash=dash),
-            hovertemplate=f"{name}: %{{y:.2f}} €<extra></extra>",
+            hovertemplate=f"{name}: %{{y:.2f}} {active_units().major}<extra></extra>",
         ),
         row=1,
         col=1,
@@ -387,8 +388,7 @@ def _add_consumption_panel(fig: go.Figure, view: AccountView, times: list[dateti
 
 def _add_saving_panel(fig: go.Figure, view: AccountView, times: list[datetime]) -> None:
     """Saving since the window start alone, on its own scale (spec § 6 item 1, decided P3)."""
-    # Balances: the optimized line above the baseline means saved.
-    cumulative = [opt - base for opt, base in zip(view.optimized, _start_baseline(view))]
+    cumulative = saving_since_start(view)
     for sign, color in ((1, COLOR_COST_SAVINGS_FILL), (-1, COLOR_COST_SAVINGS_NEGATIVE_FILL)):
         fig.add_trace(
             go.Scatter(
@@ -412,12 +412,39 @@ def _add_saving_panel(fig: go.Figure, view: AccountView, times: list[datetime]) 
             mode="lines",
             name=name,
             line=dict(color=COLOR_COST_BASELINE, width=1.5),
-            hovertemplate=f"{name}: %{{y:.2f}} €<extra></extra>",
+            hovertemplate=f"{name}: %{{y:.2f}} {active_units().major}<extra></extra>",
         ),
         row=2,
         col=1,
     )
     fig.add_hline(y=0, line=dict(color="rgba(128,128,128,0.6)", width=1), row=2, col=1)
+
+
+# Saving line on the right axis: distinct from the orange / grey balances.
+COLOR_SAVING_AXIS = "#15803d"
+SAVING_AXIS_NAME = "Ersparnis seit Fensterstart (rechte Achse)"
+
+
+def saving_since_start(view: AccountView) -> list[float]:
+    """Cumulative saving since the window start: optimized balance above the baseline."""
+    return [opt - base for opt, base in zip(view.optimized, _start_baseline(view))]
+
+
+def _add_saving_axis_line(fig: go.Figure, view: AccountView, times: list[datetime]) -> None:
+    """The saving as a line on its own right axis of the balance panel (analysis page)."""
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=saving_since_start(view),
+            mode="lines",
+            name=SAVING_AXIS_NAME,
+            line=dict(color=COLOR_SAVING_AXIS, width=2, dash="dot"),
+            hovertemplate=f"Ersparnis seit Fensterstart: %{{y:.2f}} {active_units().major}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+        secondary_y=True,
+    )
 
 
 def _start_baseline(view: AccountView) -> list[float]:
@@ -457,13 +484,20 @@ def build_account_figure(
     times = _boundary_times(axis)
     range_start = _chart_range_start(chart_window)
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, row_heights=[0.74, 0.26], vertical_spacing=0.06
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.74, 0.26],
+        vertical_spacing=0.06,
+        # Analysis page: the saving since the window start on a right axis of the top panel.
+        specs=[[{"secondary_y": period}], [{}]],
     )
     # Traces first: Plotly leaves shapes out of subplots that are still empty.
     _add_gap_fills(fig, view, times)
     _add_balance_lines(fig, view, times, ledger_names=view.has_past)
     if period:
         _add_saving_panel(fig, view, times)
+        _add_saving_axis_line(fig, view, times)
     else:
         _add_consumption_panel(fig, view, times)
     if chart_zones is not None:
@@ -485,8 +519,27 @@ def build_account_figure(
         )
     fig.update_xaxes(**{key: value for key, value in xaxis.items() if key != "title"})
     fig.update_xaxes(title=xaxis["title"], row=2, col=1)
-    fig.update_yaxes(title="Kontostand seit Fensterstart (€)", zeroline=True, row=1, col=1)
-    fig.update_yaxes(title="€" if period else "kWh", row=2, col=1)
+    currency = active_units().major
+    fig.update_yaxes(
+        title=f"Kontostand seit Fensterstart ({currency})",
+        zeroline=True,
+        row=1,
+        col=1,
+        secondary_y=False,
+    )
+    if period:
+        fig.update_yaxes(
+            title=f"Ersparnis ({currency})",
+            title_font=dict(color=COLOR_SAVING_AXIS),
+            tickfont=dict(color=COLOR_SAVING_AXIS),
+            zeroline=True,
+            zerolinecolor=COLOR_SAVING_AXIS,
+            showgrid=False,
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
+    fig.update_yaxes(title=currency if period else "kWh", row=2, col=1)
     fig.update_layout(
         height=520,
         **_collapsible_chart_layout(top_margin=30),
@@ -528,7 +581,7 @@ def render_account_chart(
     render_title_with_help(
         CHART2_TITLE,
         # Only the Monitor has a ledger; the Scenario Explorer window compares two runs.
-        CHART2_HELP if "ledger_savings" in savings_view else SE_CHART2_HELP,
+        display_label(CHART2_HELP if "ledger_savings" in savings_view else SE_CHART2_HELP),
         key=f"{key_prefix}chart2_help",
     )
     mode = _anchor_mode(ledger_view, key_prefix)
@@ -595,21 +648,31 @@ def period_account_slots(ledger: dict) -> AccountSlots:
     )
 
 
-def render_period_account_chart(window_start: datetime, window_end: datetime) -> None:
-    """Account view of a 7 / 28-day window on the analysis page (Account view P3)."""
+def render_period_account_chart(
+    window_start: datetime, window_end: datetime, *, now: datetime
+) -> None:
+    """Account view of a 7 / 28-day window on the analysis page (Account view P3).
+
+    Above the chart the Monitor's "Mit Earnie gespart" tile: the total of all closed days
+    (with SoC correction) and the running day, independent of the window.
+    """
     from runtime_store.history_timeline import quarter_hour_slots_between
     from ui.chart_ledger_savings import load_ledger_chart_savings
+    from ui.ledger_kpi import render_ledger_kpi
 
-    render_title_with_help(PERIOD_TITLE, PERIOD_HELP, key=f"{SESSION_PERIOD_PREFIX}chart2_help")
+    render_title_with_help(PERIOD_TITLE, display_label(PERIOD_HELP), key=f"{SESSION_PERIOD_PREFIX}chart2_help")
     # The window's end is the start of its last log slot, which belongs to it.
     end_exclusive = window_end + timedelta(minutes=15)
     slot_starts = list(quarter_hour_slots_between(window_start, end_exclusive))
     if not slot_starts:
+        render_ledger_kpi(now, None)
         st.info("Keine Viertelstunden in diesem Zeitraum.")
         return
     ledger = load_ledger_chart_savings(
         slot_starts, len(slot_starts), window_start=window_start, window_end=end_exclusive
     )
+    # The running day's figures do not depend on the window (load_ledger_chart_savings).
+    render_ledger_kpi(now, ledger)
     slots = period_account_slots(ledger)
     mode = _anchor_mode(True, SESSION_PERIOD_PREFIX)
     view = build_account_view(slots, mode)

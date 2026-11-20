@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from ui.chart_account_render import (
+    SAVING_AXIS_NAME,
     account_slots,
     build_account_figure,
     energy_difference_hint,
@@ -329,7 +330,38 @@ def test_period_figure_has_the_saving_panel_and_marks_only_incomplete_days():
     assert not any(text.startswith("Ergebnis") or text.startswith("SoC") for text in texts)
     saving = next(trace for trace in fig.data if trace.name == "Ersparnis seit Fensterstart")
     assert list(saving.y) == pytest.approx([0.0, 0.0, 0.0, 0.2, -0.1])
+    # The same saving on the right axis of the balance panel.
+    right = next(trace for trace in fig.data if trace.name == SAVING_AXIS_NAME)
+    assert right.yaxis == "y2"
+    assert list(right.y) == pytest.approx(list(saving.y))
+    assert fig.layout.yaxis2.side == "right"
+    assert fig.layout.yaxis2.title.text == "Ersparnis (€)"
+    assert fig.layout.yaxis.title.text == "Kontostand seit Fensterstart (€)"
     assert not any(str(trace.name).startswith("Verbrauch ") for trace in fig.data)
     # Two skipped slots in a row are one orange area per panel.
     marked = [shape for shape in fig.layout.shapes if shape.fillcolor == CHART_MISSING_SLOT_FILL]
     assert len(marked) == 2
+
+
+
+def test_period_axes_use_the_house_currency(monkeypatch):
+    from house_config import currency_display
+    from ui.chart_account_render import period_account_slots
+
+    monkeypatch.setattr(currency_display, "active_units", lambda: currency_display.CHF)
+    monkeypatch.setattr("ui.chart_account_render.active_units", lambda: currency_display.CHF)
+    ledger = _period_ledger(
+        [SLOT_COUNTED, SLOT_COUNTED, SLOT_COUNTED, SLOT_COUNTED],
+        [0.1, 0.1, 0.1, 0.1],
+        [0.2, 0.2, 0.2, 0.2],
+        [],
+    )
+    slots = period_account_slots(ledger)
+    fig = build_account_figure(
+        _frame(), slots, build_account_view(slots, ANCHOR_NOW), ledger=ledger, chart_window=None, period=True
+    )
+
+    assert fig.layout.yaxis.title.text == "Kontostand seit Fensterstart (CHF)"
+    assert fig.layout.yaxis2.title.text == "Ersparnis (CHF)"
+    assert fig.layout.yaxis3.title.text == "CHF"
+    assert all("€" not in str(trace.hovertemplate) for trace in fig.data if trace.hovertemplate)

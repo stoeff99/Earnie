@@ -6,4 +6,4 @@ from ui.chart_account_render import render_period_account_chart
 
 tz = ZoneInfo("Europe/Vienna")
 start = datetime(2026, 11, 4, 8, 0, tzinfo=tz)
-render_period_account_chart(start, start + timedelta(minutes=45))
+render_period_account_chart(start, start + timedelta(minutes=45), now=start + timedelta(hours=1))
