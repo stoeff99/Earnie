@@ -69,7 +69,7 @@ def test_period_shows_the_saving_of_the_window(tmp_path, monkeypatch):
     at = _run(tmp_path, monkeypatch)
 
     assert "Zeitraum: 0,25 € gespart" in _labels(at)
-    assert "Ersparnis seit Fensterstart" in at.get("plotly_chart")[0].proto.spec
+    assert "Ersparnis inkl. Speicherwert seit Fensterstart" in at.get("plotly_chart")[0].proto.spec
 
 
 def test_period_switch_has_its_own_state(tmp_path, monkeypatch):

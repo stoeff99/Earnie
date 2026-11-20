@@ -1,8 +1,9 @@
 """Monitor tile "Mit Earnie gespart" from the savings ledger (spec ``docs/dev/savings-ledger.md`` § 5).
 
 The main figure is the lifetime total of the closed SA-days of the chain, read from the
-ledger files. The running day stays apart ("Heute bisher"), because its SoC correction
-is provisional until the day closes. Its figures come from the dict Chart 2 draws
+ledger files, plus the running day so far (saving and provisional SoC correction). The
+caption names the running day's share, and "Heute bisher" splits it, because its SoC
+correction is provisional until the day closes. Its figures come from the dict Chart 2 draws
 (``savings_view["ledger_savings"]``), so both show the same values of the same moment.
 
 Reads only: the daemon owns the ledger files (``savings_ledger_store.peek_state``).
@@ -34,7 +35,7 @@ _METHOD_HELP = (
     "mit voller Leistung, ein Heizstab neben Gas, Öl oder Pellets bleibt aus und die Wärme "
     "kommt aus dem Brennstoff. Eine Hausbatterie läuft im Herstellermodus (Eigenverbrauch). "
     "Gezählt sind die abgeschlossenen Tage von Sonnenaufgang zu Sonnenaufgang, jeweils mit "
-    "der SoC-Korrektur.\n\n"
+    "der SoC-Korrektur, und der laufende Tag bis jetzt.\n\n"
     "**Heute bisher** ist vorläufig: Es zählt nur die Batterie. Verschobene Geräte, E-Auto "
     "und Heizstab kommen beim Tagesabschluss dazu.\n\n"
     "**Grenzen:** Die gewohnte Zeit ist das Modell aus dem Hausprofil, nicht der tatsächliche "
@@ -184,16 +185,24 @@ def chain_switch_text(kpi: LedgerKpi) -> str | None:
     )
 
 
-def today_text(ledger: dict[str, Any] | None, now: datetime) -> str | None:
-    """Running day as Chart 2 shows it; ``None`` without figures or once the day has ended.
+def today_figures(ledger: dict[str, Any] | None, now: datetime) -> tuple[float, float] | None:
+    """Running day's (saving, provisional SoC correction); ``None`` without figures or once ended.
 
-    ``ledger`` is ``savings_view["ledger_savings"]``, ``None`` without a display bundle.
+    ``ledger`` is ``savings_view["ledger_savings"]`` (or the analysis page's window ledger,
+    whose open-day fields are the same), ``None`` without a display bundle.
     """
     if not ledger or ledger["saving_euro"] is None or ledger["soc_correction_euro"] is None:
         return None
     day_start = datetime.fromisoformat(ledger["open_day_start"])
     day_end = datetime.fromisoformat(ledger["open_day_end"])
     if not day_start <= now < day_end:
+        return None
+    return float(ledger["saving_euro"]), float(ledger["soc_correction_euro"])
+
+
+def today_text(ledger: dict[str, Any] | None, now: datetime) -> str | None:
+    """Running day as Chart 2 shows it; ``None`` without figures or once the day has ended."""
+    if today_figures(ledger, now) is None:
         return None
     return (
         f"Heute bisher (vorläufig): {saving_text(ledger['saving_euro'])} · "
@@ -205,18 +214,35 @@ def _since_text(kpi: LedgerKpi) -> str:
     return kpi.chain_start.strftime("%d.%m.%Y")
 
 
-def _render_figures(kpi: LedgerKpi) -> None:
+def total_with_today(kpi: LedgerKpi, today: tuple[float, float] | None) -> float | None:
+    """Closed days (with SoC correction) plus the running day so far; ``None`` without a result."""
+    if kpi.total_euro is None:
+        return None
+    if today is None:
+        return kpi.total_euro
+    return kpi.total_euro + today[0] + today[1]
+
+
+def total_caption(kpi: LedgerKpi, today: tuple[float, float] | None) -> str:
+    since = f"seit {_since_text(kpi)} ({_days_text(kpi.days)}"
+    if today is None:
+        return f"{since})"
+    return f"{since} + heute, davon heute vorläufig {saving_text(today[0] + today[1])})"
+
+
+def _render_figures(kpi: LedgerKpi, today: tuple[float, float] | None) -> None:
+    total = total_with_today(kpi, today)
     if kpi.days == 0:
         st.caption(f"Mit Earnie gespart: Noch kein abgeschlossener Tag, Zählung seit {_since_text(kpi)}.")
-    elif kpi.total_euro is None:
+    elif total is None:
         st.caption(
             f"Mit Earnie gespart: nicht auswertbar. Seit {_since_text(kpi)} "
             "wurde keine Viertelstunde gebucht."
         )
     else:
-        label = "Mit Earnie mehr ausgegeben" if saving_is_loss(kpi.total_euro) else "Mit Earnie gespart"
-        st.metric(label, euro_amount(kpi.total_euro), help=tile_help(kpi))
-        st.caption(f"seit {_since_text(kpi)} ({_days_text(kpi.days)})")
+        label = "Mit Earnie mehr ausgegeben" if saving_is_loss(total) else "Mit Earnie gespart"
+        st.metric(label, euro_amount(total), help=tile_help(kpi))
+        st.caption(total_caption(kpi, today))
 
 
 def render_ledger_kpi(now: datetime, ledger: dict[str, Any] | None) -> None:
@@ -228,7 +254,7 @@ def render_ledger_kpi(now: datetime, ledger: dict[str, Any] | None) -> None:
         else:
             st.caption(kpi.text)
         return
-    _render_figures(kpi)
+    _render_figures(kpi, today_figures(ledger, now))
     switch = chain_switch_text(kpi)
     if switch:
         st.caption(switch)
