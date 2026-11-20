@@ -95,7 +95,13 @@ Werte, die ein anderes System schon auf den Broker schreibt, kann Earnie direkt 
 
 **So verarbeitet Earnie die Werte:**
 
-- Jeder Wert auf dem Quell-Topic zählt genau wie `earnie/telemetry/<EHAL-ID>`: gleiche Prüfung, gleiche Haltezeit, gleiche Anzeige in der Signalliste.
+- Jeder Wert auf dem Quell-Topic wird geprüft wie `earnie/telemetry/<EHAL-ID>`.
+- **Senden nur bei Änderung genügt.** Anders als die Loxone-Vorlagen müssen fremde Topics nicht alle 10 Sekunden wiederholt werden. Earnie verwendet den letzten Wert, solange die Verbindung zum Broker steht, auch wenn er sich tagelang nicht ändert (z. B. der Ladestand eines geparkten Autos).
+  - Ein Wert gilt erst nach **7 Tagen** ohne neue Nachricht als veraltet. Dann behandelt Earnie ihn wie einen fehlenden Wert.
+  - Ist die Verbindung zum Broker getrennt, verwendet Earnie die Werte noch höchstens 5 Minuten weiter. Änderungen während der Trennung kommen erst nach dem Wiederverbinden an, und nur, wenn das Quellsystem die Werte als *retained* veröffentlicht. Im ioBroker-MQTT-Adapter deshalb „retain“ einschalten.
+  - Auch Leistungswerte werden gehalten: Eine gleichbleibende Leistung, die nicht neu gesendet wird, gilt nicht als 0.
+  - Die Signalliste zeigt bei solchen Signalen das Alter mit dem Zusatz „(bei Änderung)“.
+- Ist ein empfangener Wert zu alt, zeigt **Live-Lesen** den letzten Wert mit dem Status „Lesefehler“ und dem Grund in der Spalte Detail (vorher stand dort irrtümlich „Kein Mapping“).
 - Der Wert muss eine **einfache Zahl** sein (z. B. `56`), in der Einheit, die die Signalliste für das Signal zeigt. Earnie rechnet nichts um. Sendet das Quellsystem etwas anderes (z. B. JSON), gilt der Wert als ungültig: Die Signalliste zeigt ihn so an, und das Log meldet es einmal je Topic. Dann im Quellsystem auf einfache Werte umstellen.
 - Jedes Topic und jedes Signal darf nur einmal vorkommen. Topics unter dem Earnie-Präfix und das Topic der Preise sind nicht erlaubt.
 - Unter der Tabelle zeigt Earnie zu jeder Zuordnung den zuletzt empfangenen Wert. Gibt es ein Signal nach einer Änderung der Komponenten nicht mehr, steht das dort; die Zuordnung dann anpassen.
