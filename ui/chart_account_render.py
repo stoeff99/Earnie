@@ -47,6 +47,7 @@ from ui.chart_legend_mobile import (
     inject_mobile_legend_css,
     render_collapsible_legend_from_figure,
 )
+from house_config.currency_display import active_units, display_label
 from ui.chart_slot_axis import ChartSlotAxis, _chart_xaxis_config
 from ui.help_hint import render_title_with_help
 from ui.number_format import format_decimal, localized_figure
@@ -206,7 +207,7 @@ def _line_trace(
             mode="lines",
             name=name,
             line=dict(color=color, width=2.5, dash=dash),
-            hovertemplate=f"{name}: %{{y:.2f}} €<extra></extra>",
+            hovertemplate=f"{name}: %{{y:.2f}} {active_units().major}<extra></extra>",
         ),
         row=1,
         col=1,
@@ -385,10 +386,11 @@ def _add_consumption_panel(fig: go.Figure, view: AccountView, times: list[dateti
     fig.add_hline(y=0, line=dict(color="rgba(128,128,128,0.6)", width=1), row=2, col=1)
 
 
-def _add_saving_panel(fig: go.Figure, view: AccountView, times: list[datetime]) -> None:
+def _add_saving_panel(
+    fig: go.Figure, view: AccountView, times: list[datetime], ledger: dict | None
+) -> None:
     """Saving since the window start alone, on its own scale (spec § 6 item 1, decided P3)."""
-    # Balances: the optimized line above the baseline means saved.
-    cumulative = [opt - base for opt, base in zip(view.optimized, _start_baseline(view))]
+    cumulative = saving_with_battery_value(view, times, ledger)
     for sign, color in ((1, COLOR_COST_SAVINGS_FILL), (-1, COLOR_COST_SAVINGS_NEGATIVE_FILL)):
         fig.add_trace(
             go.Scatter(
@@ -404,7 +406,7 @@ def _add_saving_panel(fig: go.Figure, view: AccountView, times: list[datetime]) 
             row=2,
             col=1,
         )
-    name = "Ersparnis seit Fensterstart"
+    name = SAVING_PANEL_NAME
     fig.add_trace(
         go.Scatter(
             x=times,
@@ -412,12 +414,147 @@ def _add_saving_panel(fig: go.Figure, view: AccountView, times: list[datetime]) 
             mode="lines",
             name=name,
             line=dict(color=COLOR_COST_BASELINE, width=1.5),
-            hovertemplate=f"{name}: %{{y:.2f}} €<extra></extra>",
+            hovertemplate=f"{name}: %{{y:.2f}} {active_units().major}<extra></extra>",
         ),
         row=2,
         col=1,
     )
     fig.add_hline(y=0, line=dict(color="rgba(128,128,128,0.6)", width=1), row=2, col=1)
+
+
+# Saving line on the right axis: distinct from the orange / grey balances.
+COLOR_SAVING_AXIS = "#15803d"
+SAVING_AXIS_NAME = "Ersparnis inkl. Speicherwert (rechte Achse)"
+SAVING_PANEL_NAME = "Ersparnis inkl. Speicherwert seit Fensterstart"
+
+
+def saving_since_start(view: AccountView) -> list[float]:
+    """Cumulative saving since the window start: optimized balance above the baseline."""
+    return [opt - base for opt, base in zip(view.optimized, _start_baseline(view))]
+
+
+def battery_value_steps(times: list[datetime], ledger: dict | None) -> list[float]:
+    """Cumulative SoC corrections at each boundary of ``times`` (analysis page).
+
+    A closed day that lies fully in the window (the rule of ``period_soc_correction_eur``)
+    adds its SoC correction at the first boundary at or after its close. The open day,
+    when it started in the window, adds its provisional correction after its last booked
+    slot. So the line at a day close equals the "Mit Earnie gespart" total when the
+    window covers the whole count.
+    """
+    from ui.chart_account_view import SLOT_COUNTED, SLOT_SKIPPED
+
+    steps = [0.0] * len(times)
+    if not ledger or not times:
+        return steps
+    window_start = times[0]
+    window_end = times[-1]
+
+    def add_from(index: int, euro: float) -> None:
+        for k in range(min(index, len(steps) - 1), len(steps)):
+            steps[k] += euro
+
+    for day in ledger.get("closed_days") or []:
+        start = datetime.fromisoformat(day["day_start"])
+        end = datetime.fromisoformat(day["day_end"])
+        if start < window_start or end > window_end:
+            continue
+        index = next((k for k, t in enumerate(times) if t >= end), len(times) - 1)
+        add_from(index, float(day["saving_adjusted_eur"]) - float(day["saving_eur"]))
+
+    correction = ledger.get("soc_correction_euro")
+    open_start = ledger.get("open_day_start")
+    states = ledger.get("slot_states") or []
+    if correction is not None and open_start:
+        day_start = datetime.fromisoformat(open_start)
+        booked = [
+            k
+            for k, state in enumerate(states)
+            if state in (SLOT_COUNTED, SLOT_SKIPPED) and k < len(times) and times[k] >= day_start
+        ]
+        if day_start >= window_start and booked:
+            add_from(booked[-1] + 1, float(correction))
+    return steps
+
+
+def saving_with_battery_value(
+    view: AccountView, times: list[datetime], ledger: dict | None
+) -> list[float]:
+    """Saving since the window start plus the battery value (SoC corrections)."""
+    steps = battery_value_steps(times, ledger)
+    return [value + step for value, step in zip(saving_since_start(view), steps)]
+
+
+def _add_saving_axis_line(
+    fig: go.Figure, view: AccountView, times: list[datetime], ledger: dict | None
+) -> list[float]:
+    """The saving incl. battery value on its own right axis of the balance panel."""
+    values = saving_with_battery_value(view, times, ledger)
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=values,
+            mode="lines",
+            name=SAVING_AXIS_NAME,
+            line=dict(color=COLOR_SAVING_AXIS, width=2, dash="dot"),
+            hovertemplate=f"Ersparnis inkl. Speicherwert: %{{y:.2f}} {active_units().major}<extra></extra>",
+        ),
+        row=1,
+        col=1,
+        secondary_y=True,
+    )
+    return values
+
+
+# Head room above and below the data of the aligned axes.
+_AXIS_PAD = 0.05
+
+
+def _span(values: list[float]) -> tuple[float, float]:
+    """Data range including 0, padded."""
+    low = min([0.0, *values])
+    high = max([0.0, *values])
+    pad = (high - low) * _AXIS_PAD or 1.0
+    return low - (pad if low < 0 else 0.0), high + (pad if high > 0 else 0.0)
+
+
+def aligned_ranges(
+    left: list[float], right: list[float]
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """Ranges for two y-axes with 0 at the same height (so one zero line serves both).
+
+    The zero sits at the higher of the two natural zero heights; the other axis is
+    extended (min down or max up) until its zero sits there too.
+    """
+    (l_lo, l_hi), (r_lo, r_hi) = _span(left), _span(right)
+
+    def zero_height(lo: float, hi: float) -> float:
+        return -lo / (hi - lo)
+
+    p = max(zero_height(l_lo, l_hi), zero_height(r_lo, r_hi))
+    p = min(max(p, 0.05), 0.95)
+
+    def fit(lo: float, hi: float) -> tuple[float, float]:
+        if zero_height(lo, hi) < p:
+            return -p * hi / (1.0 - p), hi
+        if zero_height(lo, hi) > p:
+            return lo, -lo * (1.0 - p) / p
+        return lo, hi
+
+    return fit(l_lo, l_hi), fit(r_lo, r_hi)
+
+
+def _align_saving_axis(fig: go.Figure, saving_values: list[float]) -> None:
+    """Balance and saving axes with a common zero and round ticks (analysis page)."""
+    balances: list[float] = []
+    for trace in fig.data:
+        if getattr(trace, "yaxis", None) in (None, "y") and trace.y is not None:
+            balances.extend(float(v) for v in trace.y if v is not None)
+    left, right = aligned_ranges(balances, saving_values)
+    fig.update_yaxes(range=list(left), autorange=False, row=1, col=1, secondary_y=False)
+    fig.update_yaxes(
+        range=list(right), autorange=False, tickmode="auto", nticks=8, row=1, col=1, secondary_y=True
+    )
 
 
 def _start_baseline(view: AccountView) -> list[float]:
@@ -457,13 +594,20 @@ def build_account_figure(
     times = _boundary_times(axis)
     range_start = _chart_range_start(chart_window)
     fig = make_subplots(
-        rows=2, cols=1, shared_xaxes=True, row_heights=[0.74, 0.26], vertical_spacing=0.06
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.74, 0.26],
+        vertical_spacing=0.06,
+        # Analysis page: the saving since the window start on a right axis of the top panel.
+        specs=[[{"secondary_y": period}], [{}]],
     )
     # Traces first: Plotly leaves shapes out of subplots that are still empty.
     _add_gap_fills(fig, view, times)
     _add_balance_lines(fig, view, times, ledger_names=view.has_past)
     if period:
-        _add_saving_panel(fig, view, times)
+        _add_saving_panel(fig, view, times, ledger)
+        saving_values = _add_saving_axis_line(fig, view, times, ledger)
     else:
         _add_consumption_panel(fig, view, times)
     if chart_zones is not None:
@@ -485,8 +629,27 @@ def build_account_figure(
         )
     fig.update_xaxes(**{key: value for key, value in xaxis.items() if key != "title"})
     fig.update_xaxes(title=xaxis["title"], row=2, col=1)
-    fig.update_yaxes(title="Kontostand seit Fensterstart (€)", zeroline=True, row=1, col=1)
-    fig.update_yaxes(title="€" if period else "kWh", row=2, col=1)
+    currency = active_units().major
+    fig.update_yaxes(
+        title=f"Kontostand seit Fensterstart ({currency})",
+        zeroline=True,
+        row=1,
+        col=1,
+        secondary_y=False,
+    )
+    if period:
+        fig.update_yaxes(
+            title=f"Ersparnis ({currency})",
+            title_font=dict(color=COLOR_SAVING_AXIS),
+            tickfont=dict(color=COLOR_SAVING_AXIS),
+            zeroline=False,  # 0 is aligned with the left axis; its zero line serves both
+            showgrid=False,
+            row=1,
+            col=1,
+            secondary_y=True,
+        )
+        _align_saving_axis(fig, saving_values)
+    fig.update_yaxes(title=currency if period else "kWh", row=2, col=1)
     fig.update_layout(
         height=520,
         **_collapsible_chart_layout(top_margin=30),
@@ -528,7 +691,7 @@ def render_account_chart(
     render_title_with_help(
         CHART2_TITLE,
         # Only the Monitor has a ledger; the Scenario Explorer window compares two runs.
-        CHART2_HELP if "ledger_savings" in savings_view else SE_CHART2_HELP,
+        display_label(CHART2_HELP if "ledger_savings" in savings_view else SE_CHART2_HELP),
         key=f"{key_prefix}chart2_help",
     )
     mode = _anchor_mode(ledger_view, key_prefix)
@@ -595,21 +758,31 @@ def period_account_slots(ledger: dict) -> AccountSlots:
     )
 
 
-def render_period_account_chart(window_start: datetime, window_end: datetime) -> None:
-    """Account view of a 7 / 28-day window on the analysis page (Account view P3)."""
+def render_period_account_chart(
+    window_start: datetime, window_end: datetime, *, now: datetime
+) -> None:
+    """Account view of a 7 / 28-day window on the analysis page (Account view P3).
+
+    Above the chart the Monitor's "Mit Earnie gespart" tile: the total of all closed days
+    (with SoC correction) and the running day, independent of the window.
+    """
     from runtime_store.history_timeline import quarter_hour_slots_between
     from ui.chart_ledger_savings import load_ledger_chart_savings
+    from ui.ledger_kpi import render_ledger_kpi
 
-    render_title_with_help(PERIOD_TITLE, PERIOD_HELP, key=f"{SESSION_PERIOD_PREFIX}chart2_help")
+    render_title_with_help(PERIOD_TITLE, display_label(PERIOD_HELP), key=f"{SESSION_PERIOD_PREFIX}chart2_help")
     # The window's end is the start of its last log slot, which belongs to it.
     end_exclusive = window_end + timedelta(minutes=15)
     slot_starts = list(quarter_hour_slots_between(window_start, end_exclusive))
     if not slot_starts:
+        render_ledger_kpi(now, None)
         st.info("Keine Viertelstunden in diesem Zeitraum.")
         return
     ledger = load_ledger_chart_savings(
         slot_starts, len(slot_starts), window_start=window_start, window_end=end_exclusive
     )
+    # The running day's figures do not depend on the window (load_ledger_chart_savings).
+    render_ledger_kpi(now, ledger)
     slots = period_account_slots(ledger)
     mode = _anchor_mode(True, SESSION_PERIOD_PREFIX)
     view = build_account_view(slots, mode)
@@ -621,8 +794,8 @@ def render_period_account_chart(window_start: datetime, window_end: datetime) ->
     correction, days = period_soc_correction_eur(ledger, window_start, end_exclusive)
     if days:
         st.caption(
-            f"SoC-Korrekturen der {days} abgeschlossenen Tage im Zeitraum, nicht im Abstand "
-            f"enthalten: {soc_correction_text(correction)}."
+            f"SoC-Korrekturen der {days} abgeschlossenen Tage im Zeitraum, nicht im Abstand, "
+            f"aber in der Ersparnis-Linie enthalten: {soc_correction_text(correction)}."
         )
     if ledger.get("hint"):
         st.caption(ledger["hint"])

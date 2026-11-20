@@ -8,7 +8,7 @@ from pathlib import Path
 # Local/UI may append a temporary debug id after -dev.N (e.g. 2.7.0-dev.48D1).
 # Image/packaging always normalize that away via normalize_for_image_build().
 # Fork builds (stoeff99/Earnie) use X.Y.Z-stoeff.N so they never collide with upstream -dev.N.
-__version__ = "2.8.0-stoeff.6"
+__version__ = "2.8.0-stoeff.8"
 
 # SemVer core + optional pre-release used for community candidates.
 # Trailing debug letters on -dev.N (e.g. D1) are intentionally not captured.

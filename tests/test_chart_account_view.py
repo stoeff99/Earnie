@@ -8,6 +8,8 @@ import pandas as pd
 import pytest
 
 from ui.chart_account_render import (
+    SAVING_AXIS_NAME,
+    SAVING_PANEL_NAME,
     account_slots,
     build_account_figure,
     energy_difference_hint,
@@ -327,9 +329,80 @@ def test_period_figure_has_the_saving_panel_and_marks_only_incomplete_days():
     assert "Zeitraum: 0,10 € mehr ausgegeben" in texts
     assert texts.count("unvollständig") == 1
     assert not any(text.startswith("Ergebnis") or text.startswith("SoC") for text in texts)
-    saving = next(trace for trace in fig.data if trace.name == "Ersparnis seit Fensterstart")
+    saving = next(trace for trace in fig.data if trace.name == SAVING_PANEL_NAME)
     assert list(saving.y) == pytest.approx([0.0, 0.0, 0.0, 0.2, -0.1])
+    # The same saving on the right axis of the balance panel.
+    right = next(trace for trace in fig.data if trace.name == SAVING_AXIS_NAME)
+    assert right.yaxis == "y2"
+    assert list(right.y) == pytest.approx(list(saving.y))
+    assert fig.layout.yaxis2.side == "right"
+    assert fig.layout.yaxis2.title.text == "Ersparnis (€)"
+    assert fig.layout.yaxis.title.text == "Kontostand seit Fensterstart (€)"
     assert not any(str(trace.name).startswith("Verbrauch ") for trace in fig.data)
     # Two skipped slots in a row are one orange area per panel.
     marked = [shape for shape in fig.layout.shapes if shape.fillcolor == CHART_MISSING_SLOT_FILL]
     assert len(marked) == 2
+
+
+
+def test_period_axes_use_the_house_currency(monkeypatch):
+    from house_config import currency_display
+    from ui.chart_account_render import period_account_slots
+
+    monkeypatch.setattr(currency_display, "active_units", lambda: currency_display.CHF)
+    monkeypatch.setattr("ui.chart_account_render.active_units", lambda: currency_display.CHF)
+    ledger = _period_ledger(
+        [SLOT_COUNTED, SLOT_COUNTED, SLOT_COUNTED, SLOT_COUNTED],
+        [0.1, 0.1, 0.1, 0.1],
+        [0.2, 0.2, 0.2, 0.2],
+        [],
+    )
+    slots = period_account_slots(ledger)
+    fig = build_account_figure(
+        _frame(), slots, build_account_view(slots, ANCHOR_NOW), ledger=ledger, chart_window=None, period=True
+    )
+
+    assert fig.layout.yaxis.title.text == "Kontostand seit Fensterstart (CHF)"
+    assert fig.layout.yaxis2.title.text == "Ersparnis (CHF)"
+    assert fig.layout.yaxis3.title.text == "CHF"
+    assert all("€" not in str(trace.hovertemplate) for trace in fig.data if trace.hovertemplate)
+
+
+def test_saving_line_adds_the_battery_value_at_each_day_close():
+    from ui.chart_account_render import period_account_slots, saving_with_battery_value
+
+    closed = [
+        # Fully inside: its SoC correction (0.5) is added from its close on.
+        {"day_start": _START.isoformat(), "day_end": (_START + 2 * _QUARTER).isoformat(),
+         "saving_eur": 0.1, "saving_adjusted_eur": 0.6, "incomplete": False},
+        # Started before the window: left out, like the caption under the chart.
+        {"day_start": (_START - 4 * _QUARTER).isoformat(), "day_end": _START.isoformat(),
+         "saving_eur": 0.0, "saving_adjusted_eur": 9.0, "incomplete": False},
+    ]
+    ledger = _period_ledger(
+        [SLOT_COUNTED] * 4, [0.1, 0.1, 0.1, 0.1], [0.2, 0.2, 0.2, 0.2], closed
+    )
+    ledger.update(
+        open_day_start=(_START + 2 * _QUARTER).isoformat(),
+        open_day_end=(_START + 100 * _QUARTER).isoformat(),
+        saving_euro=0.2,
+        soc_correction_euro=0.3,
+    )
+    slots = period_account_slots(ledger)
+    view = build_account_view(slots, ANCHOR_NOW)
+    times = [_START + k * _QUARTER for k in range(5)]
+
+    values = saving_with_battery_value(view, times, ledger)
+
+    # Paid saving 0.1 per slot; +0.5 from the close at boundary 2; +0.3 (today) after the last slot.
+    assert values == pytest.approx([0.0, 0.1, 0.7, 0.8, 1.2])
+
+
+def test_aligned_ranges_put_both_zeros_at_the_same_height():
+    from ui.chart_account_render import aligned_ranges
+
+    (l_lo, l_hi), (r_lo, r_hi) = aligned_ranges([-35.0, 3.5], [-3.0, 14.0])
+
+    assert -l_lo / (l_hi - l_lo) == pytest.approx(-r_lo / (r_hi - r_lo))
+    assert l_lo <= -35.0 and l_hi >= 3.5
+    assert r_lo <= -3.0 and r_hi >= 14.0
