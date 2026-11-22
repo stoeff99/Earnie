@@ -582,13 +582,13 @@ def ess_c1_kind_values(
     battery_params: dict,
     *,
     automatik_discharge_cap_kw: float | None = None,
-) -> tuple[tuple[str, float | None], ...]:
+) -> list[tuple[str, float | None]]:
     """ESS C1 setpoints (kind, value) Earnie sends for this battery control level.
 
     Single source for the live send path (``send_huawei_modbus_states``) and the
     ``loxone_sent`` ledger (``build_sent_loxone_snapshot``), so both stay identical:
 
-    - ``read_only``: no ESS setpoint at all (empty tuple).
+    - ``read_only``: no ESS setpoint at all (empty list).
     - ``limits_only``: forced charge/discharge (modes 1/3) fall back to Automatik
       (mode 0, power 0) and no active power setpoint is forced (``None``); the target
       SoC is computed for the reduced mode.
@@ -605,7 +605,7 @@ def ess_c1_kind_values(
 
     control = control_from_battery_params(battery_params)
     if control == BATTERY_CONTROL_READ_ONLY:
-        return ()
+        return []
 
     max_charge, max_discharge = _battery_max_powers_kw(battery_params)
     if control == BATTERY_CONTROL_LIMITS_ONLY and mode in (1, 3):
@@ -626,13 +626,13 @@ def ess_c1_kind_values(
         target_power_kw=target_power_kw,
         battery_params=battery_params,
     )
-    return (
+    return [
         ("set_ess_active_power", active_kw),
         ("set_ess_charge_power_limit", charge_kw),
         ("set_ess_discharge_power_limit", discharge_kw),
         ("set_ess_mode", float(control_cmd)),
         ("set_ess_target_soc", target_soc_pct),
-    )
+    ]
 
 
 def _export_cap_marker_and_value(

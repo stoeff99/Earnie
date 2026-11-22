@@ -49,9 +49,11 @@ def deferred_reinit():
         return
     pending = [False]
     token = _reinit_deferral.set(pending)
+    failed = False
     try:
         yield
     except BaseException as exc:
+        failed = True
         _reinit_deferral.reset(token)
         if pending[0]:
             # A file was written before the failure: the runtime config must follow
@@ -61,9 +63,12 @@ def deferred_reinit():
             except Exception as reinit_exc:  # noqa: BLE001 — attached to ``exc``
                 exc.add_note(f"Config-Reinit nach dem Fehler gescheitert: {reinit_exc}")
         raise
-    _reinit_deferral.reset(token)
-    if pending[0]:
-        config.reinit_config()
+    finally:
+        # Also on an early generator exit (GeneratorExit is handled above as a failure).
+        if not failed:
+            _reinit_deferral.reset(token)
+            if pending[0]:
+                config.reinit_config()
 
 
 def read_json_document(path: str) -> dict:
