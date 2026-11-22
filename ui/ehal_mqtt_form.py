@@ -127,6 +127,12 @@ def _render_pv_solcast_status(mapping: list[dict[str, Any]], known: list[str]) -
                 f"; **letzte Planung ({plan.get('at')}): {len(gaps)} Stunde(n) ohne Solcast-Wert "
                 f"({gaps[0]} … {gaps[-1]}), dort Forecast.Solar**"
             )
+        zero_days = list(used.get("zero_days") or [])
+        if zero_days:
+            state += (
+                f"; **letzte Planung ({plan.get('at')}): Solcast mit 0 kWh für den ganzen Tag "
+                f"{', '.join(zero_days)}, dort Forecast.Solar**"
+            )
         lines.append(f"- `{branch}` → `{system_id}`: {state}")
     st.markdown("\n".join(lines))
 

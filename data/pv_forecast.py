@@ -652,6 +652,21 @@ def _solcast_with_gaps(
     now = planning_now(tz)
     series = solcast_forecast.solcast_series(branch, target_hours, tz)
     missing = [idx for idx, value in enumerate(series.values) if value is None]
+    zero = _solcast_zero_days(branch, tz, now)
+    zeroed = [
+        idx
+        for idx, value in enumerate(series.values)
+        if value is not None and _local_date(target_hours[idx], tz) in zero
+    ]
+    if zeroed:
+        logger.warning(
+            "Solcast %s (%s): 0 kWh for the whole day %s — Forecast.Solar used for %s",
+            branch,
+            sid,
+            ", ".join(day.isoformat() for day in zero),
+            "this day" if len(zero) == 1 else "these days",
+        )
+        missing = sorted(set(missing) | set(zeroed))
     source = SOURCE_SOLCAST
     vector = [0.0 if value is None else value for value in series.values]
     gap_hours: list[str] = []
@@ -661,6 +676,8 @@ def _solcast_with_gaps(
         for idx in missing:
             vector[idx] = fallback[idx]
             key = solcast_forecast.hour_key(target_hours[idx], tz)
+            if idx in zeroed:
+                continue  # logged above as a zero day
             if solcast_forecast.is_within_plugin_reach(target_hours[idx], tz, now):
                 gap_hours.append(key)
             else:
@@ -690,8 +707,30 @@ def _solcast_with_gaps(
         "solcast_slots": len(target_hours) - len(missing),
         "gap_hours": gap_hours,
         "beyond_hours": len(beyond_hours),
+        "zero_days": [day.isoformat() for day in zero],
     }
     return vector, source, usage
+
+
+def _local_date(slot, tz):
+    return (slot.astimezone(tz) if slot.tzinfo is not None else slot).date()
+
+
+def _solcast_zero_days(branch: str, tz, now) -> list:
+    """Today / tomorrow with a 0 kWh Solcast total, once today's sunrise + 30 min has passed."""
+    from data import solcast_forecast
+    from data.planning_window import official_sun_times
+
+    today = now.astimezone(tz).date()
+    sunrise, _ = official_sun_times(
+        today,
+        float(config.get("LATITUDE", cast=float)),
+        float(config.get("LONGITUDE", cast=float)),
+        config.get_planning_timezone(),
+    )
+    if now < sunrise + solcast_forecast.ZERO_DAY_CHECK_AFTER_SUNRISE:
+        return []
+    return solcast_forecast.zero_days(branch, [today, today + timedelta(days=1)])
 
 
 def _record_solcast_usage(
