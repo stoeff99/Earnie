@@ -250,10 +250,7 @@ def _day(day: int, kwh: float = 0.0) -> dict[str, float]:
     return {f"2026-11-{day:02d} {hour:02d}:00": kwh for hour in range(24)}
 
 
-# Zurich, 22.11.2026: sunrise about 07:40, so the check starts about 08:10.
-
-
-def test_zero_day_falls_back_to_forecast_solar_after_sunrise_30_min(store, plan, caplog):
+def test_zero_day_falls_back_to_forecast_solar(store, plan, caplog):
     plan.set_now(_at(22, 9))
     _seed(store, {**_day(22), **_day(23, 0.05 / 24)})
     result = pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12), _at(23, 12)])
@@ -265,16 +262,17 @@ def test_zero_day_falls_back_to_forecast_solar_after_sunrise_30_min(store, plan,
     assert usage["gap_hours"] == []
 
 
-def test_zero_day_is_trusted_before_sunrise_30_min(store, plan, caplog):
-    plan.set_now(_at(22, 7, 50))  # sunrise ~07:40, so still within the 30 min
+def test_zero_day_falls_back_at_night_too(store, plan, caplog):
+    # The plugin's last call of the day failed: the night plan must not see 0 kWh for the day.
+    plan.set_now(_at(22, 2))
     _seed(store, _day(22))
     result = pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12)])
-    assert result["dach_sued"] == [0.0]
-    assert "0 kWh for the whole day" not in caplog.text
+    assert result["dach_sued"] == [1.2]
+    assert "0 kWh for the whole day 2026-11-22" in caplog.text
 
 
-def test_zero_tomorrow_is_checked_from_today_sunrise(store, plan):
-    plan.set_now(_at(22, 9))
+def test_zero_tomorrow_is_checked(store, plan):
+    plan.set_now(_at(22, 15))
     _seed(store, {**_day(22, 0.5), **_day(23)})
     result = pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12), _at(23, 12)])
     assert result["dach_sued"] == [0.5, 1.2]

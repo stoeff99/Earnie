@@ -717,19 +717,10 @@ def _local_date(slot, tz):
 
 
 def _solcast_zero_days(branch: str, tz, now) -> list:
-    """Today / tomorrow with a 0 kWh Solcast total, once today's sunrise + 30 min has passed."""
+    """Today / tomorrow with a 0 kWh Solcast total in the latest stored values (every run)."""
     from data import solcast_forecast
-    from data.planning_window import official_sun_times
 
     today = now.astimezone(tz).date()
-    sunrise, _ = official_sun_times(
-        today,
-        float(config.get("LATITUDE", cast=float)),
-        float(config.get("LONGITUDE", cast=float)),
-        config.get_planning_timezone(),
-    )
-    if now < sunrise + solcast_forecast.ZERO_DAY_CHECK_AFTER_SUNRISE:
-        return []
     return solcast_forecast.zero_days(branch, [today, today + timedelta(days=1)])
 
 

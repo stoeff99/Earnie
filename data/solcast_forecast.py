@@ -13,9 +13,10 @@ values are only taken once the branch's ``last_update_iso`` shows the current lo
 Values are stored by absolute local hour in a runtime file shared by daemon and UI.
 
 A day the plugin publishes with 0 kWh in total (``ZERO_DAY_KWH``) is a failed Solcast
-call, not a forecast: from today's sunrise + ``ZERO_DAY_CHECK_AFTER_SUNRISE`` on, today
-and tomorrow are checked and such a day is treated like missing hours (Forecast.Solar).
-Before that the plugin may still publish the day's first values.
+call, not a forecast: every planning run checks today and tomorrow in the latest stored
+values and treats such a day like missing hours (Forecast.Solar). There is no state: the
+next run after a successful plugin call uses Solcast again (maintainer decision
+2026-11-22, replacing a sunrise + 30 min gate that left the night plan on 0 kWh).
 """
 from __future__ import annotations
 
@@ -41,7 +42,6 @@ _HOUR_KEY_FMT = "%Y-%m-%d %H:00"
 # A whole day at or below this total (kWh) counts as "no forecast" (maintainer decision
 # 2026-11-22: only an exact 0, rounding noise aside).
 ZERO_DAY_KWH = 0.01
-ZERO_DAY_CHECK_AFTER_SUNRISE = timedelta(minutes=30)
 FULL_DAY_HOURS = 23
 _lock = threading.Lock()
 
