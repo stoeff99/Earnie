@@ -13,7 +13,9 @@ Topics under ``<prefix>`` (``ehal.mqtt.topic_prefix``, default ``earnie``):
   ``status.json`` key, for gateways that map one topic to one input.
 - ``<prefix>/availability`` (publish, retained): ``online`` / ``offline`` (last will).
 - Mapped foreign topics (``ehal.mqtt.topic_map``, e.g. ioBroker states): plain value,
-  recorded under the mapped EHAL ID exactly like ``<prefix>/telemetry/<EHAL-ID>``.
+  recorded under the mapped EHAL ID like ``<prefix>/telemetry/<EHAL-ID>``, but marked
+  as **on change** (no repeat): the value holds while the session is connected
+  (:func:`mqtt_session_connected`, ``docs/dev/mqtt-on-change-topics.md``).
 - Solcast branches (``ehal.mqtt.pv_solcast``, e.g. ``solcast/system_1/+``): hourly PV
   forecast of the LoxBerry plugin "PV Solcast NG" → :mod:`data.solcast_forecast`.
 
@@ -92,12 +94,14 @@ def handle_inbound(prefix: str, msg_topic: str, payload: bytes, peer: str) -> st
     return record_telemetry(msg_topic[len(telemetry_root):], text, peer, msg_topic)
 
 
-def record_telemetry(ehal_id: str, text: str, peer: str, msg_topic: str) -> str:
+def record_telemetry(
+    ehal_id: str, text: str, peer: str, msg_topic: str, *, publish: str = ""
+) -> str:
     """One telemetry value → push inbox (hub units, as from a VO push); logs rejections."""
     from ehal.push_signals import HEARTBEAT_ID
     from runtime_store.ehal_push_inbox import record_push
 
-    result = record_push(ehal_id, text, peer)
+    result = record_push(ehal_id, text, peer, publish=publish)
     if result in ("ok", "new"):
         if ehal_id == HEARTBEAT_ID:
             from runtime_store.loxone_callback_status import record_loxone_callback
@@ -135,6 +139,30 @@ def _write_link_status(doc: dict[str, Any]) -> None:
         os.replace(tmp, path)
     except OSError as exc:
         logger.warning("MQTT link status not written: %s", exc)
+
+
+def mqtt_session_connected() -> bool:
+    """True while the broker session is up (carrier in this process, else its status file).
+
+    On-change topics are only trusted while connected: changes sent during an outage are
+    lost unless the source retains them.
+    """
+    with _carrier_lock:
+        carrier = _carrier
+    if carrier is not None:
+        return carrier.is_connected()
+    settings = settings_from_config()
+    if not settings.enabled:
+        return False
+    status = load_link_status()
+    if not status or status.get("connected") is not True:
+        return False
+    # A file from an earlier broker setup says nothing about the current one.
+    return (
+        status.get("host") == settings.host
+        and status.get("port") == settings.port
+        and status.get("topic_prefix") == settings.topic_prefix
+    )
 
 
 def load_link_status() -> dict[str, Any] | None:
@@ -284,7 +312,11 @@ class EhalMqttCarrier:
                 )
         else:
             self._unparsed_topics.discard(msg_topic)
-        record_telemetry(ehal_id, text, peer_label(self.settings), msg_topic)
+        from runtime_store.ehal_push_inbox import PUBLISH_ON_CHANGE
+
+        record_telemetry(
+            ehal_id, text, peer_label(self.settings), msg_topic, publish=PUBLISH_ON_CHANGE
+        )
 
     def _on_price_message(self, payload: bytes) -> None:
         from data.external_prices import ingest_ekz_payload

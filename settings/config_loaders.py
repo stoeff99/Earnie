@@ -378,6 +378,7 @@ def load_full_runtime_params(
         "BATTERY_GRID_CHARGE_BEFORE_SUNRISE": bool(
             resolved.get("grid_charge_before_sunrise", False)
         ),
+        "BATTERY_BUFFER_SOC": float(resolved.get("battery_buffer_soc", 0.0) or 0.0),
         "THRESHOLD_POWER": validate_threshold_power(
             lookup_runtime_value(resolved, "threshold_power", config_path)
         ),

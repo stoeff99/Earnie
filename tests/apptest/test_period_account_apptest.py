@@ -69,7 +69,7 @@ def test_period_shows_the_saving_of_the_window(tmp_path, monkeypatch):
     at = _run(tmp_path, monkeypatch)
 
     assert "Zeitraum: 0,25 € gespart" in _labels(at)
-    assert "Ersparnis seit Fensterstart" in at.get("plotly_chart")[0].proto.spec
+    assert "Ersparnis inkl. Speicherwert seit Fensterstart" in at.get("plotly_chart")[0].proto.spec
 
 
 def test_period_switch_has_its_own_state(tmp_path, monkeypatch):
@@ -82,3 +82,12 @@ def test_period_switch_has_its_own_state(tmp_path, monkeypatch):
     assert not at.exception
     assert at.session_state[_KEY] == ANCHOR_START
     assert "Zeitraum: 0,25 € gespart" in _labels(at)
+
+
+def test_period_shows_the_total_saving_above_the_chart(tmp_path, monkeypatch):
+    at = _run(tmp_path, monkeypatch)
+
+    captions = [c.value for c in at.caption]
+    # No closed day yet: the tile says so; the running day is shown as "Heute bisher".
+    assert any(text.startswith("Mit Earnie gespart: Noch kein abgeschlossener Tag") for text in captions)
+    assert any(text.startswith("Heute bisher (vorläufig): 0,25 € gespart") for text in captions)

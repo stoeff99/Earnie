@@ -201,6 +201,7 @@ def normalize_battery(raw: dict, index: int) -> dict:
     ehal_bindings = _raw_battery_ehal_bindings(raw, battery_id=battery_id, index=index)
     inverter_id = str(raw.get("inverter_id") or "").strip()
     min_soc, max_soc = _validated_soc_window(raw, battery_id=battery_id, index=index)
+    buffer_soc = _validated_buffer_soc(raw, min_soc, max_soc, battery_id=battery_id, index=index)
     out = {
         "id": battery_id,
         "label": label,
@@ -218,6 +219,7 @@ def normalize_battery(raw: dict, index: int) -> dict:
         "control": control,
         "limits_from_live": bool(raw.get("limits_from_live", False)),
         "grid_charge_before_sunrise": bool(raw.get("grid_charge_before_sunrise", False)),
+        "battery_buffer_soc": buffer_soc,
         # Q8: empty string values are Loxone activation flags — keep the keys
         # (same as components_store). Stripping empties breaks PS writes via
         # _planning_powerstations → _binding_for_ps.
@@ -250,6 +252,25 @@ def _validated_soc_window(
             f"muss kleiner als battery_max_soc ({max_soc:g} %) sein."
         )
     return min_soc, max_soc
+
+
+def _validated_buffer_soc(
+    raw: dict, min_soc: float, max_soc: float, *, battery_id: str, index: int
+) -> float:
+    """SoC buffer above ``battery_min_soc`` (%): optional, 0 = off (``optimizer.battery_buffer``)."""
+    buffer_soc = float(raw.get("battery_buffer_soc", 0.0) or 0.0)
+    if buffer_soc < 0.0:
+        raise ValueError(
+            f"batteries[{index}] ('{battery_id}'): battery_buffer_soc ({buffer_soc:g} %) "
+            "darf nicht negativ sein."
+        )
+    if buffer_soc > 0.0 and min_soc + buffer_soc >= max_soc:
+        raise ValueError(
+            f"batteries[{index}] ('{battery_id}'): battery_min_soc + battery_buffer_soc "
+            f"({min_soc:g} % + {buffer_soc:g} %) muss kleiner als battery_max_soc "
+            f"({max_soc:g} %) sein."
+        )
+    return buffer_soc
 
 
 def _normalize_battery_wear(raw: object, battery_id: str, index: int) -> dict | None:

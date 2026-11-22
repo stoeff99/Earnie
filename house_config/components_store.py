@@ -184,6 +184,7 @@ def _serialize_battery(spec: dict) -> dict:
         "threshold_power": spec["threshold_power"],
         "limits_from_live": bool(spec.get("limits_from_live", False)),
         "grid_charge_before_sunrise": bool(spec.get("grid_charge_before_sunrise", False)),
+        "battery_buffer_soc": float(spec.get("battery_buffer_soc", 0.0) or 0.0),
         "control": str(spec.get("control") or "full"),
     }
     if bat_type == "house" and spec.get("regulates_on") is not None:

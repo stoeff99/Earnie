@@ -331,6 +331,7 @@ def battery_params_snapshot(get_attr: Callable[..., Any]) -> dict:
         "grid_charge_before_sunrise": bool(
             get_attr("BATTERY_GRID_CHARGE_BEFORE_SUNRISE", default=False, cast=bool)
         ),
+        "buffer_soc": float(get_attr("BATTERY_BUFFER_SOC", default=0.0, cast=float) or 0.0),
     }
 
 

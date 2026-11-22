@@ -10,6 +10,10 @@ Streamlit UI (separate process) and is flushed at most once per second
 Canonical file: ``runtime/ehal_push_inbox.json`` (legacy alias
 ``loxone_push_inbox.json`` is still loaded). A push command (repeated, default
 10 s) calls ``GET /ehal/telemetry/<EHAL-ID>/<value>``; the EHAL ID travels in the path.
+
+Mapped foreign MQTT topics (``ehal.mqtt.topic_map``) publish **on change**: rows carry
+``"publish": "on_change"`` and stay valid while the MQTT session is up, up to
+``ON_CHANGE_MAX_AGE_S`` (see :func:`is_stale`). Spec: ``docs/dev/mqtt-on-change-topics.md``.
 """
 from __future__ import annotations
 
@@ -255,8 +259,12 @@ def record_push(
     peer: str = "",
     *,
     now: datetime | None = None,
+    publish: str = "",
 ) -> str:
     """Store one push. Returns ``"ok"``, ``"new"`` (first time this ID), or a reject reason.
+
+    ``publish=PUBLISH_ON_CHANGE`` marks a source that sends only when the value changes
+    (mapped foreign MQTT topics); the mark follows the latest push.
 
     Reject reasons: ``"bad_id"``, ``"bad_raw"`` (empty/oversized), ``"full"`` (ID cap).
     """
@@ -294,6 +302,10 @@ def record_push(
                 "peer": str(peer or "").strip() or "?",
             }
         )
+        if publish:
+            row["publish"] = str(publish)
+        else:
+            row.pop("publish", None)
         rows[ehal_id] = row
         _memory[ehal_id] = dict(row)
         if value is not None:
@@ -343,6 +355,12 @@ REPEAT_ENV_LEGACY = "EARNIE_PILOT_PUSH_REPEAT_S"
 DEFAULT_REPEAT_S = 10.0
 # Hold last known value this long after silence / link loss before a read error.
 LAST_KNOWN_MAX_S = 300.0
+
+# Sources that send only on change (mapped foreign MQTT topics, e.g. ioBroker states).
+PUBLISH_ON_CHANGE = "on_change"
+# An on-change value may stay unchanged for days (parked EV SoC); older than this the
+# source counts as dead.
+ON_CHANGE_MAX_AGE_S = 7 * 24 * 3600.0
 STARTUP_WAIT_MAX_S = 40.0
 
 # Powers: silence while link alive → assume 0 (analog VO has no Off command).
@@ -416,14 +434,33 @@ def is_stale(
     Shadow-feed rows are never inbox-stale: ``lookup_record`` already gated them
     against feed ``max_age`` / ``cycle_ts``. Re-applying the VO silence window
     falsely marks slow-changing signals (e.g. SoC) as ``Lesefehler``.
+
+    On-change rows (:func:`is_on_change`) have no repeat: the last value holds while the
+    MQTT session is connected, up to ``ON_CHANGE_MAX_AGE_S``.
     """
     if str(row.get("source") or "") == SHADOW_FEED_SOURCE:
         return False
     age = age_seconds(row, now=now)
+    if is_on_change(row):
+        if age is not None and age > ON_CHANGE_MAX_AGE_S:
+            return True
+        return not on_change_link_up()
     if age is None:
         return False
     limit = float(repeat_s) if repeat_s else expected_repeat_s()
     return age > factor * limit
+
+
+def is_on_change(row: dict[str, Any] | None) -> bool:
+    """True for rows from a source that publishes only on change."""
+    return isinstance(row, dict) and row.get("publish") == PUBLISH_ON_CHANGE
+
+
+def on_change_link_up() -> bool:
+    """True while the MQTT session that delivers on-change topics is connected."""
+    from integrations.ehal_mqtt import mqtt_session_connected
+
+    return mqtt_session_connected()
 
 
 # --- Derived value state ---------------------------------------------------------------
@@ -454,6 +491,8 @@ def link_alive(
     for ehal_id, row in signals.items():
         if is_digital_id(ehal_id):
             continue  # edge-based, its age says nothing about the link
+        if is_on_change(row):
+            continue  # no repeat: its age says nothing about the hub link
         value = row.get("value")
         if value is None or float(value) == 0.0:
             continue
@@ -484,6 +523,11 @@ def derive_state(
     if not row.get("parse_ok", True) or row.get("value") is None:
         return (STATE_UNREADABLE, None)
     value = float(row["value"])
+    if is_on_change(row):
+        # 0 is a value like any other here; the MQTT session vouches for it
+        if not is_stale(row, repeat_s=repeat_s, now=now):
+            return (STATE_OK, value)
+        return (STATE_READ_ERROR, None)
     if value == 0.0:
         # explicit Off message: held until the next message; the link cannot confirm it
         return (STATE_ZERO_HELD, 0.0) if link else (STATE_ZERO_HELD_NO_LINK, 0.0)
@@ -541,6 +585,9 @@ def resolve_push_read(
 
     if row is not None and row.get("parse_ok", True) and row.get("value") is not None:
         value = float(row["value"])
+        if is_on_change(row):
+            # 0 is a value like any other here; the MQTT session vouches for it
+            return (STATE_OK, value) if not is_stale(row, repeat_s=repeat_s, now=ref) else hold()
         if value == 0.0:
             return (STATE_ZERO_HELD, 0.0) if link else (STATE_ZERO_HELD_NO_LINK, 0.0)
         if not is_stale(row, repeat_s=repeat_s, now=ref):

@@ -96,7 +96,7 @@ def test_config_loader_rejects_enabled_without_host():
 def inbox(monkeypatch):
     calls: list[tuple[str, str, str]] = []
 
-    def _record(ehal_id, raw, peer=""):
+    def _record(ehal_id, raw, peer="", **_kw):
         calls.append((ehal_id, raw, peer))
         return "ok"
 
