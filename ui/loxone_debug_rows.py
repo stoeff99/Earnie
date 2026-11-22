@@ -133,7 +133,7 @@ def _live_field_to_push_ehal_id(field: str) -> str:
 
 
 def _inbox_last_read_local(ehal_id: str) -> str:
-    """Local ``HH:MM:SS`` from the push inbox ``last_ts``, or empty."""
+    """Local ``HH:MM:SS`` (``DD.MM. HH:MM:SS`` before today) from the inbox ``last_ts``, or empty."""
     eid = str(ehal_id or "").strip()
     if not eid:
         return ""
@@ -148,7 +148,10 @@ def _inbox_last_read_local(ehal_id: str) -> str:
         parsed = datetime.fromisoformat(str(row.get("last_ts") or ""))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone().strftime("%H:%M:%S")
+        local = parsed.astimezone()
+        if local.date() != datetime.now(local.tzinfo).date():
+            return local.strftime("%d.%m. %H:%M:%S")
+        return local.strftime("%H:%M:%S")
     except Exception:  # noqa: BLE001
         return ""
 
@@ -194,7 +197,7 @@ def _try_push_live_row(
     except Exception:  # noqa: BLE001
         return None
     if value is None:
-        return None
+        return _expired_push_row(field, ehal_id, state, read_at=read_at, backend=backend)
     last = _inbox_last_read_local(ehal_id) or read_at
     value_space = "ehal" if backend == "ha" else "hub"
     return _enrich_read_row(
@@ -208,6 +211,36 @@ def _try_push_live_row(
         backend=backend,
         value_space=value_space,
     )
+
+def _expired_push_row(
+    field: str, ehal_id: str, state: str, *, read_at: str, backend: str
+) -> dict[str, str] | None:
+    """A received value the read path no longer accepts: show it with the read state.
+
+    Without this the row fell back to "Kein Mapping", although the signal arrives.
+    """
+    from runtime_store.ehal_push_inbox import is_on_change, memory_snapshot
+
+    row = memory_snapshot().get(ehal_id)
+    if not row or not str(row.get("last_ts") or "").strip():
+        return None
+    raw = str(row.get("raw") or "").strip()
+    if is_on_change(row):
+        detail = "Letzter Wert zu alt oder MQTT-Verbindung getrennt (Topic sendet nur bei Änderung)"
+    else:
+        detail = "Letzter Wert zu alt (kein Wiederholungs-Push mehr)"
+    return _enrich_read_row(
+        {
+            "EHAL-Feld": field,
+            "Wert": raw,
+            "Status": state,
+            "Detail": detail,
+            "Zuletzt gelesen": _inbox_last_read_local(ehal_id) or read_at,
+        },
+        backend=backend,
+        value_space="ehal" if backend == "ha" else "hub",
+    )
+
 
 def rows_with_mapping_column_label(rows: list[dict[str, str]]) -> list[dict[str, str]]:
     """Rename internal ``Mapping`` key to the backend-specific display title.

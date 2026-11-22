@@ -11,6 +11,12 @@ values are only taken once the branch's ``last_update_iso`` shows the current lo
 (the plugin re-publishes during the day); until then they are dropped with a log line.
 
 Values are stored by absolute local hour in a runtime file shared by daemon and UI.
+
+A day the plugin publishes with 0 kWh in total (``ZERO_DAY_KWH``) is a failed Solcast
+call, not a forecast: every planning run checks today and tomorrow in the latest stored
+values and treats such a day like missing hours (Forecast.Solar). There is no state: the
+next run after a successful plugin call uses Solcast again (maintainer decision
+2026-11-22, replacing a sunrise + 30 min gate that left the night plan on 0 kWh).
 """
 from __future__ import annotations
 
@@ -33,6 +39,10 @@ KEEP_DAYS = 3
 FIELD_LAST_UPDATE = "last_update_iso"
 _HOUR_FIELD = re.compile(r"^(today|tomorrow)_hour_(\d{2})_kwh$")
 _HOUR_KEY_FMT = "%Y-%m-%d %H:00"
+# A whole day at or below this total (kWh) counts as "no forecast" (maintainer decision
+# 2026-11-22: only an exact 0, rounding noise aside).
+ZERO_DAY_KWH = 0.01
+FULL_DAY_HOURS = 23
 _lock = threading.Lock()
 
 
@@ -212,6 +222,22 @@ def solcast_series(branch: str, target_hours: Sequence[datetime], tz: ZoneInfo) 
         kwh = entry.get(hour_key(slot, tz))
         values.append(None if kwh is None else round(float(kwh), 3))
     return SolcastSeries(values=values)
+
+
+def zero_days(branch: str, days: Sequence[date]) -> list[date]:
+    """Days of ``days`` the plugin published in full with at most ``ZERO_DAY_KWH`` in total.
+
+    Only a full day counts (``FULL_DAY_HOURS``, 23 for the DST day): a few stored night
+    hours with 0 kWh are no failed call, and missing hours are gaps already.
+    """
+    hours = (load_store()["branches"].get(branch) or {}).get("hours") or {}
+    out: list[date] = []
+    for day in days:
+        prefix = day.isoformat()
+        values = [float(v) for key, v in hours.items() if key.startswith(prefix)]
+        if len(values) >= FULL_DAY_HOURS and sum(values) <= ZERO_DAY_KWH:
+            out.append(day)
+    return out
 
 
 def is_within_plugin_reach(slot: datetime, tz: ZoneInfo, now: datetime) -> bool:

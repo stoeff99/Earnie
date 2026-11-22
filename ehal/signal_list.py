@@ -77,6 +77,16 @@ def _age_seconds(iso_ts: str) -> float | None:
     return (datetime.now(timezone.utc) - parsed).total_seconds()
 
 
+def _age_text(age: float) -> str:
+    if age < 120:
+        return f"vor {int(age)} s"
+    if age < 2 * 3600:
+        return f"vor {int(age // 60)} min"
+    if age < 2 * 86400:
+        return f"vor {age / 3600:.0f} h"
+    return f"vor {age / 86400:.1f} Tagen"
+
+
 def _read_match(ehal_id: str, inbox: dict[str, dict[str, Any]]) -> tuple[MatchKind, str]:
     row = inbox.get(ehal_id) or {}
     last_ts = str(row.get("last_ts") or "").strip()
@@ -88,6 +98,12 @@ def _read_match(ehal_id: str, inbox: dict[str, dict[str, Any]]) -> tuple[MatchKi
     # Rare control receipts (request_optimize): keep OK with age — not a repeating VO.
     if ehal_id == REQUEST_OPTIMIZE_ID:
         return "ok", f"vor {int(age)} s"
+    from runtime_store.ehal_push_inbox import is_on_change, is_stale
+
+    if is_on_change(row):
+        # Sent only on change: a quiet topic is fine while the MQTT session is up.
+        kind: MatchKind = "stale" if is_stale(row) else "ok"
+        return kind, f"{_age_text(age)} (bei Änderung)"
     if age > 300:
         return "stale", f"vor {int(age)} s"
     return "ok", f"vor {int(age)} s"

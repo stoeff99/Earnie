@@ -110,10 +110,11 @@ def test_saved_total_with_date_days_and_today(runtime):
     at = _run(_chart_ledger())
 
     assert at.metric[0].label == "Mit Earnie gespart"
-    assert at.metric[0].value == "12,34 €"
+    # Closed days 12,34 € plus today so far 0,20 € (saving) + 0,00 € (SoC correction).
+    assert at.metric[0].value == "12,54 €"
     assert "gleiche PV" in at.metric[0].proto.help
     captions = _captions(at)
-    assert "seit 16.09.2026 (2 Tage)" in captions
+    assert "seit 16.09.2026 (2 Tage + heute, davon heute vorläufig 0,20 € gespart)" in captions
     assert _TODAY_LINE in captions
 
 
@@ -136,7 +137,7 @@ def test_today_line_shows_the_snapshot_while_the_total_reads_the_files(runtime):
 
     at = _run(ledger)
 
-    assert at.metric[0].value == "3,00 €"
+    assert at.metric[0].value == "3,20 €"  # files 3,00 € + the snapshot's today 0,20 €
     assert _TODAY_LINE in _captions(at)
 
 

@@ -241,3 +241,58 @@ def test_mapping_to_unknown_pv_system_is_reported(store, plan, monkeypatch, capl
     pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(3, 10)])
     assert "which the live scenario does not have" in caplog.text
     assert solcast_forecast.last_plan_usage()["systems"]["dach_sued"]["unknown_system"] is True
+
+
+# --- 0 kWh day: failed Solcast call ----------------------------------------------------------
+
+
+def _day(day: int, kwh: float = 0.0) -> dict[str, float]:
+    return {f"2026-11-{day:02d} {hour:02d}:00": kwh for hour in range(24)}
+
+
+def test_zero_day_falls_back_to_forecast_solar(store, plan, caplog):
+    plan.set_now(_at(22, 9))
+    _seed(store, {**_day(22), **_day(23, 0.05 / 24)})
+    result = pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12), _at(23, 12)])
+    # Today 0 kWh → Forecast.Solar; tomorrow 0.05 kWh is not exactly 0 → Solcast stays.
+    assert result["dach_sued"] == [1.2, pytest.approx(0.002, abs=0.001)]
+    assert "0 kWh for the whole day 2026-11-22" in caplog.text
+    usage = solcast_forecast.last_plan_usage()["systems"]["dach_sued"]
+    assert usage["zero_days"] == ["2026-11-22"]
+    assert usage["gap_hours"] == []
+
+
+def test_zero_day_falls_back_at_night_too(store, plan, caplog):
+    # The plugin's last call of the day failed: the night plan must not see 0 kWh for the day.
+    plan.set_now(_at(22, 2))
+    _seed(store, _day(22))
+    result = pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12)])
+    assert result["dach_sued"] == [1.2]
+    assert "0 kWh for the whole day 2026-11-22" in caplog.text
+
+
+def test_zero_tomorrow_is_checked(store, plan):
+    plan.set_now(_at(22, 15))
+    _seed(store, {**_day(22, 0.5), **_day(23)})
+    result = pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12), _at(23, 12)])
+    assert result["dach_sued"] == [0.5, 1.2]
+    assert solcast_forecast.last_plan_usage()["systems"]["dach_sued"]["zero_days"] == ["2026-11-23"]
+
+
+def test_partial_day_with_zero_hours_is_no_zero_day(store):
+    _seed(store, {"2026-11-23 00:00": 0.0, "2026-11-23 01:00": 0.0})
+    assert solcast_forecast.zero_days(_BRANCH, [datetime(2026, 11, 23).date()]) == []
+
+
+def test_solcast_is_primary_again_once_the_plugin_sends_a_real_day(store, plan, caplog):
+    # 07:43 call failed (0 kWh); the 08:35 call publishes the day: the next cycle uses Solcast.
+    plan.set_now(_at(22, 8, 30))
+    _seed(store, _day(22))
+    assert pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12)])["dach_sued"] == [1.2]
+
+    plan.set_now(_at(22, 8, 45))
+    _seed(store, {**_day(22), "2026-11-22 12:00": 0.9})
+    caplog.clear()
+    assert pv_forecast.get_hourly_pv_forecast_by_system_for_hours([_at(22, 12)])["dach_sued"] == [0.9]
+    assert "0 kWh for the whole day" not in caplog.text
+    assert solcast_forecast.last_plan_usage()["systems"]["dach_sued"]["zero_days"] == []
