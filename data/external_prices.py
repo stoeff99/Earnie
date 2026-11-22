@@ -198,11 +198,15 @@ def fit_epex(pairs: Sequence[tuple[float, float]]) -> tuple[float, float]:
 
 
 def external_market(
-    utc_slots: Sequence[datetime], epex: Mapping[datetime, float]
+    utc_slots: Sequence[datetime],
+    epex: Mapping[datetime, float],
+    *,
+    now: datetime | None = None,
 ) -> ExternalMarket:
     """Market input for the external tariff on ``utc_slots`` (UTC slot starts).
 
     Records new (EPEX, external) pairs for the fit, then estimates unpublished slots.
+    ``now`` is the reference time for pruning old pairs (default: the wall clock).
     """
     with _lock:
         doc = load_store()
@@ -217,7 +221,7 @@ def external_market(
             pairs.update(new_pairs)
             doc["pairs"] = _prune(
                 {slot.isoformat(): list(pair) for slot, pair in pairs.items()},
-                datetime.now(UTC),
+                now or datetime.now(UTC),
             )
             _save_store(doc)
     market = {slot: published[slot] for slot in utc_slots if slot in published}
