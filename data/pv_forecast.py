@@ -156,6 +156,27 @@ def _load_disk_cache(url: str, now_time: datetime) -> Optional[dict]:
     return watts
 
 
+def _fresh_memory_cache(url: str, now_time: datetime) -> Optional[dict]:
+    """In-memory forecast.solar answer for *url*, dropped once older than ``DISK_CACHE_MAX_AGE``.
+
+    After API errors the cache is reused; without an age limit a forecast from days ago
+    would keep covering only its own days, and the slots after it would get 0 kW.
+    """
+    cached = _CACHED_HOURLY_WATTS_BY_URL.get(url)
+    fetched_at = _LAST_API_CALL_BY_URL.get(url)
+    if cached is None or fetched_at is None:
+        return cached
+    age = _as_naive_local(now_time) - _as_naive_local(fetched_at)
+    if age <= DISK_CACHE_MAX_AGE:
+        return cached
+    print(
+        f"[info] forecast.solar-Cache im Speicher zu alt "
+        f"({age.total_seconds() / 3600:.1f} h) — wird nicht genutzt."
+    )
+    del _CACHED_HOURLY_WATTS_BY_URL[url]
+    return None
+
+
 def _set_fetch_source(source: str) -> None:
     global _LAST_FETCH_SOURCE
     _LAST_FETCH_SOURCE = source
@@ -301,7 +322,7 @@ def _check_and_fetch_api_data(url: str, kwp: float) -> Optional[dict]:
     from runtime_store.shadow.hooks import replay_ext_payload
     from runtime_store.shadow.transport import ext_get
 
-    cached = _CACHED_HOURLY_WATTS_BY_URL.get(url)
+    cached = _fresh_memory_cache(url, now_time)
     # Prod only: Shadow reads the Prod feed and must not seed Prod's API guard.
     if cached is None and not is_shadow_mode() and url not in _DISK_CACHE_CHECKED_URLS:
         _DISK_CACHE_CHECKED_URLS.add(url)
@@ -456,6 +477,43 @@ def _map_hourly_data_to_vector(hourly_watts: dict, target_hours: list) -> tuple[
     return pv_vector, False
 
 
+def _uncovered_daylight_days(
+    hourly_watts: dict,
+    target_hours: list,
+    *,
+    lat: float,
+    lon: float,
+) -> list:
+    """Days with daylight slots in *target_hours* that the forecast.solar data has no point on.
+
+    Such slots would map to 0 kW like the night; the system then takes Open-Meteo instead.
+    """
+    from data.planning_window import official_sun_times
+
+    tz_name = config.get_planning_timezone()
+    covered = {stamp.date() for stamp, _ in _forecast_solar_curve(hourly_watts)}
+    uncovered = []
+    for day in sorted({dt.date() for dt in target_hours}):
+        if day in covered:
+            continue
+        sunrise, sunset = official_sun_times(day, lat, lon, tz_name)
+        sunrise, sunset = sunrise.replace(tzinfo=None), sunset.replace(tzinfo=None)
+        if any(
+            dt.date() == day and sunrise < _as_planning_naive(dt, tz_name) < sunset
+            for dt in target_hours
+        ):
+            uncovered.append(day)
+    return uncovered
+
+
+def _as_planning_naive(value: datetime, tz_name: str) -> datetime:
+    if value.tzinfo is None:
+        return value
+    from zoneinfo import ZoneInfo
+
+    return value.astimezone(ZoneInfo(tz_name)).replace(tzinfo=None)
+
+
 def _open_meteo_pv_vector(
     *,
     lat: float,
@@ -464,6 +522,7 @@ def _open_meteo_pv_vector(
     azimuth: float,
     kwp: float,
     target_hours: list,
+    shading,
 ) -> list[float]:
     """PV kW per target slot from Open-Meteo ``global_tilted_irradiance`` (forecast).
 
@@ -471,6 +530,7 @@ def _open_meteo_pv_vector(
     Hourly GTI is the mean of the preceding hour, so slot hour ``h`` takes the value
     stamped ``h + 1`` (as ``scripts/pv_forecast_compare.py``). kW = GTI / 1000 × kWp
     (``irradiance_wm2_to_pv_kw``, same conversion as the Open-Meteo archive path).
+    ``shading``: the Live profile's manual horizon (SUSI P3a) or None.
     """
     from data.open_meteo_solar_archive import irradiance_wm2_to_pv_kw
     from data.outdoor_forecast import get_hourly_tilted_irradiance_forecast_wm2
@@ -486,6 +546,7 @@ def _open_meteo_pv_vector(
         latitude=lat,
         longitude=lon,
         start=start,
+        shading=shading,
     )
     kw_by_hour = {
         start + timedelta(hours=i): irradiance_wm2_to_pv_kw(wm2[i + 1], kwp)
@@ -502,21 +563,42 @@ def _forecast_one_system(
     azimuth: float,
     kwp: float,
     target_hours: list,
+    shading,
 ) -> tuple[list[float], str]:
-    """Returns (vector, source); raises :class:`PvForecastUnavailableError`."""
+    """Returns (vector, source); raises :class:`PvForecastUnavailableError`.
+
+    ``shading``: the Live profile's manual horizon or None. Without it forecast.solar uses
+    its own PVGIS terrain horizon and the URL is the one from before SUSI P3a-2; with it the
+    URL carries ``?horizon=`` (which replaces that terrain horizon) and the Open-Meteo
+    substitute shades the beam with the same line.
+    """
     if kwp <= 0.0:
         return [0.0] * len(target_hours), SOURCE_NONE
 
-    url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{tilt}/{azimuth}/{kwp}"
+    url = _forecast_solar_url(
+        lat=lat, lon=lon, tilt=tilt, azimuth=azimuth, kwp=kwp, shading=shading
+    )
     hourly_watts = _check_and_fetch_api_data(url, kwp)
     if hourly_watts:
-        pv_vector, success = _map_hourly_data_to_vector(hourly_watts, target_hours)
+        uncovered = _uncovered_daylight_days(hourly_watts, target_hours, lat=lat, lon=lon)
+        pv_vector, success = (
+            _map_hourly_data_to_vector(hourly_watts, target_hours)
+            if not uncovered
+            else ([], False)
+        )
         if success:
             return pv_vector, SOURCE_FORECAST_SOLAR
-        reason = (
-            f"Daten ohne passende Zeitstempel für {len(target_hours)} Zielstunden "
-            f"(Quelle {_LAST_FETCH_SOURCE})"
-        )
+        if uncovered:
+            reason = (
+                "Daten decken die Tage mit Tageslicht nicht ab "
+                f"({', '.join(day.isoformat() for day in uncovered)} fehlen, "
+                f"Quelle {_LAST_FETCH_SOURCE})"
+            )
+        else:
+            reason = (
+                f"Daten ohne passende Zeitstempel für {len(target_hours)} Zielstunden "
+                f"(Quelle {_LAST_FETCH_SOURCE})"
+            )
     else:
         reason = f"keine Daten (Quelle {_LAST_FETCH_SOURCE})"
 
@@ -532,6 +614,7 @@ def _forecast_one_system(
             azimuth=azimuth,
             kwp=kwp,
             target_hours=target_hours,
+            shading=shading,
         )
     except Exception as exc:
         raise PvForecastUnavailableError(
@@ -539,6 +622,24 @@ def _forecast_one_system(
             f"{kwp} kWp): forecast.solar {reason}; Open-Meteo: {exc}"
         ) from exc
     return vector, SOURCE_OPEN_METEO
+
+
+def _forecast_solar_url(
+    *, lat: float, lon: float, tilt: float, azimuth: float, kwp: float, shading
+) -> str:
+    url = f"https://api.forecast.solar/estimate/{lat}/{lon}/{tilt}/{azimuth}/{kwp}"
+    if shading is None:
+        return url
+    from data.solar_horizon import forecast_solar_horizon_param
+
+    return f"{url}?horizon={forecast_solar_horizon_param(shading)}"
+
+
+def _live_profile_horizon():
+    """Manual horizon of the Live house profile (SUSI P3a), or None."""
+    from data.solar_horizon import horizon_from_profile
+
+    return horizon_from_profile(config.get_resolved_runtime_settings().get("_house_profile"))
 
 
 def _sum_vectors(vectors: list[list[float]], length: int) -> list[float]:
@@ -592,6 +693,7 @@ def get_hourly_pv_forecast_by_system_for_hours(
     lat = float(config.get("LATITUDE", cast=float))
     lon = float(config.get("LONGITUDE", cast=float))
     solcast_branches = dict(config.get("EHAL_MQTT_PV_SOLCAST") or {})
+    shading = _live_profile_horizon()
     by_system: dict[str, List[float]] = {}
     sources: dict[str, str] = {}
     solcast_usage: dict[str, dict] = {}
@@ -606,6 +708,7 @@ def get_hourly_pv_forecast_by_system_for_hours(
                 azimuth=float(system.get("pv_azimuth", 0.0) or 0.0),
                 kwp=float(system.get("pv_kwp", 0.0) or 0.0),
                 target_hours=target_hours,
+                shading=shading,
             )
 
         branch = solcast_branches.get(sid)

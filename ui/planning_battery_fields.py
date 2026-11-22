@@ -34,6 +34,11 @@ from ui.planning_battery_inverter import (
 )
 from ui.planning_battery_state import _scoped_key
 from house_config.currency_display import display_label
+from ui.planning_battery_state import (
+    _scoped_key,
+    remember_battery_widgets,
+    restore_hidden_battery_widgets,
+)
 
 
 
@@ -469,6 +474,20 @@ def _render_battery_fields(
     exclude_id: str = "",
     battery_id: str = "",
 ) -> dict:
+    restore_hidden_battery_widgets(session_scope)
+    fields = _render_battery_fields_shown(
+        session_scope, exclude_id=exclude_id, battery_id=battery_id
+    )
+    remember_battery_widgets(session_scope)
+    return fields
+
+
+def _render_battery_fields_shown(
+    session_scope: str,
+    *,
+    exclude_id: str,
+    battery_id: str,
+) -> dict:
     fields = _render_battery_core_fields(session_scope)
     if fields.get("is_virtual_ps"):
         inherited, primary = _virtual_ps_inherited_ui_fields(
@@ -479,8 +498,7 @@ def _render_battery_fields(
         if primary is None:
             st.warning(
                 "Virtuelle Powerstation braucht eine Hausbatterie als "
-                "Carve-out-Basis. Fehlende Werte werden mit Standardwerten "
-                "gefüllt."
+                "Carve-out-Basis. Ohne Hausbatterie wird sie nicht gespeichert."
             )
         else:
             house_label = str(

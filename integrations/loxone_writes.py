@@ -13,6 +13,8 @@ from settings.ehal_marker_resolve import (
     marker_heat_boost,
     marker_set_evcs_max_current,
     marker_set_evcs_mode,
+    marker_set_sg_ready_state,
+    marker_set_store_target,
 )
 from settings.ev_power import ev_nominal_power_conversion, kw_to_ampere
 from settings.flexible_consumers import runtime_consumer_id
@@ -345,12 +347,70 @@ def _enable_output_values(
     return {str(enable_name): float(enabled)}
 
 
+def _sg_ready_state_output_values(
+    consumer: dict,
+    consumer_powers: dict[str, float],
+    charging_contexts: dict[str, dict],
+    *,
+    forced: bool = False,
+) -> dict[str, float]:
+    """Heat pump operating state (HeatControl P2): 3 where the plan runs it, else 2.
+
+    ``forced`` (HeatControl P5): the plan runs it on a negative price or on surplus that
+    would be curtailed, the state is 4. Sent next to ``set_enable`` when the key is mapped;
+    it never replaces it.
+    """
+    from ehal.heat_fields import sg_ready_state_for_plan
+
+    state_name = marker_set_sg_ready_state(consumer)
+    if not state_name:
+        return {}
+    power_kw = _effective_consumer_power_kw(
+        consumer, consumer_powers, charging_contexts, consumer["id"]
+    )
+    state = sg_ready_state_for_plan(power_kw > 1e-3, forced=forced)
+    logger.info(
+        "Flex consumer %s -> SG-Ready-Zustand=%s (optimiert %.2f kW, Loxone: %s)",
+        consumer["name"],
+        state,
+        power_kw,
+        state_name,
+    )
+    return {str(state_name): float(state)}
+
+
+def _store_target_output_values(
+    consumer: dict,
+    heat_storage_targets: dict[str, float] | None,
+) -> dict[str, float]:
+    """Store charge target (HeatControl P3): the plan's target, 0 = no target.
+
+    ``None``: no plan was made in this call (e.g. the watchdog's snapshot); nothing is
+    written then. A heat pump without a computed target gets 0 (no target).
+    """
+    if heat_storage_targets is None:
+        return {}
+    name = marker_set_store_target(consumer)
+    if not name:
+        return {}
+    value = float(heat_storage_targets.get(str(consumer["id"]), 0.0) or 0.0)
+    logger.info(
+        "Flex consumer %s -> Speicher-Ladeziel=%.1f °C (0 = kein Ziel, Loxone: %s)",
+        consumer["name"],
+        value,
+        name,
+    )
+    return {str(name): value}
+
+
 def _flexible_consumer_output_values(
     consumer: dict,
     consumer_powers: dict[str, float],
     charging_contexts: dict[str, dict],
     consumer_pv_follow: dict[str, int] | None = None,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> dict[str, float]:
     """Berechnet Loxone-Merker → Wert für einen flexiblen Verbraucher (ohne HTTP)."""
     if _skip_flexible_consumer_output(consumer, charging_contexts):
@@ -379,6 +439,15 @@ def _flexible_consumer_output_values(
     if boost_name:
         # Sticky like set_ess_mode: always written, 0 without a heat-control decision.
         values[str(boost_name)] = float((heat_control or {}).get("boost", 0))
+    values.update(
+        _sg_ready_state_output_values(
+            consumer,
+            consumer_powers,
+            charging_contexts,
+            forced=str(consumer["id"]) in (heat_forced_charge or ()),
+        )
+    )
+    values.update(_store_target_output_values(consumer, heat_storage_targets))
     return values
 
 
@@ -404,6 +473,8 @@ def _publish_flexible_consumer_outputs(
     mode = marker_set_evcs_mode(consumer)
     enable = marker_flex_enable(consumer)
     boost = marker_heat_boost(consumer)
+    sg_state = marker_set_sg_ready_state(consumer)
+    store_target = marker_set_store_target(consumer)
     for io_name, value in values.items():
         name = str(io_name or "").strip()
         if not name:
@@ -416,6 +487,10 @@ def _publish_flexible_consumer_outputs(
             kind = "set_enable"
         elif boost and name == boost:
             kind = "set_heat_boost"
+        elif sg_state and name == sg_state:
+            kind = "set_sg_ready_state"
+        elif store_target and name == store_target:
+            kind = "set_temperature_heat_storage_target"
         else:
             continue
         if kinds is not None and kind not in kinds:
@@ -437,10 +512,18 @@ def _write_flexible_consumer_output(
     send: bool,
     publish_kinds: frozenset[str] | None = None,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> list[LoxoneWriteRecord]:
     """Publishes Freigabe/Strom-Sollwert/Modus via status.json and/or snapshot."""
     values = _flexible_consumer_output_values(
-        consumer, consumer_powers, charging_contexts, consumer_pv_follow, heat_controls
+        consumer,
+        consumer_powers,
+        charging_contexts,
+        consumer_pv_follow,
+        heat_controls=heat_controls,
+        heat_storage_targets=heat_storage_targets,
+        heat_forced_charge=heat_forced_charge,
     )
     records: list[LoxoneWriteRecord] = []
     if send:
@@ -456,18 +539,100 @@ _OMIT_EXPORT_CAP = object()
 
 
 def _battery_max_powers_kw(battery_params: dict) -> tuple[float, float]:
-    """(max charge kW, max discharge kW) from battery params; ``max_power_kw`` as shared cap."""
-    max_charge = float(
-        battery_params.get("max_charge_power_kw")
-        or battery_params.get("max_power_kw")
-        or 0.0
+    """(max charge kW, max discharge kW) from battery params.
+
+    An explicit value wins, also 0 (charge/discharge disabled or derated to 0 by the
+    live limits). ``max_power_kw`` is only the shared cap when a direction is not set.
+    A battery without any max power raises: publishing 0/0 would block the battery.
+    """
+    shared = battery_params.get("max_power_kw")
+
+    def _pick(key: str) -> float:
+        value = battery_params.get(key)
+        if value is None:
+            value = shared
+        if value is None:
+            raise ValueError(
+                f"ESS C1: battery {battery_params.get('id') or '?'!s} has no {key} "
+                "and no max_power_kw — refusing to publish a power limit"
+            )
+        return float(value)
+
+    return _pick("max_charge_power_kw"), _pick("max_discharge_power_kw")
+
+
+def _ess_battery_params(battery_params: dict | None, source) -> dict:
+    """Battery params for the ESS C1 setpoints.
+
+    ``battery_params`` are the effective params the plan used (live ``get_ess_max_*``
+    applied, ``settings.ess_limits_resolve``). ``None`` means no telemetry is at hand
+    (startup safe push, watchdog rebuild without ``loxone_sent``): the house config
+    limits are used, and the log says so.
+    """
+    if battery_params is not None:
+        return battery_params
+    logger.info("ESS C1: Grenzen aus der Hauskonfiguration (keine Live-Limits übergeben)")
+    return source.get_battery_params()
+
+
+def ess_c1_kind_values(
+    mode: int,
+    target_power_kw: float,
+    target_soc: float,
+    battery_params: dict,
+    *,
+    automatik_discharge_cap_kw: float | None = None,
+) -> tuple[tuple[str, float | None], ...]:
+    """ESS C1 setpoints (kind, value) Earnie sends for this battery control level.
+
+    Single source for the live send path (``send_huawei_modbus_states``) and the
+    ``loxone_sent`` ledger (``build_sent_loxone_snapshot``), so both stay identical:
+
+    - ``read_only``: no ESS setpoint at all (empty tuple).
+    - ``limits_only``: forced charge/discharge (modes 1/3) fall back to Automatik
+      (mode 0, power 0) and no active power setpoint is forced (``None``); the target
+      SoC is computed for the reduced mode.
+    - ``full``: the optimizer mode as mapped by ``map_ess_setpoints``.
+
+    ``None`` as value means "no forced setpoint" (callers send 0 on a wired active
+    power binding and skip the other kinds).
+    """
+    from house_config.battery_control import (
+        BATTERY_CONTROL_LIMITS_ONLY,
+        BATTERY_CONTROL_READ_ONLY,
+        control_from_battery_params,
     )
-    max_discharge = float(
-        battery_params.get("max_discharge_power_kw")
-        or battery_params.get("max_power_kw")
-        or 0.0
+
+    control = control_from_battery_params(battery_params)
+    if control == BATTERY_CONTROL_READ_ONLY:
+        return ()
+
+    max_charge, max_discharge = _battery_max_powers_kw(battery_params)
+    if control == BATTERY_CONTROL_LIMITS_ONLY and mode in (1, 3):
+        mode = 0
+        target_power_kw = 0.0
+    active_kw, charge_kw, discharge_kw, control_cmd = map_ess_setpoints(
+        mode,
+        target_power_kw,
+        max_charge,
+        max_discharge,
+        automatik_discharge_cap_kw=automatik_discharge_cap_kw,
     )
-    return max_charge, max_discharge
+    if control == BATTERY_CONTROL_LIMITS_ONLY:
+        active_kw = None
+    target_soc_pct = ess_target_soc_percent(
+        target_soc,
+        mode=mode,
+        target_power_kw=target_power_kw,
+        battery_params=battery_params,
+    )
+    return (
+        ("set_ess_active_power", active_kw),
+        ("set_ess_charge_power_limit", charge_kw),
+        ("set_ess_discharge_power_limit", discharge_kw),
+        ("set_ess_mode", float(control_cmd)),
+        ("set_ess_target_soc", target_soc_pct),
+    )
 
 
 def _export_cap_marker_and_value(
@@ -504,17 +669,14 @@ def build_sent_loxone_snapshot(
     export_cap_kw: float | None | object = _OMIT_EXPORT_CAP,
     heat_controls: dict[str, dict[str, int]] | None = None,
     automatik_discharge_cap_kw: float | None = None,
+    battery_params: dict | None = None,
 ) -> dict[str, float]:
-    """Alle an Loxone gesendeten Steuerwerte: Merkername → Zahl."""
-    battery_params = config.get_battery_params()
-    max_charge, max_discharge = _battery_max_powers_kw(battery_params)
-    active_kw, charge_kw, discharge_kw, control_cmd = map_ess_setpoints(
-        mode,
-        target_power_kw,
-        max_charge,
-        max_discharge,
-        automatik_discharge_cap_kw=automatik_discharge_cap_kw,
-    )
+    """Alle an Loxone gesendeten Steuerwerte: Merkername → Zahl.
+
+    ``battery_params``: same effective params as ``send_huawei_modbus_states`` got in
+    this cycle, so the ledger matches what was sent (see ``_ess_battery_params``).
+    """
+    battery_params = _ess_battery_params(battery_params, config)
     contexts = charging_contexts or {}
     snapshot: dict[str, float] = {}
 
@@ -522,21 +684,14 @@ def build_sent_loxone_snapshot(
     from integrations.ehal_debug_mapping import has_mappable_live_batteries
 
     has_batteries = bool(has_mappable_live_batteries())
-    for kind, value in (
-        ("set_ess_active_power", active_kw),
-        ("set_ess_charge_power_limit", charge_kw),
-        ("set_ess_discharge_power_limit", discharge_kw),
-        ("set_ess_mode", float(control_cmd)),
-        (
-            "set_ess_target_soc",
-            ess_target_soc_percent(
-                target_soc,
-                mode=mode,
-                target_power_kw=target_power_kw,
-                battery_params=battery_params,
-            ),
-        ),
-    ):
+    kind_values = ess_c1_kind_values(
+        mode,
+        target_power_kw,
+        target_soc,
+        battery_params,
+        automatik_discharge_cap_kw=automatik_discharge_cap_kw,
+    )
+    for kind, value in kind_values:
         wired = resolve_primary_ess_binding(kind)
         if not wired:
             continue
@@ -551,7 +706,9 @@ def build_sent_loxone_snapshot(
         ) or wired
         snapshot[key] = send_value
 
-    if export_cap_kw is not _OMIT_EXPORT_CAP:
+    # Same gate as send_huawei_modbus_states: read_only (no ESS values) sends no
+    # export cap either, so the ledger must not expect one.
+    if kind_values and export_cap_kw is not _OMIT_EXPORT_CAP:
         export = _export_cap_marker_and_value(export_cap_kw)
         if export is not None:
             snapshot[export[0]] = export[1]
@@ -601,59 +758,38 @@ def send_huawei_modbus_states(
     *,
     export_cap_kw: float | None | object = _OMIT_EXPORT_CAP,
     automatik_discharge_cap_kw: float | None = None,
+    battery_params: dict | None = None,
 ) -> list[LoxoneWriteRecord]:
-    """Übersetzt Optimierungsmodi und schreibt ESS-Steuerwerte (Design C1) an Loxone."""
-    from house_config.battery_control import (
-        BATTERY_CONTROL_LIMITS_ONLY,
-        BATTERY_CONTROL_READ_ONLY,
-        control_from_battery_params,
-    )
+    """Übersetzt Optimierungsmodi und schreibt ESS-Steuerwerte (Design C1) an Loxone.
+
+    ``battery_params``: the effective params the plan used (live limits applied);
+    ``None`` uses the house config limits (see ``_ess_battery_params``).
+    """
     from integrations import loxone_client as lc
 
-    battery_params = lc.config.get_battery_params()
-    control = control_from_battery_params(battery_params)
-    if control == BATTERY_CONTROL_READ_ONLY:
-        return []
-
-    max_charge, max_discharge = _battery_max_powers_kw(battery_params)
-    if control == BATTERY_CONTROL_LIMITS_ONLY and mode in (1, 3):
-        mode = 0
-        target_power_kw = 0.0
-    active_kw, charge_kw, discharge_kw, control_cmd = map_ess_setpoints(
+    battery_params = _ess_battery_params(battery_params, lc.config)
+    kind_values = ess_c1_kind_values(
         mode,
         target_power_kw,
-        max_charge,
-        max_discharge,
+        target_soc,
+        battery_params,
         automatik_discharge_cap_kw=automatik_discharge_cap_kw,
     )
-    if control == BATTERY_CONTROL_LIMITS_ONLY:
-        active_kw = None
-    target_soc_pct = ess_target_soc_percent(
-        target_soc,
-        mode=mode,
-        target_power_kw=target_power_kw,
-        battery_params=battery_params,
-    )
+    if not kind_values:
+        return []
 
+    sent = dict(kind_values)
     logger.info(
         "Sending ESS C1 Mapping -> Soll: %s kW, Ladegrenze: %s kW, "
         "Entladegrenze: %s kW, set_ess_mode/Cmd: %s, Ziel-SoC: %s %%",
-        active_kw,
-        charge_kw,
-        discharge_kw,
-        control_cmd,
-        target_soc_pct,
+        sent["set_ess_active_power"],
+        sent["set_ess_charge_power_limit"],
+        sent["set_ess_discharge_power_limit"],
+        sent["set_ess_mode"],
+        sent["set_ess_target_soc"],
     )
 
-    records = _publish_ess_c1_setpoints(
-        (
-            ("set_ess_active_power", active_kw),
-            ("set_ess_charge_power_limit", charge_kw),
-            ("set_ess_discharge_power_limit", discharge_kw),
-            ("set_ess_mode", float(control_cmd)),
-            ("set_ess_target_soc", target_soc_pct),
-        )
-    )
+    records = _publish_ess_c1_setpoints(kind_values)
     if export_cap_kw is not _OMIT_EXPORT_CAP:
         from ehal.qualified_ids import qualified_plant_id
 
@@ -729,8 +865,14 @@ def send_flexible_consumer_states(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> list[LoxoneWriteRecord]:
-    """Sendet Freigabe (0/1), Boost, set_evcs_max_current (A) und set_evcs_mode an Loxone."""
+    """Sendet Freigabe (0/1), Boost, set_evcs_max_current (A) und set_evcs_mode an Loxone.
+
+    ``heat_storage_targets``: store charge target per heat pump (HeatControl P3); ``None``
+    writes no target, a missing heat pump in the dict gets 0 (no target).
+    """
     contexts = charging_contexts or {}
     records: list[LoxoneWriteRecord] = []
     for consumer in config.get_flexible_consumers(optimizer_only=True):
@@ -743,6 +885,8 @@ def send_flexible_consumer_states(
                 consumer_pv_follow,
                 send=True,
                 heat_controls=heat_controls,
+                heat_storage_targets=heat_storage_targets,
+                heat_forced_charge=heat_forced_charge,
             )
         )
     return records
@@ -754,8 +898,11 @@ def send_flexible_consumer_enables(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> list[LoxoneWriteRecord]:
-    """Publish only the flex ``set_enable`` (heat pump, pool, generic consumers).
+    """Publish only the flex ``set_enable`` (heat pump, pool, generic consumers), the
+    heat pump's ``set_sg_ready_state`` (HeatControl P2) and its store charge target (P3).
 
     For the HA backend: the EV current is written through the EVCS adapter
     (``ehal_live.write_evcs_max_current_from_consumers``), so it is not published a
@@ -772,8 +919,17 @@ def send_flexible_consumer_enables(
                 None,
                 consumer_pv_follow,
                 send=True,
-                publish_kinds=frozenset({"set_enable", "set_heat_boost"}),
+                publish_kinds=frozenset(
+                    {
+                        "set_enable",
+                        "set_heat_boost",
+                        "set_sg_ready_state",
+                        "set_temperature_heat_storage_target",
+                    }
+                ),
                 heat_controls=heat_controls,
+                heat_storage_targets=heat_storage_targets,
+                heat_forced_charge=heat_forced_charge,
             )
         )
     return records

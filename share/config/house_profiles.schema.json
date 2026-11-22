@@ -440,6 +440,12 @@
           "default": 5.0,
           "type": "number",
           "minimum": 0.1
+        },
+        "boost_k": {
+          "default": 0.0,
+          "type": "number",
+          "minimum": 0,
+          "description": "Fester Boost (K) über dem Soll, den die Regelung bei Freigabe 1 bzw. SG-Ready-Zustand 3 anfährt (HeatControl P2). 0 = Ladung nur bis zum Soll."
         }
       }
     },
@@ -473,6 +479,21 @@
         "efficiency": {
           "type": "number",
           "exclusiveMinimum": 0
+        },
+        "cop_points": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Nur bei type heat_pump, optional (HeatControl P5): COP nach Quellen- und Senkentemperatur (Vorlauf), z. B. aus dem Datenblatt (B0/W35 → source_c 0, sink_c 35). Die Punkte bilden ein Raster: jede Quellentemperatur mit jeder Senkentemperatur. Dazwischen interpoliert Earnie linear, außerhalb gilt der Randwert. Ohne Punkte plant Earnie mit der JAZ (efficiency).",
+          "items": {
+            "type": "object",
+            "required": ["source_c", "sink_c", "cop"],
+            "additionalProperties": false,
+            "properties": {
+              "source_c": { "type": "number" },
+              "sink_c": { "type": "number" },
+              "cop": { "type": "number", "exclusiveMinimum": 0 }
+            }
+          }
         },
         "fuel_price": {
           "type": "number",
@@ -991,6 +1012,41 @@
           "maximum": 180,
           "description": "Vorschlag PV-Azimut für ein neues PV-Feld (überschreibbar)."
         },
+        "horizon_source": {
+          "type": "string",
+          "enum": [
+            "none",
+            "manual"
+          ],
+          "description": "Herkunft des Horizonts: manual = die von Hand eingegebene Liste in horizon wird angewendet; none = kein Horizont (wie ein fehlendes Feld), eine vorhandene Liste bleibt gespeichert, wirkt aber nicht."
+        },
+        "horizon": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Horizont am Standort (Gelände, Gebäude, Bäume) als Liste Azimut → Höhenwinkel. Steht die Sonne darunter, entfällt die direkte Einstrahlung auf PV, Kollektor und Fenster. Zwischen den Punkten wird linear interpoliert, auch über ±180°. Wirkt nur mit horizon_source = manual; horizon_source muss gesetzt sein.",
+          "items": {
+            "type": "object",
+            "required": [
+              "azimuth_deg",
+              "elevation_deg"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "azimuth_deg": {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180,
+                "description": "0 = Süd, -90 = Ost, 90 = West, ±180 = Nord (wie bei den PV-Feldern)."
+              },
+              "elevation_deg": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 90,
+                "description": "Höhenwinkel des Horizonts über der Waagrechten in Grad."
+              }
+            }
+          }
+        },
         "total_profile_csv": {
           "type": "string"
         },
@@ -1014,6 +1070,22 @@
             "balance"
           ],
           "description": "Importmodus: getrennte CSVs, Loxone-Energiemonitor (PV+Batterie+Netz+Verbrauch) oder Bilanz PV+Batt+Netz."
+        },
+        "balance_sign_inverts": {
+          "type": "object",
+          "description": "Bilanz-Import: Vorzeichen-Umkehr, mit der das Lastprofil abgeleitet wurde. Fehlt = unbekannt (älteres Profil).",
+          "additionalProperties": false,
+          "properties": {
+            "pv": {
+              "type": "boolean"
+            },
+            "battery": {
+              "type": "boolean"
+            },
+            "grid": {
+              "type": "boolean"
+            }
+          }
         },
         "baseload_distribution": {
           "type": "string",

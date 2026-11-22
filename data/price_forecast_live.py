@@ -182,7 +182,7 @@ def _align_live_feature_index(frame: pd.DataFrame) -> pd.DataFrame:
 def _archive_latest_complete_day() -> date:
     """Letzter Kalendertag mit vollständigen Open-Meteo/Energy-Charts-Archivdaten.
 
-    Uses the wall clock (and test ``time_machine``), not :func:`planning_now`.
+    Uses the wall clock (and a frozen test clock), not :func:`planning_now`.
     Offline replay freezes the planning clock to the cycle timestamp; the archive
     cut-off is a property of available data at run time, not of that cycle.
     """
@@ -381,12 +381,14 @@ def compute_rolling_epex_bias_cent(
     Returns (bias_cent_or_None, sample_count).
     """
     from data.market_prices import normalize_price_slot
-    from optimizer.slot_duration import floor_to_hour_slot
+    from optimizer.slot_duration import fixed_offset_local, floor_to_hour_slot, slot_zone
 
     ref = floor_to_hour_slot(normalize_price_slot(reference_slot))
-    lookback_slots: list[datetime] = []
-    for hours_back in range(1, lookback_hours + 1):
-        lookback_slots.append(ref - timedelta(hours=hours_back))
+    zone = slot_zone(ref)
+    lookback_slots: list[datetime] = [
+        fixed_offset_local(ref - timedelta(hours=hours_back), zone)
+        for hours_back in range(1, lookback_hours + 1)
+    ]
 
     if feature_frame is None:
         feature_frame = build_live_feature_frame_for_slots(lookback_slots)

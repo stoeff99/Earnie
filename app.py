@@ -35,30 +35,51 @@ if _shadow_refusal:
     raise SystemExit(1)
 
 config = None
+# Config load error under Streamlit: shown in the UI instead of SystemExit (which
+# would kill the script thread and leave the browser spinning without a message).
+_config_error: str | None = None
 if not _migration_mode:
-    from runtime_store.config_load import load_config_or_exit, reinit_config_or_exit
+    from runtime_store.config_load import load_config_for_ui
     from runtime_store.shadow.hooks import refuse_shadow_startup_or_exit
 
-    config = load_config_or_exit()
-    reinit_config_or_exit(config)
-    refuse_shadow_startup_or_exit()
+    config, _config_error = load_config_for_ui()
+    if _config_error is None:
+        refuse_shadow_startup_or_exit()
 
-from ui.branding import render_app_logo
+from ui.branding import APP_PAGE_ICON, render_app_logo
 from runtime_store.shadow.mode import is_shadow_mode
 
 logger = logging.getLogger("app")
 
 
+if _migration_mode:
+    _page_title = "Konfigurations-Migration"
+elif _config_error is not None:
+    _page_title = "Konfigurationsfehler"
+else:
+    _page_title = "Monitor"
 st.set_page_config(
-    page_title="Monitor" if not _migration_mode else "Konfigurations-Migration",
-    page_icon="🔋",
+    page_title=_page_title,
+    page_icon=APP_PAGE_ICON,
     layout="wide",
 )
 render_app_logo()
-if not _migration_mode and is_shadow_mode():
+if not _migration_mode and _config_error is None and is_shadow_mode():
     from ui.shadow_banner import render_shadow_banner
 
     render_shadow_banner()
+
+
+def _render_config_error_page(message: str) -> None:
+    """Config does not load: show why and keep the config-pack import usable."""
+    from ui.config_pack import render_backup_transfer_sidebar
+
+    st.error(f"Die Konfiguration kann nicht geladen werden:\n\n{message}")
+    st.info(
+        "Korrigieren Sie die Konfigurationsdateien oder laden Sie in der Seitenleiste "
+        "unter „Sichern & Übertragen“ ein gültiges Config-Paket (ZIP)."
+    )
+    render_backup_transfer_sidebar(expanded=True)
 
 
 def _render_downgrade_warning() -> None:
@@ -102,6 +123,10 @@ def main() -> None:
         render_migration(_migration_plan)
         st.stop()
 
+    if _config_error is not None:
+        _render_config_error_page(_config_error)
+        st.stop()
+
     from runtime_store.dotenv_io import (
         needs_loxone_setup,
         require_loxone_credentials_for_config,
@@ -112,6 +137,7 @@ def main() -> None:
     from ui.info_sidebar import render_info_sidebar, render_missing_next_month_tariff_sidebar
     from ui.mode_selector import get_enabled_ui_mode_keys, render_ui_mode_env_notices
     from ui.navigation import build_navigation
+    from ui.sponsor_button import render_sponsor_sidebar_button
     from ui.setup_dotenv import render_ehal_setup_page
     from ui.setup_progress import render_setup_progress_notice
     from ui.styles import (
@@ -126,6 +152,7 @@ def main() -> None:
     render_flash_notices()
     if needs_loxone_setup():
         render_ehal_setup_page()
+        render_sponsor_sidebar_button()
         render_info_sidebar()
         st.stop()
 
@@ -138,6 +165,7 @@ def main() -> None:
     inject_single_file_uploader_css()
     inject_checkbox_highlight_css()
     render_ui_mode_env_notices()
+    render_sponsor_sidebar_button()
     render_backup_transfer_sidebar()
     render_setup_progress_notice()
     render_missing_next_month_tariff_sidebar()

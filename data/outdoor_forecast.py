@@ -5,7 +5,7 @@ import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone as _timezone
-from typing import Iterator, Optional
+from typing import Callable, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 import config
@@ -27,9 +27,9 @@ HOURLY_TEMP_VAR = "temperature_2m"
 HOURLY_TILTED_VAR = "global_tilted_irradiance"
 
 _CACHE: dict[tuple[float, float, int], tuple[datetime, list[tuple[datetime, float]]]] = {}
-# (lat, lon, forecast_days, tilt, azimuth) → (fetched_at, hourly W/m²)
+# (lat, lon, forecast_days, tilt, azimuth, horizon token) → (fetched_at, hourly W/m²)
 _TILTED_CACHE: dict[
-    tuple[float, float, int, int, int], tuple[datetime, list[tuple[datetime, float]]]
+    tuple[float, float, int, int, int, str], tuple[datetime, list[tuple[datetime, float]]]
 ] = {}
 _CACHE_TTL = timedelta(minutes=30)
 # Longest series fetched while a cycle is open (recorder). None outside a cycle.
@@ -75,6 +75,7 @@ def _fetch_open_meteo_hourly_vars(
     forecast_days: int,
     hourly_vars: tuple[str, ...],
     extra_params: dict | None = None,
+    payload_transform=None,
 ) -> dict[str, list[tuple[datetime, float]]]:
     payload = open_meteo.forecast(
         opendata_session.session(transport=_shadow_transport),
@@ -84,6 +85,9 @@ def _fetch_open_meteo_hourly_vars(
         hourly=hourly_vars,
         extra_params=extra_params,
     )
+    if payload_transform is not None:
+        # On the UTC stamps of the response, before the local wall clock.
+        payload = payload_transform(payload)
     return _parse_open_meteo_hourly(
         payload, hourly_vars, timezone=config.get_planning_timezone()
     )
@@ -177,6 +181,16 @@ def _parse_open_meteo_hourly(
     return out
 
 
+def _planning_wall_clock(moment: datetime) -> datetime:
+    """Naive wall clock of the planning timezone; the hourly series are keyed that way.
+
+    Live slots are timezone-aware; an aware ``start`` never matches a naive key.
+    """
+    if moment.tzinfo is None:
+        return moment
+    return moment.astimezone(ZoneInfo(config.get_planning_timezone())).replace(tzinfo=None)
+
+
 def _is_skipped_local_hour(moment: datetime) -> bool:
     """True for a wall-clock time that does not exist (spring clock change gap)."""
     tz = ZoneInfo(config.get_planning_timezone())
@@ -248,7 +262,9 @@ def get_hourly_outdoor_forecast_c(
         raise ValueError("horizon muss mindestens 1 sein")
     lat = float(latitude if latitude is not None else config.get("LATITUDE", cast=float))
     lon = float(longitude if longitude is not None else config.get("LONGITUDE", cast=float))
-    start_dt = (start or planning_now()).replace(minute=0, second=0, microsecond=0)
+    start_dt = _planning_wall_clock(start or planning_now()).replace(
+        minute=0, second=0, microsecond=0
+    )
     forecast_days = _required_forecast_days(start_dt, horizon)
 
     cache_key = (round(lat, 4), round(lon, 4), forecast_days)
@@ -278,12 +294,18 @@ def get_hourly_tilted_irradiance_forecast_wm2(
     latitude: float,
     longitude: float,
     start: datetime | None = None,
+    shading=None,
 ) -> list[float]:
     """Hourly global tilted irradiance (W/m²) for one surface over ``horizon`` hours.
 
     Same Open-Meteo conventions as the archive path (``tilt``/``azimuth`` rounded
     to whole degrees, azimuth 0° = south). One request also carries
     ``temperature_2m`` and seeds the outdoor-temperature cache for the location.
+
+    ``shading``: the site's :class:`data.solar_horizon.HorizonProfile` (SUSI P3a). Only then
+    the request also asks for ``direct_normal_irradiance`` and the beam is removed while the
+    sun is behind the horizon; without it the request is unchanged. (``horizon`` here is the
+    number of hours.)
     """
     if horizon < 1:
         raise ValueError("horizon muss mindestens 1 sein")
@@ -291,10 +313,15 @@ def get_hourly_tilted_irradiance_forecast_wm2(
     lon = float(longitude)
     tilt = int(round(float(tilt_deg)))
     azimuth = int(round(float(azimuth_deg)))
-    start_dt = (start or planning_now()).replace(minute=0, second=0, microsecond=0)
+    start_dt = _planning_wall_clock(start or planning_now()).replace(
+        minute=0, second=0, microsecond=0
+    )
     forecast_days = _required_forecast_days(start_dt, horizon)
 
-    cache_key = (round(lat, 4), round(lon, 4), forecast_days, tilt, azimuth)
+    cache_key = (
+        round(lat, 4), round(lon, 4), forecast_days, tilt, azimuth,
+        shading.token() if shading is not None else "",
+    )
     cached = _TILTED_CACHE.get(cache_key)
     now = datetime.now()
     if cached and cache_entry_fresh(
@@ -303,13 +330,37 @@ def get_hourly_tilted_irradiance_forecast_wm2(
         hourly = cached[1]
     else:
         record_cycle_event(EVENT_WEATHER_FETCH)
-        series = _fetch_open_meteo_hourly_vars(
-            lat,
-            lon,
-            forecast_days=forecast_days,
-            hourly_vars=(HOURLY_TEMP_VAR, HOURLY_TILTED_VAR),
-            extra_params={"tilt": tilt, "azimuth": azimuth},
-        )
+        if shading is None:
+            series = _fetch_open_meteo_hourly_vars(
+                lat,
+                lon,
+                forecast_days=forecast_days,
+                hourly_vars=(HOURLY_TEMP_VAR, HOURLY_TILTED_VAR),
+                extra_params={"tilt": tilt, "azimuth": azimuth},
+            )
+        else:
+            from data.solar_horizon import DNI_VAR, shade_hourly_payload
+
+            def _shade(payload):
+                return shade_hourly_payload(
+                    payload,
+                    tilted_var=HOURLY_TILTED_VAR,
+                    dni_var=DNI_VAR,
+                    lat=lat,
+                    lon=lon,
+                    tilt_deg=float(tilt),
+                    azimuth_deg=float(azimuth),
+                    horizon=shading,
+                )
+
+            series = _fetch_open_meteo_hourly_vars(
+                lat,
+                lon,
+                forecast_days=forecast_days,
+                hourly_vars=(HOURLY_TEMP_VAR, HOURLY_TILTED_VAR, DNI_VAR),
+                extra_params={"tilt": tilt, "azimuth": azimuth},
+                payload_transform=_shade,
+            )
         hourly = series[HOURLY_TILTED_VAR]
         _TILTED_CACHE[cache_key] = (now, hourly)
         _CACHE[(round(lat, 4), round(lon, 4), forecast_days)] = (now, series[HOURLY_TEMP_VAR])
@@ -417,4 +468,40 @@ def get_outdoor_forecast_with_fallback(
             start=start,
         )
         _note_captured_forecast(series, source)
+    return series, source
+
+
+def get_outdoor_forecast_or_live_reading(
+    *,
+    horizon: int,
+    read_live_ambient_c: Callable[[], float | None],
+    start: datetime | None = None,
+) -> tuple[list[float], str]:
+    """Open-Meteo forecast; only if that fails, the live outdoor reading held constant.
+
+    ``read_live_ambient_c`` is called only when the forecast fetch fails. Without a forecast
+    and without a live reading there is no outdoor temperature: fail loud, never invent one.
+    """
+    recorded = _serve.get()
+    if recorded is not None:
+        return _series_from_recording(recorded, horizon)
+    try:
+        series = get_hourly_outdoor_forecast_c(horizon=horizon, start=start)
+        source = "open_meteo"
+    except Exception as exc:
+        live = read_live_ambient_c()
+        if live is None:
+            raise ValueError(
+                f"Außentemperatur fehlt: Open-Meteo-Prognose fehlgeschlagen ({exc}) und "
+                "sens_temperature_outside liefert keinen Wert – Außentemperatur-Sensor "
+                "mappen oder Internetverbindung prüfen."
+            ) from exc
+        logger.warning(
+            "Außentemperatur-Prognose fehlgeschlagen (%s) – konstante Live-Außentemperatur "
+            "%.2f °C",
+            exc,
+            float(live),
+        )
+        series, source = [round(float(live), 3)] * horizon, "fallback_constant"
+    _note_captured_forecast(series, source)
     return series, source

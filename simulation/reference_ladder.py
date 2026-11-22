@@ -385,9 +385,10 @@ def _end_customer_price_series(
 ) -> dict[datetime, float]:
     """End-customer price per slot, from the book's start to the last day published in it.
 
-    ``epex_prices_for_slots`` fills gaps with the previous price; here a slot without a
-    market price raises, since the lock must not rank prices that did not exist. Only the
-    end of the market data cuts the series, and never inside the book (spec § 4.2).
+    ``epex_prices_for_slots`` fills holes of up to ``MAX_PRICE_GAP`` with the previous price;
+    here any slot without a market price raises, since the lock must not rank prices that did
+    not exist. Only the end of the market data cuts the series, and never inside the book
+    (spec § 4.2).
     """
     from data.backtesting_prices import (
         last_day_ahead_calendar_date,
@@ -512,12 +513,19 @@ def compute_ladder_reference(
 def plan_ladder_reference_tasks(
     scenarios: dict[str, dict],
     *,
+    steps: tuple[str, ...],
     scenario_labels: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, str]], list[LadderReferenceSpec]]:
-    """L1 and L2 runs per scenario; identical setups share them (``ladder_reference_fingerprint``).
+    """L1 (and L2) runs per scenario; identical setups share them (``ladder_reference_fingerprint``).
 
+    ``steps``: ``(l1,)`` for the SE box L1, ``(l1, l2)`` with the hidden switch ``rule_reference``.
     Returns ``ladder_by_scenario`` (scenario id → step → result id) and the runs to compute.
+    L1 runs that differ only in the tariff are computed once more by the runner
+    (``simulation.reference_dedup``); the plan keeps one result id per tariff.
     """
+    unknown = [step for step in steps if step not in LADDER_STEPS]
+    if unknown or not steps:
+        raise ValueError(f"Unbekannte Referenz-Stufen {steps!r}.")
     labels = scenario_labels or {}
     ladder_by_scenario: dict[str, dict[str, str]] = {}
     specs: list[LadderReferenceSpec] = []
@@ -535,10 +543,10 @@ def plan_ladder_reference_tasks(
                     f"{_LADDER_LABELS[step]} ({display})",
                     step,
                 )
-                for step in LADDER_STEPS
+                for step in steps
             )
         ladder_by_scenario[scenario_id] = {
-            step: ladder_reference_id(step, owner) for step in LADDER_STEPS
+            step: ladder_reference_id(step, owner) for step in steps
         }
     return ladder_by_scenario, specs
 

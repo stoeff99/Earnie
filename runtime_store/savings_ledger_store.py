@@ -41,6 +41,7 @@ from runtime_store.savings_ledger import (
     DayBounds,
     LedgerInput,
     LedgerState,
+    with_plant_soc,
 )
 from runtime_store.savings_ledger_flex import FlexDayInputs, consumer_windows
 from runtime_store.slot_ist_powers import index_closed_intervals_by_start
@@ -62,9 +63,11 @@ def load_state(path: str | None = None, *, now: datetime | None = None) -> Loade
     """Read the ledger state.
 
     Missing file → new chain (``first_run``). A file of another ``savings_v`` → new
-    chain (``savings_v_changed``). An unreadable or malformed file is moved aside
+    chain (``savings_v_changed``). A file with broken content is moved aside
     to ``<path>.broken-<timestamp>`` with a warning and a new chain starts
     (``state_unreadable``); the first row of that chain carries the reason.
+    An ``OSError`` while reading (e.g. a network mount that is briefly away) is
+    raised: the file may be intact, so the caller tries again on the next cycle.
     """
     path = path or savings_ledger_state_file()
     if not os.path.isfile(path):
@@ -82,8 +85,8 @@ def load_state(path: str | None = None, *, now: datetime | None = None) -> Loade
             )
             return LoadedState(None, CHAIN_SAVINGS_V_CHANGED)
         return LoadedState(LedgerState.from_dict(raw), None)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    except (ValueError, KeyError, TypeError) as exc:
+        stamp =(now or datetime.now()).strftime("%Y%m%d-%H%M%S")
         broken = f"{path}.broken-{stamp}"
         logger.warning(
             "savings ledger: state unreadable (%s) — moved to %s, new chain starts.",
@@ -143,6 +146,34 @@ def append_row(row: dict[str, Any], path: str | None = None) -> None:
         os.makedirs(parent, exist_ok=True)
     with open(path, "a", encoding="utf-8", newline="\n") as handle:
         handle.write(json.dumps(row, ensure_ascii=False, sort_keys=False) + "\n")
+
+
+def last_line_has_day(path: str, day_start: str, chain_start: str) -> bool:
+    """True when the last line of the JSONL file ``path`` is the record of that day and chain.
+
+    The daemon asks before it appends a closed day: after a stop between the append and
+    the state save, the restarted daemon closes the same day again. A last line that is
+    not JSON (torn write) counts as another day, with a warning; readers fail loud on it.
+    """
+    if not os.path.isfile(path):
+        return False
+    last = ""
+    with open(path, encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                last = line
+    if not last:
+        return False
+    try:
+        record = json.loads(last)
+    except json.JSONDecodeError as exc:
+        logger.warning("savings ledger: last line of %s is not JSON (%s).", path, exc)
+        return False
+    return (
+        isinstance(record, dict)
+        and record.get("day_start") == day_start
+        and record.get("chain_start") == chain_start
+    )
 
 
 def read_rows(path: str | None = None) -> list[dict[str, Any]]:
@@ -325,8 +356,15 @@ def ledger_input_from_pending(
     slot_start: datetime,
     closed: dict[str, Any] | None,
     pending: dict[str, Any] | None,
+    *,
+    batteries: list[dict],
 ) -> LedgerInput:
-    """``LedgerInput`` for a closed slot; prices only when ``pending`` belongs to that slot."""
+    """``LedgerInput`` for a closed slot; prices only when ``pending`` belongs to that slot.
+
+    ``batteries`` are the house-balance batteries: the slot's SoC becomes the plant SoC
+    (``savings_ledger.with_plant_soc``).
+    """
+    closed = with_plant_soc(closed, batteries)
     if pending is None or pending.get("slot_start") != slot_start.isoformat():
         return LedgerInput(slot_start, closed, None, None)
     return LedgerInput(
@@ -344,6 +382,8 @@ def ledger_input(
     slot_start: datetime,
     closed: dict[str, Any] | None,
     slot_entry: dict[str, Any] | None,
+    *,
+    batteries: list[dict],
 ) -> LedgerInput:
     """Pair a slot's ``closed_interval`` with the prices and plan of the slot's own entry.
 
@@ -353,22 +393,29 @@ def ledger_input(
     prices are ``None`` and the ledger skips the slot (``no_price``).
     """
     return ledger_input_from_pending(
-        slot_start, closed, pending_slot_from_entry(slot_start, slot_entry)
+        slot_start, closed, pending_slot_from_entry(slot_start, slot_entry), batteries=batteries
     )
 
 
 def ledger_inputs_from_entries(
     entries: Iterable[dict[str, Any]],
     timezone_name: str,
+    *,
+    batteries: list[dict],
 ) -> list[LedgerInput]:
-    """Every closed slot in ``entries`` as ``LedgerInput``, oldest first."""
+    """Every closed slot in ``entries`` as ``LedgerInput``, oldest first (``batteries``: see
+    ``ledger_input_from_pending``)."""
     entries = list(entries)
     closed_by = index_closed_intervals_by_start(entries)
     by_slot = _index_entries_by_slot(entries)
     inputs: list[LedgerInput] = []
     for naive_start in sorted(closed_by):
         slot_start = quarter_hour_slot_start(align_to_planning_timezone(naive_start, timezone_name))
-        inputs.append(ledger_input(slot_start, closed_by[naive_start], by_slot.get(slot_start)))
+        inputs.append(
+            ledger_input(
+                slot_start, closed_by[naive_start], by_slot.get(slot_start), batteries=batteries
+            )
+        )
     return inputs
 
 

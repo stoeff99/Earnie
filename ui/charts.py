@@ -1,7 +1,8 @@
 """Plotly-Charts für Optimierungsdarstellung (sunrise→sunrise Live, 24h Historie)."""
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -43,6 +44,10 @@ from ui.chart_legend_mobile import (
 )
 from ui.help_hint import render_title_with_help
 from house_config.currency_display import active_units
+from ui.s2_viewport import is_phone_request
+
+logger = logging.getLogger(__name__)
+
 
 def add_power_traces(
     fig: go.Figure,
@@ -111,6 +116,7 @@ class _Chart1Options:
     chart_now: datetime | None
     battery_params: dict | None
     slot_shadow_soc: Sequence[float | None] | None = None
+    pv_compare_series: Mapping[str, Sequence[float | None]] | None = None
 
 
 def _add_power_layer(
@@ -138,6 +144,10 @@ def _add_power_layer(
         show_soc_plausibility=options.show_soc_plausibility,
         history_slot_count=options.history_slot_count,
     )
+    if options.pv_compare_series:
+        from ui.chart_pv_compare import add_pv_compare_traces
+
+        add_pv_compare_traces(fig, axis, options.pv_compare_series)
 
 
 def _add_soc_price_layer(
@@ -158,6 +168,8 @@ def _add_soc_price_layer(
     try:
         chart_soc_entities = load_chart_soc_entities()
     except Exception:  # noqa: BLE001
+        # Chart 1 stays usable without the per-battery SoC lines, but say why.
+        logger.exception("Chart 1: SoC-Entitäten nicht ladbar, Linien je Batterie fehlen.")
         chart_soc_entities = []
     add_optimized_soc_traces(
         fig, plot_df, axis, extrap_start=extrap_start, extrap_end=extrap_end,
@@ -203,12 +215,36 @@ def _add_soc_price_layer(
     )
 
 
+_SOC_AXIS_DEFAULT_RANGE = (-5.0, 105.0)
+
+_SOC_AXIS_PRICE_PADDING = 2.0
+
+
+def _soc_price_axis_range(df: pd.DataFrame) -> tuple[float, float]:
+    """SoC/price axis: 0–100 % with margin, widened when a price lies outside.
+
+    Negative feed-in or import prices (and prices above 105 ct) would otherwise be
+    clipped at the fixed range.
+    """
+    low, high = _SOC_AXIS_DEFAULT_RANGE
+    for column in ("Strompreis (Cent/kWh)", "Einspeisevergütung (Cent/kWh)"):
+        if column not in df.columns:
+            continue
+        prices = pd.to_numeric(df[column], errors="coerce").dropna()
+        if prices.empty:
+            continue
+        low = min(low, float(prices.min()) - _SOC_AXIS_PRICE_PADDING)
+        high = max(high, float(prices.max()) + _SOC_AXIS_PRICE_PADDING)
+    return low, high
+
+
 def _power_soc_layout(
     axis: ChartSlotAxis,
     *,
     chart_window: UiChartWindow | None,
     chart_title: str | None,
     chart_header_label: str | None,
+    soc_axis_range: tuple[float, float] = _SOC_AXIS_DEFAULT_RANGE,
 ) -> dict:
     default_title = (
         _sunrise_chart_title(chart_window)
@@ -228,7 +264,7 @@ def _power_soc_layout(
             side="right",
             overlaying="y",
             showgrid=False,
-            range=[-5, 105],
+            range=list(soc_axis_range),
         ),
         **_collapsible_chart_layout(top_margin=top_margin),
     )
@@ -253,6 +289,7 @@ def build_power_soc_chart_figure(
     chart_now: datetime | None = None,
     battery_params: dict | None = None,
     slot_shadow_soc: Sequence[float | None] | None = None,
+    pv_compare_series: Mapping[str, Sequence[float | None]] | None = None,
 ) -> go.Figure:
     """Baut Chart 1 (Leistung, SoC, Preis) ohne Streamlit-Rendering."""
     options = _Chart1Options(
@@ -267,6 +304,7 @@ def build_power_soc_chart_figure(
         chart_now=chart_now,
         battery_params=battery_params,
         slot_shadow_soc=slot_shadow_soc,
+        pv_compare_series=pv_compare_series,
     )
     plot_df = _mask_missing_log_slots(df, slot_qualities)
     axis = ChartSlotAxis.from_dataframe(plot_df)
@@ -285,9 +323,15 @@ def build_power_soc_chart_figure(
             chart_window=chart_window,
             chart_title=chart_title,
             chart_header_label=chart_header_label,
+            soc_axis_range=_soc_price_axis_range(plot_df),
         )
     )
     return fig
+
+
+# Chart 1 on desktop and tablet: twice Plotly's default height (450 px). Phones keep the
+# default, the chart would otherwise be taller than the screen.
+CHART1_DESKTOP_HEIGHT_PX = 900
 
 
 def render_power_soc_chart(
@@ -311,6 +355,7 @@ def render_power_soc_chart(
     optimization_matrix: list[dict] | None = None,
     battery_params: dict | None = None,
     slot_shadow_soc: Sequence[float | None] | None = None,
+    pv_compare_series: Mapping[str, Sequence[float | None]] | None = None,
 ) -> None:
     """Leistungen (PV, Verbrauch, Batterie, Flex) und SoC-Verläufe."""
     if chart_header_label and chart_header_help:
@@ -337,7 +382,10 @@ def render_power_soc_chart(
         chart_now=chart_now,
         battery_params=battery_params,
         slot_shadow_soc=slot_shadow_soc,
+        pv_compare_series=pv_compare_series,
     )
+    if not is_phone_request():
+        fig.update_layout(height=CHART1_DESKTOP_HEIGHT_PX)
     plotly_kwargs: dict = {"width": "stretch"}
     if chart_key:
         plotly_kwargs["key"] = chart_key

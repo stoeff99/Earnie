@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ehal.heat_fields import KIND_STORE_MAX
 from optimizer.thermal_coupled import (
     heat_storage_enabled,
     normalize_heat_storage,
@@ -16,9 +17,19 @@ from optimizer.thermal_coupled import (
 from optimizer.thermal_live_band import (  # noqa: F401  (re-exported)
     BAND_SOURCE_BACKEND,
     BAND_SOURCE_CONFIG,
+    BAND_SOURCE_CONFIG_NO_VALUE,
     resolve_live_store_band,
 )
 from optimizer.thermal_model import ThermalBand, capacity_kwh_per_k_from_volume, heat_content_kwh
+from optimizer.thermal_live_cop import (
+    EFFICIENCY_JAZ_NO_SOURCE_VALUE,
+    LiveEfficiency,
+    efficiency_observability,
+    resolve_live_efficiency,
+    segment_cops,
+    segment_edges_c,
+)
+from optimizer.thermal_store_model import StoreLevelModel, StoreSegment
 from optimizer.thermal_live_solar import (  # noqa: F401  (re-exported)
     SOLAR_SOURCE_ARCHIVE_FALLBACK,
     SOLAR_SOURCE_FORECAST,
@@ -44,6 +55,10 @@ from optimizer.thermal_live_house import (  # noqa: F401  (re-exported)
 )
 
 logger = logging.getLogger(__name__)
+
+EQ_SOURCE_MEASURED = "measured"
+EQ_SOURCE_SETPOINT_NO_VALUE = "setpoint_no_value"
+"""Observability ``eq_source``: T_eq had no value, the store plan started at the setpoint."""
 
 
 @dataclass(frozen=True)
@@ -73,6 +88,86 @@ class LiveStorePlan:
     band_source: str = BAND_SOURCE_CONFIG
     # Mapped level 3 feedback reads of this cycle (kind → value, None = no value).
     feedback: dict[str, float | None] = field(default_factory=dict)
+    # Fixed boost (K) above the setpoint that an Earnie charge reaches (HeatControl P2).
+    boost_k: float = 0.0
+    # Highest store temperature the controller reports (get_temperature_heat_storage_max).
+    store_max_c: float | None = None
+    # Inputs of the charge target (HeatControl P3): model and net draw per hour [kW].
+    capacity_kwh_per_k: float = 0.0
+    heat_loss_kw_per_k: float = 0.0
+    jaz: float = 0.0
+    ambient_c: list[float] = field(default_factory=list)
+    draw_kw_by_hour: list[float] = field(default_factory=list)
+    # Forecast collector heat into the store per hour [kW] (already part of the net draw).
+    collector_kw_by_hour: list[float] = field(default_factory=list)
+    # HeatControl P5: JAZ, or the COP curve with its source temperature.
+    efficiency: LiveEfficiency = field(default_factory=LiveEfficiency)
+    # The store target signal (level 2) is mapped: Earnie doses the charge itself.
+    target_mapped: bool = False
+
+    @property
+    def charge_max_c(self) -> float:
+        """Upper end of an Earnie charge.
+
+        Levels 0 and 1: setpoint + boost, capped by the reported maximum. With the COP curve
+        and the store target mapped (HeatControl P5) the band reaches the reported maximum;
+        without a reported maximum it stays at setpoint + boost. COP points whose source
+        signal sent no value: the setpoint, the cost above it is unknown in this cycle.
+        """
+        setpoint = float(self.band.setpoint_c)
+        if self.efficiency.source == EFFICIENCY_JAZ_NO_SOURCE_VALUE:
+            return setpoint
+        if self.band_released:
+            return max(float(self.store_max_c), setpoint)
+        upper = setpoint + self.boost_k
+        if self.store_max_c is not None:
+            upper = min(upper, float(self.store_max_c))
+        return max(upper, setpoint)
+
+    @property
+    def band_released(self) -> bool:
+        """The band above the setpoint reaches ``get_temperature_heat_storage_max`` (P5)."""
+        return (
+            self.efficiency.by_temperature and self.target_mapped and self.store_max_c is not None
+        )
+
+    def hourly_draw_at_min_kw(self) -> list[float]:
+        """Net draw per hour [kW] plus the store's loss at the band minimum (store level model)."""
+        if len(self.ambient_c) < len(self.draw_kw_by_hour):
+            raise ValueError("Speicherplan: Außentemperatur kürzer als die Wärmeentnahme.")
+        t_min = float(self.band.min_c)
+        return [
+            float(draw) + self.heat_loss_kw_per_k * (t_min - float(self.ambient_c[hour]))
+            for hour, draw in enumerate(self.draw_kw_by_hour)
+        ]
+
+    @property
+    def charge_room_heat_kwh(self) -> float:
+        """Heat [kWh] the store can take over the horizon: room up to the charge maximum plus
+        the net draw and loss at the band minimum (HeatControl P4; gates whether Live plans)."""
+        return self.charge_room_heat_kwh_within(float(len(self.draw_kw_by_hour)))
+
+    def charge_room_heat_kwh_within(self, hours: float) -> float:
+        """``charge_room_heat_kwh`` over the first ``hours`` of the horizon only.
+
+        A fractional last hour counts with its share. Beside a fuel source this is what a
+        heating rod may add on the first day: the room plus the heat the boiler would
+        otherwise deliver in that time (the rod displaces it).
+        """
+        if hours < 0.0:
+            raise ValueError(f"Speicherplan: Stunden dürfen nicht negativ sein (ist {hours:g}).")
+        room = self.capacity_kwh_per_k * (self.charge_max_c - float(self.start_temp_c))
+        draw = 0.0
+        for hour, kw in enumerate(self.hourly_draw_at_min_kw()):
+            share = min(1.0, hours - hour)
+            if share <= 0.0:
+                break
+            draw += float(kw) * share
+        return max(0.0, room + draw)
+
+    @property
+    def charge_room_electric_kwh(self) -> float:
+        return self.charge_room_heat_kwh / self.jaz if self.jaz > 0 else 0.0
 
 
 def resolve_heat_storage_setpoint_band(heat_storage: dict) -> ThermalBand:
@@ -88,7 +183,13 @@ def resolve_heat_storage_readings(
     house_doc: dict | None = None,
     heat_storage: dict | None = None,
 ) -> HeatStorageReadings:
-    """Read T_eq / T_low; missing T_eq falls back to store setpoint."""
+    """Read T_eq / T_low.
+
+    A missing T_eq starts the plan at the store setpoint: a documented, visible default
+    (warning per cycle, ``used_measured_eq`` False → observability ``eq_source``
+    ``"setpoint_no_value"``; decided 2026-11-18 like the band's ``config_no_value``), so one
+    missing reading does not stop the whole Live cycle.
+    """
     from integrations.ehal_live import fetch_heat_storage_temps
 
     storage = normalize_heat_storage(
@@ -104,6 +205,13 @@ def resolve_heat_storage_readings(
     eq = measured.get("temp_eq_c")
     low = measured.get("temp_low_c")
     used_eq = eq is not None
+    if not used_eq:
+        logger.warning(
+            "Wärmespeicher '%s': T_eq (sens_temperature_heat_storage) liefert keinen Wert – "
+            "Speicherplan startet bei der Solltemperatur %.1f °C.",
+            consumer.get("id") or "?",
+            float(band.setpoint_c),
+        )
     return HeatStorageReadings(
         temp_eq_c=float(eq) if used_eq else float(band.setpoint_c),
         temp_low_c=float(low) if low is not None else None,
@@ -148,8 +256,15 @@ def plan_live_store_horizon(
     used_measured_eq: bool = False,
     used_measured_low: bool = False,
     gain_kw_by_hour: list[float] | None = None,
+    boost_k: float = 0.0,
+    store_max_c: float | None = None,
 ) -> LiveStorePlan:
-    """Bang-bang floor on T_eq plus optional T_low near-term force; opp headroom."""
+    """Bang-bang floor on T_eq plus optional T_low near-term force; opp headroom.
+
+    The floor simulates normal operation (charge ends at the setpoint). The opportunistic
+    headroom reaches setpoint + ``boost_k``: an Earnie charge (enable 1 / SG-Ready state 3)
+    ends there on levels 0 and 1 (HeatControl P2).
+    """
     horizon = len(ambient_forecast_c)
     if horizon < 1:
         raise ValueError("ambient_forecast_c darf nicht leer sein")
@@ -168,7 +283,7 @@ def plan_live_store_horizon(
         start_house_temp_c=start_house_temp_c,
         max_heat=wp_kw * jaz_f,
     )
-    forced, electric_by_hour, floor_electric, store_temps = _simulate_store_floor_hours(
+    forced, electric_by_hour, floor_electric, store_temps, draw_kw = _simulate_store_floor_hours(
         start_temp_c=start_temp_c,
         ambient_forecast_c=ambient_forecast_c,
         solar=solar,
@@ -189,9 +304,12 @@ def plan_live_store_horizon(
         band=band,
         wp_kw=wp_kw,
     )
-    fill_thermal = max(
-        0.0, (band.setpoint_c - float(start_temp_c)) * capacity_kwh_per_k
-    )
+    if boost_k < 0.0:
+        raise ValueError(f"boost_k darf nicht negativ sein (ist {boost_k:g} K).")
+    charge_max = band.setpoint_c + float(boost_k)
+    if store_max_c is not None:
+        charge_max = max(band.setpoint_c, min(charge_max, float(store_max_c)))
+    fill_thermal = max(0.0, (charge_max - float(start_temp_c)) * capacity_kwh_per_k)
     opp_cap = max(0.0, fill_thermal / jaz_f - floor_electric)
     q_sim = [
         heat_content_kwh(temp_c, capacity_kwh_per_k) for temp_c in store_temps
@@ -208,6 +326,14 @@ def plan_live_store_horizon(
         electric_by_hour=electric_by_hour,
         store_temp_c=store_temps,
         q_sim_kwh=q_sim,
+        boost_k=float(boost_k),
+        store_max_c=None if store_max_c is None else float(store_max_c),
+        capacity_kwh_per_k=float(capacity_kwh_per_k),
+        heat_loss_kw_per_k=float(heat_loss_kw_per_k),
+        jaz=jaz_f,
+        ambient_c=[float(v) for v in ambient_forecast_c],
+        draw_kw_by_hour=draw_kw,
+        collector_kw_by_hour=[float(v) for v in solar[:horizon]],
     )
 
 
@@ -263,11 +389,8 @@ def plan_live_store_for_thermal_consumer(
     # Read in the planning path so the cycle recorder stores them like the store temperatures.
     feedback = fetch_heat_feedback(consumer)
     capacity = capacity_kwh_per_k_from_volume(storage["volume_liters"])
-    wp_kw = float(
-        thermal.get("nominal_power_kw")
-        or consumer.get("nominal_power_kw")
-        or 3.0
-    )
+    # Derived input power of the heating system; missing fails loud (no 3 kW default).
+    wp_kw = float(_thermal_with_nominal(thermal, consumer)["nominal_power_kw"])
     living = float(thermal.get("living_area_m2", 0.0) or 0.0)
     house_h = None
     gains: list[float] | None = None
@@ -306,12 +429,18 @@ def plan_live_store_for_thermal_consumer(
         used_measured_eq=readings.used_measured_eq,
         used_measured_low=readings.used_measured_low,
         gain_kw_by_hour=gains,
+        boost_k=float(storage["boost_k"]),
+        store_max_c=feedback.get(KIND_STORE_MAX),
     )
+    from settings.ehal_marker_resolve import marker_set_store_target
+
     return replace(
         plan,
         solar_source=solar_source,
         band_source=live_band.source,
         feedback=feedback,
+        efficiency=resolve_live_efficiency(consumer, feedback),
+        target_mapped=bool(marker_set_store_target(consumer)),
     )
 
 
@@ -350,23 +479,24 @@ def live_store_plan_for_matrix(
     )
 
 
-def _live_ambient_forecast(horizon_h: int) -> list[float]:
-    """Outdoor forecast for the Live horizon; constant live reading if Open-Meteo fails."""
-    from data.outdoor_forecast import get_outdoor_forecast_with_fallback
+def _read_live_outdoor_temp_c(house_doc: dict | None) -> float | None:
+    """Live outdoor temperature (plant ``sens_temperature_outside``); None when unmapped/empty."""
+    from integrations.ehal_live import read_optional_temp_c
+    from settings.ehal_marker_resolve import marker_sens_temperature_outside
 
-    fallback_ambient = 10.0
-    try:
-        from integrations.ehal_live import read_optional_temp_c as _read_optional_temp_c
-        from settings.ehal_marker_resolve import marker_sens_temperature_outside
+    return read_optional_temp_c(marker_sens_temperature_outside(house_doc=house_doc))
 
-        live_amb = _read_optional_temp_c(marker_sens_temperature_outside(house_doc=None))
-        if live_amb is not None:
-            fallback_ambient = float(live_amb)
-    except Exception:
-        pass
-    ambient_forecast, _src = get_outdoor_forecast_with_fallback(
+
+def _live_ambient_forecast(horizon_h: int, *, house_doc: dict | None = None) -> list[float]:
+    """Outdoor forecast for the Live horizon; constant live reading if Open-Meteo fails.
+
+    Without both there is no outdoor temperature and the plan fails loud (no invented value).
+    """
+    from data.outdoor_forecast import get_outdoor_forecast_or_live_reading
+
+    ambient_forecast, _src = get_outdoor_forecast_or_live_reading(
         horizon=horizon_h,
-        fallback_ambient_c=fallback_ambient,
+        read_live_ambient_c=lambda: _read_live_outdoor_temp_c(house_doc),
     )
     return ambient_forecast
 
@@ -407,11 +537,138 @@ def hourly_electric_to_slot_energy_kwh(
     return energies
 
 
-def live_store_slot_energy_kwh(matrix: list, plan: LiveStorePlan) -> list[float]:
-    """WP electric kWh per matrix slot from the store plan."""
-    return hourly_electric_to_slot_energy_kwh(matrix, plan.electric_by_hour)
+TERMINAL_WINDOW_H = 24.0
+"""The terminal level is the mean level of normal operation over the last day of the book, so it
+does not depend on where in a charge cycle the simulation happens to end (design § 8.6 D2)."""
 
 
+def _slot_hours(matrix: list, n_hours: int) -> list[int]:
+    """Wall-clock hour of the plan for every matrix slot (offset from the start's full hour).
+
+    Plan hour 0 is the full hour of the first slot, as for the baseload and gains
+    (``matrix_hourly_kw``). The plan has ``floor(slots × Δt)`` hours
+    (``thermal_horizon_hours_from_slots``), and the recorded forecasts of the regression cases have
+    exactly as many. A matrix that starts inside an hour (Live at :15/:30/:45) and ends with a
+    partial hour spans up to two wall-clock hours more; those slots use the last hour of the
+    plan. This is the only hold, a slot further out fails loud.
+    """
+    from optimizer.charging_context import matrix_slot_datetime
+
+    if n_hours < 1:
+        raise ValueError("Speicherplan ohne Stunden.")
+    start = matrix_slot_datetime(matrix, 0)
+    hours: list[int] = []
+    for index in range(len(matrix)):
+        hour = int((matrix_slot_datetime(matrix, index) - start).total_seconds() // 3600)
+        if n_hours <= hour <= n_hours + 1:
+            hour = n_hours - 1  # partial first and last hour of the matrix
+        if not 0 <= hour < n_hours:
+            raise ValueError(
+                f"Speicherplan reicht nur {n_hours} h, Matrix-Slot {index} liegt in Stunde {hour}."
+            )
+        hours.append(hour)
+    return hours
+
+
+def live_store_level_model(matrix: list, plan: LiveStorePlan, dt_h: float) -> StoreLevelModel:
+    """Store level of the Live MILP (HeatControl P4): kWh above the band minimum.
+
+    Capacity up to ``charge_max_c``; start from the measured ``T_eq``; drain = net draw plus the
+    loss at the band minimum; collector surplus may be spilled; leak ``Δt · H / C``.
+    """
+    if plan.capacity_kwh_per_k <= 0 or plan.jaz <= 0:
+        raise ValueError("Speicherplan ohne Kapazität oder Wirkungsgrad: kein Speicherstand möglich.")
+    if dt_h <= 0:
+        raise ValueError("dt_h must be > 0")
+    c = float(plan.capacity_kwh_per_k)
+    t_min = float(plan.band.min_c)
+    draw = plan.hourly_draw_at_min_kw()
+    hours = _slot_hours(matrix, len(draw))
+    capacity = c * (plan.charge_max_c - t_min)
+    drain = [draw[hour] * dt_h for hour in hours]
+    return StoreLevelModel(
+        capacity_kwh=capacity,
+        start_kwh=c * (float(plan.start_temp_c) - t_min),
+        efficiency=float(plan.jaz),
+        drain_kwh=drain,
+        leak_per_slot=dt_h * float(plan.heat_loss_kw_per_k) / c,
+        leak_ref_kwh=0.0,
+        spill_max_kwh=[max(0.0, -float(plan.draw_kw_by_hour[hour])) * dt_h for hour in hours],
+        segments=_live_store_segments(plan, hours, capacity),
+        charge_limit_kwh=_collector_charge_limits(plan, drain, dt_h, capacity),
+    )
+
+
+COLLECTOR_LOOKAHEAD_H = 24.0
+"""The generator leaves the room above the setpoint free for the collector surplus forecast for
+this time ahead (design § 4: no boost ahead of forecast collector heat)."""
+
+
+def _live_store_segments(
+    plan: LiveStorePlan, hours: list[int], capacity_kwh: float
+) -> tuple[StoreSegment, ...]:
+    """Sink segments of the band with their COP per slot (HeatControl P5); none with the JAZ."""
+    if not plan.efficiency.by_temperature or capacity_kwh <= 0:
+        return ()
+    c = float(plan.capacity_kwh_per_k)
+    edges = segment_edges_c(float(plan.band.min_c), float(plan.band.setpoint_c), plan.charge_max_c)
+    held = plan.efficiency.source_temp_c
+    source = [float(plan.ambient_c[hour]) if held is None else float(held) for hour in hours]
+    cops = segment_cops(plan.efficiency, edges, source)
+    return tuple(
+        StoreSegment(capacity_kwh=c * (edges[index + 1] - edges[index]), cop=cops[index])
+        for index in range(len(edges) - 1)
+    )
+
+
+def _collector_charge_limits(
+    plan: LiveStorePlan, drain_kwh: list[float], dt_h: float, capacity_kwh: float
+) -> list[float]:
+    """Level per slot up to which the generator may charge: the capacity minus the room the
+    collector surplus of the following ``COLLECTOR_LOOKAHEAD_H`` needs, never below the setpoint.
+
+    The surplus is the collector heat the draw does not use up. From a slot on, the net heat
+    into the store (``−drain``) adds up slot by slot; the largest sum is the room that must be
+    free at the end of the slot so that the store takes it all. Collector heat that the house
+    draws before or while it arrives needs no room: a charge that is used up before the
+    collector heat comes stays allowed.
+
+    Empty without a band above the setpoint, without forecast collector heat, or when no slot
+    gets a limit below the capacity.
+    """
+    normal = float(plan.capacity_kwh_per_k) * (float(plan.band.setpoint_c) - float(plan.band.min_c))
+    collector = plan.collector_kw_by_hour
+    if capacity_kwh <= normal + 1e-9 or not any(kw > 1e-9 for kw in collector):
+        return []
+    if len(collector) < len(plan.draw_kw_by_hour):
+        raise ValueError("Speicherplan: Kollektorprognose kürzer als die Wärmeentnahme.")
+    window = int(round(COLLECTOR_LOOKAHEAD_H / dt_h))
+    limits: list[float] = []
+    for slot in range(len(drain_kwh)):
+        surplus = room = 0.0
+        for drain in drain_kwh[slot + 1 : slot + 1 + window]:
+            surplus -= drain
+            room = max(room, surplus)
+        limits.append(max(normal, capacity_kwh - room))
+    if not any(limit < capacity_kwh - 1e-9 for limit in limits):
+        return []
+    return limits
+
+
+def live_store_terminal_kwh(matrix: list, plan: LiveStorePlan, last_slot: int, dt_h: float) -> float:
+    """Mean level of normal operation over the last ``TERMINAL_WINDOW_H`` up to ``last_slot``."""
+    if not plan.store_temp_c:
+        raise ValueError("Speicherplan ohne Temperaturverlauf: kein Endstand möglich.")
+    c = float(plan.capacity_kwh_per_k)
+    t_min = float(plan.band.min_c)
+    cap = c * (plan.charge_max_c - t_min)
+    hours = _slot_hours(matrix, len(plan.store_temp_c))
+    first = max(0, last_slot + 1 - int(round(TERMINAL_WINDOW_H / dt_h)))
+    levels = [
+        min(cap, max(0.0, c * (float(plan.store_temp_c[hours[slot]]) - t_min)))
+        for slot in range(first, last_slot + 1)
+    ]
+    return sum(levels) / len(levels)
 
 
 def live_house_plan_for_matrix(
@@ -498,24 +755,6 @@ def map_forced_hours_to_slot_indices(
     return forced_slots
 
 
-def live_min_kwh_by_day(matrix: list, plan: LiveStorePlan) -> dict[Any, float]:
-    """Flexible Live day lower bound: opportunistic headroom to setpoint on first day.
-
-    Bang-bang floor energy is enforced only via ``forced_indices`` (correct timing).
-    Putting floor kWh into a movable day budget made MILP heat while the store was
-    still hot (e.g. 60 °C) to satisfy later floor hours — including hours outside
-    the MILP window.
-    """
-    from optimizer.charging_context import matrix_slot_datetime
-
-    if not matrix:
-        return {}
-    if plan.opp_cap_electric_kwh <= 1e-9:
-        return {}
-    first_day = matrix_slot_datetime(matrix, 0).date()
-    return {first_day: round(float(plan.opp_cap_electric_kwh), 3)}
-
-
 def build_heat_storage_observability(
     consumer: dict,
     *,
@@ -555,10 +794,15 @@ def build_heat_storage_observability(
             "tolerance": plan.band.tolerance_c,
             "band_min": plan.band.min_c,
             "band_max": plan.band.max_c,
+            # HeatControl P2: an Earnie charge ends at setpoint + boost.
+            "boost": plan.boost_k,
+            "charge_max": plan.charge_max_c,
         },
         # "backend": Live planned with the band the backend reports, not the configured one.
         "band_source": plan.band_source,
         "feedback": dict(plan.feedback),
+        # HeatControl P5: JAZ or COP curve, and where the source temperature comes from.
+        "efficiency": efficiency_observability(plan.efficiency, plan.jaz),
         "heat_content_kwh": {
             "q_meas": round(q_meas, 3),
             "q_sim": round(q_sim, 3),
@@ -569,6 +813,8 @@ def build_heat_storage_observability(
             "heat_loss_kw_per_k": float(storage["heat_loss_kw_per_k"]),
         },
         "used_measured_eq": plan.used_measured_eq,
+        # Start of the store plan: the measured T_eq, or the setpoint when T_eq has no value.
+        "eq_source": EQ_SOURCE_MEASURED if plan.used_measured_eq else EQ_SOURCE_SETPOINT_NO_VALUE,
         "used_measured_low": plan.used_measured_low,
         "collector_solar_source": plan.solar_source,
         "horizon_q_sim_kwh": [round(v, 3) for v in plan.q_sim_kwh],
@@ -583,23 +829,8 @@ def collect_heat_storage_observability(
     house_doc: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Observability for thermal_annual consumers with active heat_storage."""
-    from data.outdoor_forecast import get_outdoor_forecast_with_fallback
-
     results: list[dict[str, Any]] = []
-    fallback_ambient = 10.0
-    try:
-        from integrations.ehal_live import read_optional_temp_c as _read_optional_temp_c
-        from settings.ehal_marker_resolve import marker_sens_temperature_outside
-
-        live_amb = _read_optional_temp_c(marker_sens_temperature_outside(house_doc=house_doc))
-        if live_amb is not None:
-            fallback_ambient = float(live_amb)
-    except Exception:
-        pass
-    ambient_forecast, _src = get_outdoor_forecast_with_fallback(
-        horizon=max(1, int(horizon)),
-        fallback_ambient_c=fallback_ambient,
-    )
+    ambient_forecast: list[float] | None = None
     for consumer in consumers:
         if not isinstance(consumer, dict):
             continue
@@ -610,6 +841,11 @@ def collect_heat_storage_observability(
             continue
         cid = consumer.get("id") or "?"
         try:
+            # Only with a store; a missing outdoor temperature is this item's error.
+            if ambient_forecast is None:
+                ambient_forecast = _live_ambient_forecast(
+                    max(1, int(horizon)), house_doc=house_doc
+                )
             item = build_heat_storage_observability(
                 consumer,
                 house_profile=house_profile,

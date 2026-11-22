@@ -68,6 +68,8 @@ Steht dasselbe E-Auto (gleiche Kennung) in mehreren Hausprofilen, legt der Schri
 
 Im selben Datenmodell entfernt **`dm6.debug_dump_flag_removal`** den Schalter `ui.chart_debug_capture_enabled` aus `config.json`: Das Support-Paket ist immer verfügbar (Seitenleiste → **Sichern & Übertragen**). Bleibt der Schlüssel stehen, lädt Earnie die Config nicht. Ein noch vorhandener Eintrag in `runtime/local_settings.json` oder die Umgebungsvariable `EARNIE_UI_CHART_DEBUG_CAPTURE_ENABLED` blockieren nichts; Earnie schreibt nur eine Warnung ins Log – beides bitte entfernen.
 
+Ebenfalls in Datenmodell 6 entfernt **`dm6.scenario_own_reference_removal`** den Szenario-Schalter `own_reference` („Eigene Referenz ohne Optimierung“) aus `backtesting_scenarios.json`: Welche Referenzen der Szenario-Explorer rechnet, wählen jetzt drei Kästchen je Lauf ([Referenzen wählen](../ui/betriebsmodi.md#referenzen-wählen)). Steht beim Live-Szenario `"enabled": false`, setzt der Schritt es auf `true`, weil das Live-Szenario im Szenario-Explorer immer läuft. Bleibt einer der beiden Einträge stehen, lädt Earnie die Szenarien nicht.
+
 Ohne die Wallbox-Migration lädt Earnie Hausprofile mit `nominal_power_kw` oder `min_power_kw` am E-Auto nicht; die Meldung verweist auf den Assistenten. Details: [E-Auto und Wallbox](../konfiguration/flexible-verbraucher.md#e-auto-und-wallbox-ladestrom).
 
 ### Loxone: alte Merkernamen behalten oder leeren
@@ -127,6 +129,7 @@ Nur `main.py` steuert die Anlage im Produktivbetrieb (Schreibvorgänge über EHA
 ### Sichere Sollwerte und Silent / Loud
 
 - **Sichere Sollwerte beim Start:** Beim Daemon-Start schreibt Earnie **einmal** sichere Sollwerte (ESS Automatik / Freigabe und EVCS aus), bevor der erste Optimierungslauf beginnt. Das gilt für alle EHAL-Backends (Loxone, HA, OpenEMS).
+- **Lade-/Entladegrenzen beim Start:** Übernimmt die Batterie ihre Grenzen live vom Wechselrichter („Limits aus Live-Werten“), schreibt der Start dieselben Live-Grenzen wie der Optimierungslauf. Fehlt dabei die live gemeldete Lade- oder Entladegrenze, schreibt Earnie beim Start **keine** ESS-Sollwerte und meldet einen Fehler im Log; die übrigen sicheren Sollwerte werden trotzdem gesendet. Der erste Optimierungslauf schreibt die ESS-Sollwerte dann regulär.
 - **Silent:** Im Silent-Modus entfällt dieser Schreibvorgang.
 - **Umschalten:** Silent / Loud wird unter **Daemon Control → Optimierer-Dienst** umgestellt und in `runtime/local_settings.json` → `silent_mode` gespeichert. Ein Neustart von `main.py` ist dafür nicht nötig.
 - **Überspringen:** Mit `EARNIE_SKIP_SAFE_SETPOINTS_ON_START=1` entfallen die sicheren Sollwerte beim Start.
@@ -180,6 +183,8 @@ Standardverzeichnis: `earnie_env/runtime/`. Es lässt sich mit `EARNIE_RUNTIME_P
 | `import_cap_report.json`        | Nur mit Bezugsgrenze: Viertelstunden, in denen der letzte Plan die Grenze nicht halten kann, mit Überschreitung und Ursache (Grundlast, Batterie- oder Wechselrichterleistung, Batterie leer oder Reserve, Verbraucher mit Ziel, keine Ursache erkannt), oder der Hinweis, dass die Grenze nicht eingeplant war (Automatik, Fenster ohne Optimierung). Dazu gemessene Viertelstunden über der Grenze bzw. über der bisherigen Monatsspitze, mit Ursache „Lastprognose“, wenn der Plan die Grenze hielt; aktueller und voriger Monat. Beides steht auch als Warnung in `earnie.log`. Im Beobachtungsmodus kommt der Bericht aus einem zweiten Plan mit Grenze, den Earnie nicht ausführt; dazu kommen die Viertelstunden, in denen dieser Plan anders gehandelt hätte, und die Prüfung läuft mit dem geschätzten statt dem gemessenen Bezug. |
 | `cons_data_pending.json`        | Puffer für noch ausstehende `cons_data`-Messwerte (Samples).                                 |
 | `consumption_profiles.csv`      | Berechnete Grundlast-Profile.                                                                |
+| `total_consumption_profiles.csv` | Berechnete Gesamtverbrauchs-Profile.                                                        |
+| `flexible_consumer_profiles.csv` | Berechnete Profile der gemessenen flexiblen Verbraucher (eine Spalte je Verbraucher).      |
 | `earnie.log`                    | Rotierendes Python-Log von `main.py` (absoluter Pfad). Rotation monatlich, max. 12 Archive `earnie.log.YYYY-MM-DD_HH-MM-SS`. |
 | `main_stdio.log`                | stdout/stderr des per UI/Auto-Start gestarteten `main.py`, zur Diagnose bei Startfehlern. Rotation bei jedem Start durch die App: ≥ 5 MiB oder Monatswechsel, max. 12 Archive `main_stdio.log.YYYY-MM-DD_HH-MM-SS`. Das Logging geht nur in `earnie.log`. |
 | `main.lock` / `main.pid`        | Sperre gegen eine zweite Instanz des Produktiv-Daemons. `main.lock` wird gehalten; die PID steht zusätzlich in `main.pid` (für Status/Stop unter Windows). |
@@ -268,6 +273,8 @@ Eine Einstellung ist nicht nötig; die Datei bleibt lokal. Voraussetzung ist ein
 
 **Rohdaten für einen Zählervergleich:** Mit `EARNIE_POWER_SAMPLE_LOG_DAYS=<Tage>` in `.env` schreibt Earnie jede Leistungsprobe (alle 30 s) in `runtime/power_samples/JJJJ-MM-TT.jsonl`: Netzleistung, Bezugs- und Einspeisezähler zum selben Zeitpunkt, wann jeder dieser Werte als Push angekommen ist, und die geschätzte Uhrabweichung. Ältere Tage löscht Earnie selbst. Gedacht ist das für einen Vergleich mit dem Viertelstunden-Export aus dem Portal des Netzbetreibers. Leer oder `0` schaltet es aus.
 
+**Test-Prognosen PV in Chart 1:** Läuft der PV-Prognose-Vergleich (`scripts/pv_forecast_compare.py fetch`, stündlich), kann Chart 1 dessen Prognosen als gepunktete Linien neben der eigenen PV-Prognose zeigen (je Stunde ein Punkt in der Stundenmitte, dazwischen gerade verbunden). Dazu `EARNIE_PV_FORECAST_COMPARE_DIR` auf das Ausgabeverzeichnis des Vergleichs setzen (das Verzeichnis mit `forecasts.jsonl`; im Container nur lesend einhängen). Über dem Chart erscheint dann der Schalter **Test-Prognosen PV einblenden**. Je Stunde zeigt jede Quelle den letzten Lauf vor Beginn der Stunde, summiert über alle PV-Felder; fehlt ein PV-Feld in einer Stunde, bleibt die Stunde leer. Earnie plant weiter nur mit seiner eigenen PV-Prognose. Ohne die Variable ändert sich nichts. Ist die Datei nicht lesbar, steht eine Warnung über dem Chart.
+
 <a id="cycle-recorder-regression-r-rec"></a>
 
 ### Cycle-Recorder
@@ -352,7 +359,7 @@ Wer bereits zugestimmt hat, wird wegen `points` nicht erneut gefragt. Die exakte
 
 ### Earnie-Points
 
-Die Earnie-Points sind eine grobe Größenkennzahl **einer Anlage** (ein Standort). Earnie berechnet sie aus dem **Live-Szenario**, nicht aus Szenarien des Szenarienkonfigurators. Die Seite **Optimierer-Dienst** zeigt sie unter **Earnie-Points dieser Anlage** mit Aufschlüsselung an. Zweck der Earnie-Points ist zukünftig die Zuordnung zu möglichen Abo-Tarifen. Derzeit ist das rein informativ und bei selbst verwalteten Installationen fallen auch keine Kosten an. Fehlen Angaben im Live-Szenario, zeigt Earnie den Grund an und sendet keine Punkte.
+Die Earnie-Points sind eine grobe Größenkennzahl **einer Anlage** (ein Standort). Earnie berechnet sie aus dem **Live-Szenario**, nicht aus Szenarien des Szenarienkonfigurators. Die Seite **Optimierer-Dienst** zeigt sie unter **Earnie-Points dieser Anlage** mit Aufschlüsselung an. Für private, nicht gewerbliche Selbst-Hoster ist Earnie bis **15 Earnie-Points** kostenfrei; größere Anlagen bitte beim Projekt melden. Earnie prüft die Punkte nicht und schränkt bei mehr Punkten nichts ein. Zukünftig dienen sie auch der Zuordnung zu möglichen Abo-Tarifen. Fehlen Angaben im Live-Szenario, zeigt Earnie den Grund an und sendet keine Punkte.
 
 Regel (Version 3). Jeder Teil wird kaufmännisch auf ganze Punkte gerundet. Ein Ausbau der Anlage (mehr PV, mehr Speicher, eine weitere Wallbox) senkt die Punkte nie:
 
@@ -401,16 +408,16 @@ Ablauf:
 1. Optional Anhänge hochladen (z. B. Screenshots).
 2. Variante wählen:
    - **Konfiguration + Anhänge herunterladen:** nur das Konfigurations-ZIP (wie unter [Speichern / Laden](../konfiguration/speichern-laden.md)) plus Anhänge – ohne Historie und Logs. Hilft nur bei Fragen, die **nicht** den Live-Betrieb betreffen (Einrichtung, Hausprofil, Szenarien, Backtesting).
-   - **Support-Paket erstellen:** das vollständige Paket für Fragen zum Live-Betrieb. Optional Titel und Symptom eintragen, dann **Support-Paket erstellen** und anschließend **Support-Paket herunterladen**.
+   - **Support-Paket erstellen:** das vollständige Paket für Fragen zum Live-Betrieb. Optional Titel und Symptom eintragen und bei Bedarf **Vollständige Optimierer-Historie beilegen** ankreuzen, dann **Support-Paket erstellen** und anschließend **Support-Paket herunterladen**.
 
-Das vollständige Paket enthält immer die volle Optimierungshistorie und die aktiven Inputs. Die Chart-Daten der Oberfläche (UI-Payload) schreibt Earnie mit, wenn die Monitor-Seite in dieser Browser-Sitzung schon geöffnet war (Stand: letzter Besuch der Seite); sonst fehlen sie.
+Das vollständige Paket enthält die Optimierungshistorie der Recorder-Tage (wie `recorder_retention_days`, Standard 7) und die aktiven Inputs. Die gesamte Historie seit Inbetriebnahme kommt nur mit dem Häkchen **Vollständige Optimierer-Historie beilegen** hinein; sie macht das Paket deutlich größer. Die Chart-Daten der Oberfläche (UI-Payload) schreibt Earnie mit, wenn die Monitor-Seite in dieser Browser-Sitzung schon geöffnet war (Stand: letzter Besuch der Seite); sonst fehlen sie.
 
 | Inhalt | Pflicht / optional |
 | ------ | ------------------ |
-| `runtime/optimization_history.jsonl` | Pflicht (vollständig) |
+| `runtime/optimization_history.jsonl` | Pflicht. Standard: nur die Zeilen der Recorder-Tage (auch aus Monatsarchiven); mit Häkchen vollständig samt Monatsarchiven (`manifest.history`) |
 | `optimizer_run_state.json`, `live_optimization_debug.json`, `flexible_consumers_state.json`, `pv_counter_state.json`, `powerstation_reserves.json`, `capacity_peaks.json`, `capacity_peaks_observe.json`, `capacity_peaks_observe_measured.json`, `import_cap_report.json`, `cycle_stats.jsonl`, `daemon_heartbeat.json` | Optional, falls vorhanden |
 | `earnie.log`, `main_stdio.log` | Optional, falls vorhanden (aktueller Monat) |
-| `recorder/` (Cycle-Recorder-Ringpuffer inkl. Config-Snapshots) | Optional. Fenster = Retention (Default 7 Tage); enthält Lastprofile. |
+| `recorder/` (Cycle-Recorder-Ringpuffer inkl. Config-Snapshots) | Optional. Fenster = Retention (Default 7 Tage); enthält Lastprofile. Die Config-Snapshots liegen platzsparend in `recorder/configs.pack.json` (gleiche Zeilen nur einmal), die Zyklen als `recorder/cycles_<Datum>.jsonl.xz` (xz statt gzip). |
 | `anhaenge/*` | Optional: hochgeladene Anhänge (`manifest.attachments`) |
 | `manifest.chart` | Optional (nur wenn die Monitor-Seite in der Sitzung offen war) |
 | `manifest.recorder` | Optional (`from` / `to` / `cycle_count` / `config_hashes`) |
@@ -433,10 +440,16 @@ python -m scripts.replay_debug_dump path/to/debug_dump_….zip
 python -m scripts.replay_debug_dump path/to/debug_dump_….zip --html-out /tmp/chart1.html
 ```
 
+Beim Entpacken eines ZIPs baut das Skript die Config-Snapshots aus `recorder/configs.pack.json` wieder als einzelne Dateien `recorder/configs/<hash>.json` auf; der Inhalt wird per Prüfsumme kontrolliert. Die Zyklen `recorder/cycles_*.jsonl.xz` schreibt es wieder als `cycles_*.jsonl.gz`. Wurde ein Paket von Hand entpackt, erledigt beides `python -m runtime_store.recorder_config_pack <Ordner>/recorder`.
+
 Das Skript prüft die Pflichtdateien und führt einen Smoke-Pfad aus. Es parst die Historie und baut bei vorhandenem `chart.display_rows` zusätzlich Chart 1 neu auf. Akzeptiert werden nur Dumps mit `schema_version: 3` und `dump_type: debug`.
 
 ## Typische Betriebsfehler
 
 - **App zeigt alte Werte:** `optimizer_run_state.json` fehlt oder `main.py` läuft nicht. Kopfzeile im Sankey „Energiefluss (Live)“ prüfen.
 - **Keine Börsenpreise:** Liefert keine Quelle (ENTSO-E, Energy-Charts, aWATTar) und kein Cache einen Preis, bricht der Lauf mit einer Fehlermeldung ab. Netzwerk prüfen; Details im Log (`Day-Ahead …`).
+- **Verbrauchsprofil fehlt oder ist nicht lesbar:** Die Live-Planung braucht die Profile `consumption_profiles.csv` (Grundlast), `total_consumption_profiles.csv` (Gesamtverbrauch) und, für gemessene flexible Verbraucher, `flexible_consumer_profiles.csv`. Earnie berechnet sie aus `cons_data.csv` neu, wenn eine Datei fehlt, einem gemessenen Verbraucher seine Spalte fehlt oder ein neuer Monat beginnt. Fehlt eine Datei trotzdem, ist sie nicht lesbar oder fehlen ihr Spalten oder Stunden, bricht der Lauf mit `Optimierung abgebrochen: Verbrauchsprofil …` ab. Earnie plant dann nicht mit erfundenen Lastwerten, sondern versucht es im nächsten Zyklus erneut. Abhilfe steht in der Meldung:
+  - `cons_data.csv` fehlt oder ist leer: im Szenario-Explorer **Verbrauchsdaten generieren (synthetisch)** ausführen oder warten, bis gemessene Verbrauchsdaten vorliegen. Der nächste Zyklus berechnet die Profile daraus.
+  - Profil-Datei nicht lesbar oder ohne Spalte: die genannte Datei in `runtime/` löschen. Der nächste Zyklus berechnet sie aus `cons_data.csv` neu.
+  - In der App erscheint dieselbe Meldung als Fehler, wenn das Live-Cockpit einen Plan rechnen will.
 - **Nur Migrations-Assistent nach Update:** Die Config muss angepasst werden, siehe [Update und Migration](#update-und-migration). `main.py` startet erst danach.

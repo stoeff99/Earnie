@@ -14,6 +14,7 @@ from ehal.heat_fields import (
 from optimizer.thermal_live_band import (
     BAND_SOURCE_BACKEND,
     BAND_SOURCE_CONFIG,
+    BAND_SOURCE_CONFIG_NO_VALUE,
     heat_storage_band_state,
     resolve_live_store_band,
 )
@@ -121,11 +122,25 @@ def test_band_only_one_mapped_keeps_configured_values(mapped, caplog):
     assert "unvollständig gemappt" in caplog.text
 
 
-def test_band_mapped_without_value_fails_loud():
+def test_band_mapped_without_value_keeps_configured_band_and_warns(caplog):
     consumer = _consumer({_SETPOINT: "Soll", _TOLERANCE: "Tol"})
-    with _hub({"Soll": 52.0, "Tol": None}):
-        with pytest.raises(ValueError, match=_TOLERANCE):
-            resolve_live_store_band(consumer, _CONFIGURED)
+    with _hub({"Soll": 52.0, "Tol": None}), caplog.at_level("WARNING"):
+        live = resolve_live_store_band(consumer, _CONFIGURED)
+    assert live.band == _CONFIGURED
+    assert live.source == BAND_SOURCE_CONFIG_NO_VALUE
+    assert _TOLERANCE in caplog.text and "keinen Wert" in caplog.text
+
+
+def test_band_activated_without_merker_and_no_push_keeps_configured_band():
+    # Activated in the signal list, Loxone does not push yet (the case on first setup).
+    consumer = _consumer(
+        {f"heatpump.wp_heating.{_SETPOINT}": "", f"heatpump.wp_heating.{_TOLERANCE}": ""}
+    )
+    assert heat_storage_band_state(consumer)[0] == "available"
+    with _hub({}):
+        plan = _plan(consumer)
+    assert plan.band == _CONFIGURED
+    assert plan.band_source == BAND_SOURCE_CONFIG_NO_VALUE
 
 
 def test_band_negative_tolerance_fails_loud():
@@ -155,6 +170,17 @@ def test_fetch_heat_feedback_reads_mapped_kinds_in_ehal_units():
         "sens_temperature_source": 8.2,
         "sens_temperature_room": None,
     }
+
+
+def test_fetch_heat_feedback_on_ha_takes_the_pushed_ehal_value(monkeypatch):
+    """The HA carrier pushes ``sens_heat_power`` in W: the Loxone kW block must not apply."""
+    from integrations import ehal_live
+    from integrations.loxone_client import fetch_heat_feedback
+
+    monkeypatch.setattr(ehal_live, "is_ehal_network_backend", lambda: True)
+    consumer = _consumer({"sens_heat_power": "Qth"})
+    with _hub({"Qth": 6500.0}):
+        assert fetch_heat_feedback(consumer) == {"sens_heat_power": 6500.0}
 
 
 def test_observability_records_band_source_and_feedback():

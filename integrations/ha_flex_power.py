@@ -11,14 +11,21 @@ Per flex consumer, the first that applies:
 - ``sens_power_act`` when bound;
 - a consumer without power setpoint (on/off): ``sens_consumer_active`` × nominal power.
 
+Units: the HA carrier pushes a field with an EHAL quantity in its canonical unit
+(``ehal_base_unit``: ``sens_evcs_active_power`` and ``sens_power_act`` in W, converted from the
+entity's W / kW / MW), converted here to kW. A carrier package generated before
+``sens_power_act`` had a unit pushes the entity's number as it is: generate it again.
+
 A value counts only when it was measured: inbox state ``OK`` or an explicitly pushed 0
 (``0 (gehalten)``), and for the digital run state also the held edge (``Digital (gehalten)``).
 A missing, stale, last-known or assumed-zero value gives **no key**, never 0, so the ledger
 treats the consumer as not metered (D6) instead of as idle. Two consumers that resolve to the
 same push signal (one wallbox for two EVs) cannot be told apart and get no key either.
 
-Scope: the slot log and Chart 1 "Ist" only; the planning matrix and the delivery check keep
-their own (zero) consumer power on network backends.
+Scope: the slot log and Chart 1 "Ist". The planning snapshot and ``cons_data`` take only the
+heating rods from here (``read_ha_heating_rod_kw_live``): the rod has no demand of its own, so
+its power must leave the base load like on Loxone. Every other consumer keeps zero power there
+on network backends.
 """
 from __future__ import annotations
 
@@ -27,6 +34,8 @@ from typing import Callable
 
 from ehal.push_signals import pilot_id
 from ehal.qualified_ids import field_kind
+from integrations.ha_carrier_yaml import ehal_base_unit
+from integrations.ha_units import from_ehal
 from optimizer.consumer_power import uses_power_setpoint
 from runtime_store.ehal_push_inbox import (
     STATE_DIGITAL_HELD,
@@ -50,6 +59,13 @@ ApplySign = Callable[[float, str], float]
 def _is_ev(consumer: dict) -> bool:
     schedule = consumer.get("charging_schedule") or {}
     return consumer.get("type") == "ev" or bool(schedule.get("enabled"))
+
+
+def pushed_power_kw(value: float, qid: str) -> float:
+    """Pushed power of ``qid`` in kW: from its EHAL base unit, or as is without one."""
+    if ehal_base_unit(qid) is None:
+        return value
+    return from_ehal(field_kind(qid), value, "kW")
 
 
 def _binding_qid(consumer: dict, kind: str) -> tuple[str, str] | None:
@@ -120,20 +136,59 @@ def read_ha_flex_chart_kw(
             continue
         if state not in MEASURED_POWER_STATES:
             continue
-        out[cid] = round(apply_sign(float(value), key), 3)
+        out[cid] = round(pushed_power_kw(apply_sign(float(value), key), qid), 3)
     return out
 
 
-def read_ha_flex_chart_kw_live() -> dict[str, float]:
-    """``read_ha_flex_chart_kw`` with the configured consumers, the push inbox and the adapter's sign map."""
-    import config
+def _live_readers() -> tuple[ReadValue, ApplySign]:
+    """The push inbox and the adapter's sign map (``ehal.ha.sign``)."""
     from integrations.ehal_live import get_ha_adapter
     from integrations.ha_push_read import apply_push_sign
     from runtime_store.ehal_push_inbox import read_push_value
 
     sign = dict(getattr(get_ha_adapter().cfg, "sign", {}) or {})
+    return read_push_value, lambda value, key: apply_push_sign(value, sign=sign, adapter_field=key)
+
+
+def read_ha_flex_chart_kw_live() -> dict[str, float]:
+    """``read_ha_flex_chart_kw`` with the configured consumers, the push inbox and the adapter's sign map."""
+    import config
+
+    read_value, apply_sign = _live_readers()
     return read_ha_flex_chart_kw(
-        config.get_flexible_consumers(),
-        read_value=read_push_value,
-        apply_sign=lambda value, key: apply_push_sign(value, sign=sign, adapter_field=key),
+        config.get_flexible_consumers(), read_value=read_value, apply_sign=apply_sign
     )
+
+
+def read_ha_heating_rod_kw(
+    consumers: list[dict],
+    *,
+    read_value: ReadValue,
+    apply_sign: ApplySign,
+) -> dict[str, float]:
+    """kW of every measured heating rod among ``consumers`` (``read_ha_flex_chart_kw`` rules).
+
+    A rod with a power or run-state binding but no measured value gets no key and a warning:
+    its power then stays in the base load, as before this reader existed.
+    """
+    from optimizer.thermal_flex_context import is_heating_rod_consumer
+
+    rods = [consumer for consumer in consumers if is_heating_rod_consumer(consumer)]
+    if not rods:
+        return {}
+    out = read_ha_flex_chart_kw(rods, read_value=read_value, apply_sign=apply_sign)
+    for rod in rods:
+        rid = str(rod["id"])
+        if rid not in out and _source(rod) is not None:
+            logger.warning(
+                "HA: keine gemessene Leistung für Heizstab '%s' — seine Leistung bleibt in der "
+                "Grundlast.",
+                rid,
+            )
+    return out
+
+
+def read_ha_heating_rod_kw_live(consumers: list[dict]) -> dict[str, float]:
+    """``read_ha_heating_rod_kw`` with the push inbox and the adapter's sign map."""
+    read_value, apply_sign = _live_readers()
+    return read_ha_heating_rod_kw(consumers, read_value=read_value, apply_sign=apply_sign)

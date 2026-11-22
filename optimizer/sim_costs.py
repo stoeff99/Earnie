@@ -320,10 +320,13 @@ def _run_savings_horizons(
         resolve_matched_baseline_horizon_targets,
     )
 
+    from optimizer.cbc_solver import SAVINGS_STRICT_TIME_LIMIT_SEC, strict_time_limit_at_most
     from runtime_store.cycle_timing import record_phase
 
-    # Open-loop: one CBC solve for the display horizon (not commit_hours=1 MPC).
-    with record_phase("savings_optimized"):
+    # Open-loop: one MILP solve for the display horizon (not commit_hours=1 MPC). The plan is
+    # only shown, so its strict stage gets a shorter time limit than the plan that is sent.
+    savings_limit = strict_time_limit_at_most(SAVINGS_STRICT_TIME_LIMIT_SEC)
+    with record_phase("savings_optimized"), savings_limit:
         optimized_rows = simulate_horizon(
             matrix,
             initial_soc,
@@ -570,7 +573,16 @@ def calculate_optimization_savings(
     )
     filters = filter_contexts or resolve_filter_contexts(matrix, consumers)
     on_shadow_chain = baseline_initial_soc is not None
-    baseline_soc = float(baseline_initial_soc) if on_shadow_chain else initial_soc
+    if on_shadow_chain:
+        baseline_soc = float(baseline_initial_soc)
+    else:
+        # The baselines run the plant battery (``_baseline_battery_params``): with several
+        # house batteries they start at the plant SoC, as the open-loop run does.
+        from optimizer.sim_horizon_chart_soc import plant_start_soc
+
+        baseline_soc = plant_start_soc(
+            config.get_battery_params_list(), initial_soc, current_soc_by_id
+        )
     rows = _run_savings_horizons(
         matrix,
         initial_soc,

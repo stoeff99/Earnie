@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, TextIO
 
+import pandas as pd
+
+from runtime_store.env_vars import is_rule_reference_enabled
 from runtime_store.persist_paths import resolve_backtesting_log_dir
 from simulation.backtesting_progress import (
     clear_cancel_request,
@@ -22,6 +25,7 @@ from simulation.backtesting_progress import (
     resolve_progress_dir,
 )
 from simulation.horizon_mode import DEFAULT_HORIZON_MODE
+from simulation.reference_selection import format_references
 
 _FAILURE_MARKERS = (
     "No module named scripts.run_backtesting",
@@ -67,28 +71,44 @@ def default_progress_file_path() -> str:
     return str(Path(default_backtesting_output_dir()) / ".backtesting_progress")
 
 
+def plan_run_references(
+    scenarios: dict[str, dict],
+    *,
+    live_scenario_id: str,
+    references: tuple[str, ...],
+    scenario_labels: dict[str, str] | None = None,
+):
+    """The references a UI run computes: the boxes, plus L2 with ``rule_reference``."""
+    from house_config.entity_resolution import strip_assets_for_reference
+    from scripts.run_backtesting import HISTORICAL_REFERENCE_LABEL
+    from simulation.reference_selection import plan_references
+
+    live_params = scenarios.get(live_scenario_id)
+    return plan_references(
+        scenarios,
+        scenarios,
+        live_scenario_id=live_scenario_id,
+        references=references,
+        rule_reference=is_rule_reference_enabled(),
+        historical_params=(
+            strip_assets_for_reference(live_params) if live_params is not None else None
+        ),
+        historical_label=HISTORICAL_REFERENCE_LABEL,
+        scenario_labels=scenario_labels,
+    )
+
+
 def count_backtesting_parallel_tasks(
     scenarios: dict[str, dict],
     *,
     live_scenario_id: str,
-    own_reference_by_scenario: dict[str, bool | None] | None = None,
+    references: tuple[str, ...],
 ) -> int:
-    """Parallele Tasks: Haupt-Referenz + L0-, L1-, L2-Referenzen + optimierte Szenarien."""
-    from simulation.engine import plan_per_scenario_reference_tasks
-    from simulation.reference_ladder import plan_ladder_reference_tasks
-
-    flags = own_reference_by_scenario
-    if flags is None:
-        import config
-
-        flags = config.get_own_reference_flags()
-    _, _, extra_specs = plan_per_scenario_reference_tasks(
-        scenarios,
-        live_scenario_id=live_scenario_id,
-        own_reference_by_scenario=flags,
+    """Parallel tasks: computed references (shared flows count once) + optimized scenarios."""
+    plan = plan_run_references(
+        scenarios, live_scenario_id=live_scenario_id, references=references
     )
-    _, ladder_specs = plan_ladder_reference_tasks(scenarios)
-    return 1 + len(extra_specs) + len(ladder_specs) + len(scenarios)
+    return plan.parallel_task_count(len(scenarios))
 
 
 def auto_backtesting_workers(parallel_task_count: int) -> int:
@@ -100,8 +120,12 @@ def auto_backtesting_workers(parallel_task_count: int) -> int:
     return min(parallel_task_count, available)
 
 
-def suggest_test_month() -> int | None:
-    """Monat für Testlauf: März im SE-Fenster, sonst erster Monat im Fenster."""
+def suggest_test_month() -> pd.Period | None:
+    """Monat für Testlauf: März im SE-Fenster, sonst erster Monat im Fenster.
+
+    With its year: the window can span two calendar years, and the CLI would put a bare
+    month number into the year of the cons_data end.
+    """
     from data.data_loader import resolve_simulation_window
 
     try:
@@ -110,13 +134,10 @@ def suggest_test_month() -> int | None:
         return None
     cursor = start.to_period("M")
     end_period = end.to_period("M")
-    first_month: int | None = None
+    first_month = cursor if cursor <= end_period else None
     while cursor <= end_period:
-        month = int(cursor.month)
-        if first_month is None:
-            first_month = month
-        if month == 3:
-            return 3
+        if cursor.month == 3:
+            return cursor
         cursor += 1
     return first_month
 
@@ -188,11 +209,13 @@ def _drain_subprocess_stdout(pipe: TextIO | None, chunks: list[str]) -> None:
 def build_backtesting_command(
     *,
     output_dir: str,
-    start_month: int | None = None,
-    end_month: int | None = None,
+    start_month: int | str | None = None,
+    end_month: int | str | None = None,
     progress_file: str | None = None,
     horizon_mode: str = DEFAULT_HORIZON_MODE,
     workers: int = 1,
+    references: tuple[str, ...],
+    rule_reference: bool = False,
 ) -> list[str]:
     script_path = backtesting_script_path()
     cmd = [
@@ -212,6 +235,9 @@ def build_backtesting_command(
         cmd.extend(["--horizon-mode", horizon_mode])
     if workers > 1:
         cmd.extend(["--workers", str(workers)])
+    cmd.extend(["--references", format_references(references)])
+    if rule_reference:
+        cmd.append("--rule-reference")
     return cmd
 
 
@@ -233,11 +259,12 @@ class BacktestingRun:
 def start_backtesting_subprocess(
     *,
     output_dir: str | None = None,
-    start_month: int | None = None,
-    end_month: int | None = None,
+    start_month: int | str | None = None,
+    end_month: int | str | None = None,
     progress_file: str | None = None,
     horizon_mode: str = DEFAULT_HORIZON_MODE,
     workers: int = 1,
+    references: tuple[str, ...],
 ) -> BacktestingRun:
     """Start the SE subprocess and return at once. Raises ``FileNotFoundError`` without the script."""
     log_dir = default_backtesting_output_dir() if output_dir is None else output_dir
@@ -256,6 +283,8 @@ def start_backtesting_subprocess(
         progress_file=progress_file,
         horizon_mode=horizon_mode,
         workers=workers,
+        references=references,
+        rule_reference=is_rule_reference_enabled(),
     )
     proc = subprocess.Popen(
         cmd,
@@ -419,11 +448,12 @@ def poll_backtesting_progress(
 def run_backtesting_subprocess(
     *,
     output_dir: str | None = None,
-    start_month: int | None = None,
-    end_month: int | None = None,
+    start_month: int | str | None = None,
+    end_month: int | str | None = None,
     progress_file: str | None = None,
     horizon_mode: str = DEFAULT_HORIZON_MODE,
     workers: int = 1,
+    references: tuple[str, ...],
     on_progress: Callable[[dict[str, dict]], None] | None = None,
 ) -> tuple[int, str]:
     """Startet Backtesting offline und wartet; gibt (exit_code, kombiniertes stdout/stderr) zurück."""
@@ -435,6 +465,7 @@ def run_backtesting_subprocess(
             progress_file=progress_file,
             horizon_mode=horizon_mode,
             workers=workers,
+            references=references,
         )
     except FileNotFoundError as exc:
         return 1, str(exc)

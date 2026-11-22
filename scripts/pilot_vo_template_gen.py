@@ -154,8 +154,16 @@ def _cmd_attrs(
         # Digital output: fixed values for On / Off (the value placeholder is for analog outputs).
         on_cmd, off_cmd = f"{base}1{query}", f"{base}0{query}"
     else:
-        on_cmd, off_cmd = f"{base}{value_placeholder(sig.ehal_id)}{query}", ""
+        # The Off command pushes an explicit 0: without it nothing arrives at value 0, and
+        # only a power is then read as 0 (a limit, a SoC or a temperature becomes a read
+        # error). The heartbeat keeps no Off command: a 0 there is not a link signal.
+        on_cmd = f"{base}{value_placeholder(sig.ehal_id)}{query}"
+        off_cmd = "" if _is_heartbeat(sig) else f"{base}0{query}"
     return _vo_cmd(sig, on_cmd, off_cmd, repeat, repeat_rate)
+
+
+def _is_heartbeat(sig: Signal) -> bool:
+    return sig.ehal_id == heartbeat_signal().ehal_id
 
 
 def _mqtt_udp_cmd_attrs(
@@ -166,7 +174,8 @@ def _mqtt_udp_cmd_attrs(
     if sig.digital:
         on_cmd, off_cmd = f"{topic} 1", f"{topic} 0"
     else:
-        on_cmd, off_cmd = f"{topic} {value_placeholder(sig.ehal_id)}", ""
+        on_cmd = f"{topic} {value_placeholder(sig.ehal_id)}"
+        off_cmd = "" if _is_heartbeat(sig) else f"{topic} 0"
     return _vo_cmd(sig, on_cmd, off_cmd, repeat, repeat_rate)
 
 

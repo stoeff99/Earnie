@@ -1,7 +1,9 @@
 """Synthetische Verbrauchsprofile aus Hausprofilen für Backtesting."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import calendar
+import os
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
@@ -54,11 +56,21 @@ def _consumer_id(consumer: dict, fallback_index: int) -> str:
 
 
 def _modeled_hour_index(slot_dt: datetime) -> int:
+    """Hour of the modeled reference year for the slot's calendar day and hour.
+
+    By calendar date, not hours modulo 8760: a leap reference year would otherwise shift
+    every slot of the following year by one day. 29 Feb maps to 28 Feb when the
+    reference year has none; the last day of a leap reference year (beyond 8760 h)
+    maps to the day before.
+    """
     naive = slot_dt.replace(tzinfo=None) if slot_dt.tzinfo else slot_dt
-    return (
-        int((naive - modeled_profile_ref_start()).total_seconds() // 3600)
-        % MODELED_PROFILE_HOURS_PER_YEAR
-    )
+    ref_year = modeled_profile_ref_start().year
+    day = naive.day
+    if naive.month == 2 and day == 29 and not calendar.isleap(ref_year):
+        day = 28
+    day_index = (date(ref_year, naive.month, day) - date(ref_year, 1, 1)).days
+    day_index = min(day_index, MODELED_PROFILE_HOURS_PER_YEAR // 24 - 1)
+    return day_index * 24 + naive.hour
 
 
 def _parse_profile_timestamp(ts_raw: str) -> datetime:
@@ -72,8 +84,24 @@ def _timestamp_hour_key(slot_dt: datetime) -> str:
 
 
 @lru_cache(maxsize=32)
-def _csv_kw_lookup(path: str) -> dict[str, float]:
+def _csv_kw_lookup_cached(path: str, _mtime_ns: int, _size: int) -> dict[str, float]:
     return {ts: float(kw) for ts, kw in load_hourly_profile_csv(path)}
+
+
+def _csv_kw_lookup(path: str) -> dict[str, float]:
+    """Hour → kW of a profile CSV; re-read when the file changes.
+
+    Imports overwrite fixed paths, so the path alone is no cache key: mtime and size
+    are part of it. The path is resolved like ``load_hourly_profile_csv`` does
+    (``config/…`` prefixes); a missing file raises there with its own message.
+    """
+    from runtime_store.persist_paths import resolve_config_prefixed_path
+
+    resolved = resolve_config_prefixed_path(path)
+    if not os.path.isfile(resolved):
+        return _csv_kw_lookup_cached(path, -1, -1)  # raises FileNotFoundError
+    stat = os.stat(resolved)
+    return _csv_kw_lookup_cached(path, stat.st_mtime_ns, stat.st_size)
 
 
 def csv_kw_at_datetime(path: str, slot_dt: datetime) -> float:
@@ -217,6 +245,7 @@ def _thermal_annual_daily_from_archive(consumer: dict) -> list[float] | None:
     params = heating_params_from_thermal(thermal)
     if "hp_electric_kw" not in params:
         params["hp_electric_kw"] = consumer_input_power_kw(consumer)
+    from data.solar_horizon import horizon_from_profile
     from optimizer.house_gains import thermal_bundle_surfaces, thermal_climate_kwargs
 
     area_m2 = float(params.get("solar_thermal_area_m2", 0.0) or 0.0)
@@ -229,6 +258,7 @@ def _thermal_annual_daily_from_archive(consumer: dict) -> list[float] | None:
         lon=float(lon),
         timezone=timezone,
         surfaces=thermal_bundle_surfaces(thermal, collector if area_m2 > 0.0 else None),
+        horizon=horizon_from_profile(thermal),
     )
     return daily_electric_kwh(
         **params, **thermal_climate_kwargs(bundle, thermal, collector)

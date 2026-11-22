@@ -170,6 +170,7 @@ def test_push_safe_setpoints_on_startup_network(config_mock, ess_mock, evcs_mock
     config_mock.get.side_effect = lambda key, default=None: {
         "EHAL_BACKEND": "openems",
     }.get(key, default)
+    config_mock.get_battery_params.return_value = {"limits_from_live": False}
     ess_mock.return_value = (None, [])
     evcs_mock.return_value = (None, [])
     _clear_safe_setpoints_skip_env()
@@ -187,6 +188,7 @@ def test_push_safe_setpoints_on_startup_logs_and_reraises(config_mock, ess_mock,
     config_mock.get.side_effect = lambda key, default=None: {
         "EHAL_BACKEND": "openems",
     }.get(key, default)
+    config_mock.get_battery_params.return_value = {"limits_from_live": False}
     ess_mock.side_effect = ValueError("ehal.backend=ha requires EHAL_HA_BASE_URL")
     _clear_safe_setpoints_skip_env()
     with caplog.at_level("ERROR", logger=ehal_live.logger.name):
@@ -207,12 +209,13 @@ def test_push_safe_setpoints_on_startup_loxone(config_mock, huawei_mock, flex_mo
     config_mock.get.side_effect = lambda key, default=None: {
         "EHAL_BACKEND": "loxone",
     }.get(key, default)
+    config_mock.get_battery_params.return_value = {"limits_from_live": False}
     huawei_mock.return_value = []
     flex_mock.return_value = []
     _clear_safe_setpoints_skip_env()
     ehal_live.push_safe_setpoints_on_startup()
     huawei_mock.assert_called_once_with(0, 0.0, 99.0)
-    flex_mock.assert_called_once_with({}, None, None)
+    flex_mock.assert_called_once_with({}, None, None, heat_storage_targets={})
 
 
 @patch("integrations.ehal_live.write_ess_setpoints_from_control")
@@ -244,7 +247,14 @@ def test_read_generic_value_delegates(fetch_mock):
 def test_write_flexible_consumer_states_delegates(send_mock):
     send_mock.return_value = []
     assert ehal_live.write_flexible_consumer_states({"a": 1.0}, None, None) == []
-    send_mock.assert_called_once_with({"a": 1.0}, None, None, heat_controls=None)
+    send_mock.assert_called_once_with(
+        {"a": 1.0},
+        None,
+        None,
+        heat_controls=None,
+        heat_storage_targets=None,
+        heat_forced_charge=None,
+    )
 
 
 @patch("integrations.loxone_writes._publish_setpoint_traced")

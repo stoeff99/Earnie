@@ -58,22 +58,35 @@ _SHARE_OFF_TEXT = {
 
 def request_tariff_page(profile_id: str, open_tariff: tuple[str, str] | None = None) -> None:
     """Ask the Tarife page to show ``profile_id`` and open ``open_tariff`` (call before switch_page)."""
-    st.session_state[REQUEST_KEY] = {"profile_id": profile_id, "open": open_tariff}
+    st.session_state[REQUEST_KEY] = {"profile_id": profile_id, "open": open_tariff, "fresh": True}
+
+
+def _reset_opened_tariff() -> None:
+    """Forget which tariff the editor opened last, so a new request for it opens it again."""
+    from edibert.ui import state as edibert_state
+
+    with edibert_state.scope(KEY_PREFIX):
+        edibert_state.set_opened(None)
 
 
 def _select_profile(profiles: dict[str, dict], request: dict | None) -> str:
-    from ui.ehal_loxone_mapping import resolve_live_profile_id
+    from ui.house_config_entities_io import resolve_live_profile_id
 
     ids = list(profiles)
     displays, id_by_display = label_select_choices(profiles, ids, new_option=None)
     display_by_id = {entity_id: display for display, entity_id in id_by_display.items()}
+    live_id = resolve_live_profile_id({"profiles": profiles})
+    if not live_id:
+        st.warning(
+            "Das Live-Szenario verweist auf ein Hausprofil, das es nicht gibt — "
+            "bitte im Szenarienkonfigurator korrigieren. Bis dahin zeigt die "
+            "Auswahl das erste Hausprofil."
+        )
     wanted = (request or {}).get("profile_id")
     if wanted in profiles:
         st.session_state[_PROFILE_SELECT_KEY] = display_by_id[wanted]
     elif st.session_state.get(_PROFILE_SELECT_KEY) not in displays:
-        st.session_state[_PROFILE_SELECT_KEY] = display_by_id[
-            resolve_live_profile_id({"profiles": profiles})
-        ]
+        st.session_state[_PROFILE_SELECT_KEY] = display_by_id[live_id or ids[0]]
     picked = st.selectbox(
         "Hausprofil",
         displays,
@@ -187,8 +200,12 @@ def render() -> None:
     # Kept across reruns: the editor opens a requested tariff only once per distinct request.
     request = st.session_state.get(REQUEST_KEY)
     profile_id = _select_profile(profiles, request)
-    if request is not None and request.get("profile_id") is not None:
-        st.session_state[REQUEST_KEY] = {**request, "profile_id": None}
+    if request is not None and request.get("fresh"):
+        # Edibert adopts a request only when it differs from the last one; a new click on
+        # "Benutzertarif bearbeiten" for the same tariff must open it again.
+        _reset_opened_tariff()
+    if request is not None and (request.get("profile_id") is not None or request.get("fresh")):
+        st.session_state[REQUEST_KEY] = {**request, "profile_id": None, "fresh": False}
     try:
         host = host_house_for_profile(
             profile_id, profiles[profile_id], resolve_grid_fees_json_path()

@@ -87,13 +87,22 @@ def _render_heat_source_fields(thermal: dict, index: int, *, session_scope: str)
             format_func=lambda key: _HEAT_PUMP_LABELS.get(key, key),
             key=_scoped_key(session_scope, f"hc_wp_{index}"),
         )
+        # COP points (HeatControl P5) have no editor yet: they are kept as stored.
+        if existing.get("cop_points"):
+            heat_source["cop_points"] = [dict(point) for point in existing["cop_points"]]
+            st.caption(
+                f"COP-Kennlinie: {len(heat_source['cop_points'])} Punkte aus `components.json` "
+                "(`heat_source.cop_points`). Live plant den Wärmespeicher damit statt mit der JAZ."
+            )
+    # The own values are keyed per source type: Streamlit ignores ``value=`` once a key
+    # holds state, so a shared key kept the old type's JAZ / price after a switch.
     same_type = existing.get("type") == source_type
     default_eff = default_efficiency(heat_source)
     eff_label = "JAZ" if source_type == "heat_pump" else "Nutzungsgrad"
     own_eff = labeled_checkbox(
         f"Eigene {eff_label} (Standard {format_decimal(default_eff)})",
         value=same_type and existing.get("efficiency") not in (None, ""),
-        key=_scoped_key(session_scope, f"hc_heat_eff_use_{index}"),
+        key=_scoped_key(session_scope, f"hc_heat_eff_use_{index}_{source_type}"),
     )
     if own_eff:
         heat_source["efficiency"] = labeled_number_input(
@@ -101,7 +110,7 @@ def _render_heat_source_fields(thermal: dict, index: int, *, session_scope: str)
             min_value=0.05,
             value=float((existing.get("efficiency") if same_type else None) or default_eff),
             step=0.05,
-            key=_scoped_key(session_scope, f"hc_heat_eff_{index}"),
+            key=_scoped_key(session_scope, f"hc_heat_eff_{index}_{source_type}"),
         )
     if not heat_source_is_electric(heat_source):
         unit = _FUEL_UNIT_LABELS[str(fuel_unit(heat_source))]
@@ -110,7 +119,7 @@ def _render_heat_source_fields(thermal: dict, index: int, *, session_scope: str)
         own_price = labeled_checkbox(
             f"Eigener Brennstoffpreis (Standard {format_general(default_price)} {unit}, Stand {as_of})",
             value=same_type and existing.get("fuel_price") not in (None, ""),
-            key=_scoped_key(session_scope, f"hc_fuel_price_use_{index}"),
+            key=_scoped_key(session_scope, f"hc_fuel_price_use_{index}_{source_type}"),
         )
         if own_price:
             heat_source["fuel_price"] = labeled_number_input(
@@ -118,7 +127,7 @@ def _render_heat_source_fields(thermal: dict, index: int, *, session_scope: str)
                 min_value=0.01,
                 value=float((existing.get("fuel_price") if same_type else None) or default_price),
                 step=0.5,
-                key=_scoped_key(session_scope, f"hc_fuel_price_{index}"),
+                key=_scoped_key(session_scope, f"hc_fuel_price_{index}_{source_type}"),
             )
     return heat_source
 
@@ -232,12 +241,17 @@ def _render_wp_annual_metric(item: dict, *, location: dict) -> None:
     latitude = location["latitude"]
     longitude = location["longitude"]
 
-    thermal_preview = {**item, "latitude": latitude, "longitude": longitude}
+    from data.solar_horizon import stored_horizon_fields
+
+    # The horizon of the form shades collector and windows of the estimate (SUSI P3a).
+    horizon_fields = stored_horizon_fields(location)
+    thermal_preview = {**item, "latitude": latitude, "longitude": longitude, **horizon_fields}
     house_profile = {
         "latitude": latitude,
         "longitude": longitude,
         "default_pv_tilt": location["default_pv_tilt"],
         "default_pv_azimuth": location["default_pv_azimuth"],
+        **horizon_fields,
     }
     heat_annual, ref_year = thermal_annual_heat_kwh_from_archive(
         thermal_preview, house_profile=house_profile
@@ -326,6 +340,19 @@ def _render_thermal_storage_fields(
             step=0.5,
             ratios=WIDE_LABEL_RATIOS,
             key=_scoped_key(session_scope, f"hc_storage_tol_{index}"),
+        ),
+        "boost_k": labeled_number_input(
+            "Wärmespeicher Boost (K)",
+            min_value=0.0,
+            value=float(existing.get("boost_k", heat_storage_default("boost_k")) or 0.0),
+            step=1.0,
+            help=(
+                "Um so viel hebt die Regelung das Soll an, wenn Earnie die Wärmepumpe "
+                "freigibt (Freigabe 1 bzw. SG-Ready-Zustand 3). Earnie lädt auf Vorrat "
+                "bis Soll + Boost. 0 = nur bis zum Soll."
+            ),
+            ratios=WIDE_LABEL_RATIOS,
+            key=_scoped_key(session_scope, f"hc_storage_boost_{index}"),
         ),
     }
 
@@ -760,6 +787,7 @@ def _overlay_thermal_annual_fields(
         heat_source.pop("fuel_price", None)
     if heat_source.get("type") != "heat_pump":
         heat_source.pop("heat_pump_type", None)
+        heat_source.pop("cop_points", None)
     preview["heat_source"] = heat_source
     _overlay_session_fields(
         preview, session_scope, (("heating_power_kw", f"hc_heat_power_{index}", float),)

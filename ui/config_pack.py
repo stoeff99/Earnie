@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import zipfile
 
 import streamlit as st
 
@@ -63,7 +64,7 @@ def _render_config_pack_import() -> None:
         return
     try:
         written = import_config_pack_bytes(uploaded.getvalue())
-    except (DataModelError, ValueError, OSError, KeyError) as exc:
+    except (DataModelError, ValueError, OSError, KeyError, zipfile.BadZipFile) as exc:
         st.error(str(exc))
         logger.warning("config pack import rejected: %s", exc)
         return
@@ -93,11 +94,11 @@ def render_config_pack_controls(payload: bytes | None) -> None:
     _render_config_pack_import()
 
 
-def render_backup_transfer_sidebar() -> None:
+def render_backup_transfer_sidebar(*, expanded: bool = False) -> None:
     """Sidebar "Sichern & Übertragen": everything that moves data in or out of Earnie."""
     from ui.support_package import render_support_package_controls
 
-    with st.sidebar.expander("Sichern & Übertragen", expanded=False):
+    with st.sidebar.expander("Sichern & Übertragen", expanded=expanded):
         payload = build_config_pack_for_sidebar()
         render_config_pack_controls(payload)
         st.divider()

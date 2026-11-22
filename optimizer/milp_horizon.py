@@ -64,8 +64,15 @@ def coerce_battery_params_list(
     return []
 
 
-def aggregate_battery_params_for_load(batteries: list[dict]) -> dict:
-    """House-load view: first ESS fields + summed standby."""
+def primary_battery_with_plant_power(batteries: list[dict]) -> dict:
+    """The first battery with the charge, discharge and standby power of all batteries.
+
+    Capacity, SoC limits, efficiency, ``control`` and the virtual reserve keys are those of the
+    first battery. The MILP's grid balance needs the power of all; the virtual reserve and the
+    trivial-window check refer to the first battery. It is not a model of the whole plant: the
+    plan's SoC (``model.e_batt``) is the plant's (``plant_soc_view``), and the simulation and the
+    charts use ``plant_battery_params``.
+    """
     if not batteries:
         return {
             "battery_capacity_kwh": 0.0,
@@ -94,6 +101,109 @@ def aggregate_battery_params_for_load(batteries: list[dict]) -> dict:
     return agg
 
 
+def plant_battery_params(batteries: list[dict]) -> dict:
+    """One battery that stands for all of ``batteries`` (simulation and charts).
+
+    Power and standby are summed and the capacity is the sum. The SoC limits are the summed
+    energy limits as a share of that capacity, so the usable energy equals that of the single
+    batteries. The efficiency is capacity-weighted. With one battery the result is that of
+    ``primary_battery_with_plant_power``. Keys that describe one battery (``id``, ``label``,
+    virtual reserve) stay those of the first.
+
+    Raises ``ValueError`` when the batteries have different ``control`` modes: one battery
+    cannot stand for a plant that is only partly controllable.
+    """
+    if len(batteries) >= 2:
+        from house_config.battery_control import control_from_battery_params
+
+        controls = {str(b.get("id") or "?"): control_from_battery_params(b) for b in batteries}
+        if len(set(controls.values())) > 1:
+            raise ValueError(
+                "House batteries with different control modes cannot be simulated as one plant "
+                f"battery: {controls}."
+            )
+    return plant_energy_params(batteries)
+
+
+def plant_energy_params(batteries: list[dict]) -> dict:
+    """``plant_battery_params`` without the check of the control modes (``control`` of the first)."""
+    agg = primary_battery_with_plant_power(batteries)
+    if len(batteries) < 2:
+        return agg
+    capacities = [float(b.get("battery_capacity_kwh") or 0.0) for b in batteries]
+    total = sum(capacities)
+    agg["battery_capacity_kwh"] = total
+    if total <= 0.0:
+        # No energy to weight by: the limits of the first battery stay, they bound nothing.
+        return agg
+    for key in ("min_soc", "max_soc", "efficiency"):
+        agg[key] = sum(cap * float(b[key]) for cap, b in zip(capacities, batteries)) / total
+    return agg
+
+
+def plant_soc_percent(batteries: list[dict], soc_by_id: dict[str, float]) -> float:
+    """SoC of the plant battery (``plant_battery_params``): stored energy over total capacity.
+
+    Raises ``ValueError`` when a battery with capacity has no SoC in ``soc_by_id`` or the
+    batteries have no capacity at all.
+    """
+    energy = 0.0
+    total = 0.0
+    for index, battery in enumerate(batteries):
+        capacity = float(battery.get("battery_capacity_kwh") or 0.0)
+        if capacity <= 0.0:
+            continue
+        ess_id = str(battery.get("id") or f"ess_{index}").strip() or f"ess_{index}"
+        if ess_id not in soc_by_id:
+            raise ValueError(
+                f"Plant SoC: no SoC for house battery '{ess_id}' (have: {sorted(soc_by_id)})."
+            )
+        energy += capacity * float(soc_by_id[ess_id])
+        total += capacity
+    if total <= 0.0:
+        raise ValueError("Plant SoC: the house batteries have no capacity.")
+    return energy / total
+
+
+
+
+def plant_soc_params(model: MilpHorizonModel, battery_params: dict) -> dict:
+    """Battery that the plan's SoC (``model.e_batt``) refers to.
+
+    ``battery_params`` with one house battery in the model. With several, ``model.e_batt`` is the
+    energy of all house batteries and the battery is the plant battery over the house batteries
+    of the model (``plant_battery_params`` without ``id`` and ``label``, so the plan values are
+    those of the plant; ``control``, ``ac_connection`` and the virtual reserve keys are those of
+    the first battery, the one the live cycle commands).
+    """
+    ess_ids = list(model.ess_ids or [])
+    if len(ess_ids) < 2:
+        return battery_params
+    params_by_id = model.battery_params_by_id or {}
+    params = plant_energy_params([params_by_id[eid] for eid in ess_ids])
+    params.pop("id", None)
+    params.pop("label", None)
+    return params
+
+
+def plant_soc_view(
+    model: MilpHorizonModel, current_soc: float, battery_params: dict
+) -> tuple[float, dict]:
+    """Start SoC and battery that the plan's SoC (``model.e_batt``) refers to.
+
+    With one house battery in the model these are ``current_soc`` and ``battery_params``. With
+    several, the plant SoC at the plan start (from each battery's own start SoC; ``current_soc``
+    is not used) and ``plant_soc_params``.
+    """
+    params = plant_soc_params(model, battery_params)
+    if params is battery_params:
+        return float(current_soc), battery_params
+    capacity = float(params.get("battery_capacity_kwh") or 0.0)
+    if capacity <= 0.0:
+        raise ValueError(f"MILP: the house batteries {model.ess_ids} have no capacity.")
+    if model.plant_start_energy_kwh is None:
+        raise ValueError("MILP model without plant start energy (plant_start_energy_kwh).")
+    return float(model.plant_start_energy_kwh) / capacity * 100.0, params
 
 
 def _normalize_fixed_flex_by_t(
@@ -121,6 +231,7 @@ def _create_grid_battery_vars(
     horizon: int,
     battery_params: dict | list[dict],
     planned_consumers: list,
+    fixed_flex_by_t: dict[int, float],
     *,
     inverter_params: dict | list[dict] | None = None,
     pv_systems: list[dict] | None = None,
@@ -146,7 +257,7 @@ def _create_grid_battery_vars(
                 "control": "full",
             }
         ]
-    load_params = aggregate_battery_params_for_load(batteries)
+    load_params = primary_battery_with_plant_power(batteries)
     ess_ids: list[str] = []
     params_by_id: dict[str, dict] = {}
     p_charge_by_ess: dict[str, list] = {}
@@ -215,11 +326,22 @@ def _create_grid_battery_vars(
         for t in range(horizon)
     ]
     primary_id = ess_ids[0]
-    e_batt = e_batt_by_ess[primary_id]
+    # model.e_batt is the plan's SoC: the battery itself, or with several the energy of all
+    # (tied to the sum in ``_add_slot_power_balance_and_soc``; bounds come from the batteries).
+    e_batt = (
+        e_batt_by_ess[primary_id]
+        if len(ess_ids) == 1
+        else [pulp.LpVariable(f"e_batt_plant_{t}") for t in range(horizon)]
+    )
     delta_charge = delta_charge_by_ess[primary_id]
     max_flex_power = sum(power_limits_kw(c)[1] for c in planned_consumers)
+    # Preset flex (e.g. fixed EV charging) is load outside the MILP vars: the Big-M must
+    # cover it, or p_grid_buy is cut below the slot's real demand (wrong plan / Infeasible).
     max_load = max(
-        (effective_p_act(row, load_params) for row in matrix[:horizon]),
+        (
+            effective_p_act(row, load_params) + float(fixed_flex_by_t.get(t, 0.0))
+            for t, row in enumerate(matrix[:horizon])
+        ),
         default=0.0,
     )
     max_pv = max((_slot_house_pv(row) for row in matrix[:horizon]), default=0.0)
@@ -329,6 +451,10 @@ def _add_slot_power_balance_and_soc(
         for consumer in planned_consumers
     )
     # Tie aggregates to per-ESS vars
+    if len(grid_vars.ess_ids) > 1:
+        prob += grid_vars.e_batt[t] == pulp.lpSum(
+            grid_vars.e_batt_by_ess[eid][t] for eid in grid_vars.ess_ids
+        )
     prob += p_charge[t] == pulp.lpSum(
         grid_vars.p_charge_by_ess[eid][t] for eid in grid_vars.ess_ids
     )
@@ -400,6 +526,42 @@ def _add_slot_power_balance_and_soc(
         prob += p_grid_sell[t] <= max(0.0, float(export_cap_kw))
 
 
+def _initial_energy_by_ess(
+    grid_vars: _GridBatteryVars,
+    current_soc: float,
+    current_soc_by_id: dict[str, float] | None,
+) -> dict[str, float]:
+    """Stored energy [kWh] of each house battery at the plan start.
+
+    One battery takes its SoC from ``current_soc_by_id`` when present, else ``current_soc``.
+    Several batteries need each one's own SoC in ``current_soc_by_id``: one battery's SoC does
+    not stand for another. A battery without capacity stores nothing and needs no SoC (as in
+    ``plant_soc_percent``).
+
+    Raises ``ValueError`` naming the batteries without SoC and the ids that are present.
+    """
+    by_id = current_soc_by_id or {}
+    ess_ids = list(grid_vars.ess_ids)
+    capacity_by_ess = {
+        eid: float(grid_vars.battery_params_by_id[eid].get("battery_capacity_kwh") or 0.0)
+        for eid in ess_ids
+    }
+    if len(ess_ids) == 1:
+        eid = ess_ids[0]
+        soc = float(by_id[eid]) if eid in by_id else float(current_soc)
+        return {eid: (soc / 100.0) * capacity_by_ess[eid]}
+    missing = [eid for eid in ess_ids if eid not in by_id and capacity_by_ess[eid] > 0.0]
+    if missing:
+        raise ValueError(
+            f"MILP: Start-SoC fehlt für Hausbatterie(n) {missing} (vorhanden: {sorted(by_id)}); "
+            "mit mehreren Hausbatterien braucht jede ihren eigenen SoC."
+        )
+    return {
+        eid: (float(by_id[eid]) / 100.0) * capacity_by_ess[eid] if eid in by_id else 0.0
+        for eid in ess_ids
+    }
+
+
 def _add_power_balance_and_soc_dynamics(
     prob: pulp.LpProblem,
     matrix: list[dict[str, Any]],
@@ -426,23 +588,8 @@ def _add_power_balance_and_soc_dynamics(
     batteries = filter_house_balance_batteries(
         coerce_battery_params_list(battery_params), inverters
     )
-    load_params = aggregate_battery_params_for_load(batteries)
-    e_init_by_ess: dict[str, float] = {}
-    multi_ess = len(grid_vars.ess_ids) > 1
-    for eid in grid_vars.ess_ids:
-        bat = grid_vars.battery_params_by_id[eid]
-        if current_soc_by_id and eid in current_soc_by_id:
-            soc = float(current_soc_by_id[eid])
-        elif not multi_ess:
-            soc = float(current_soc)
-        else:
-            logger.error(
-                "MILP multi-ESS: SoC missing for %s — refusing primary substitute; SoC=0",
-                eid,
-            )
-            soc = 0.0
-        capacity = float(bat.get("battery_capacity_kwh") or 0.0)
-        e_init_by_ess[eid] = (soc / 100.0) * capacity
+    load_params = primary_battery_with_plant_power(batteries)
+    e_init_by_ess = _initial_energy_by_ess(grid_vars, current_soc, current_soc_by_id)
     relaxed_soc_bounds = add_soc_recovery_constraints(prob, grid_vars, e_init_by_ess)
     add_buffer_refill_constraints(
         prob, grid_vars, matrix, e_init_by_ess, horizon=horizon, dt_h=dt_h
@@ -565,11 +712,13 @@ def _build_milp_model(
 ) -> MilpHorizonModel:
     dt_h = validate_dt_h(dt_h)
     prob = pulp.LpProblem("Energy_Cost_Minimization", pulp.LpMinimize)
+    fixed_flex_by_t = _normalize_fixed_flex_by_t(fixed_flex_kw_t0_or_by_t)
     grid_vars = _create_grid_battery_vars(
         matrix,
         horizon,
         battery_params,
         planned_consumers,
+        fixed_flex_by_t,
         inverter_params=inverter_params,
         pv_systems=pv_systems,
     )
@@ -590,7 +739,7 @@ def _build_milp_model(
         grid_vars,
         consumer_vars,
         planned_consumers,
-        _normalize_fixed_flex_by_t(fixed_flex_kw_t0_or_by_t),
+        fixed_flex_by_t,
         horizon=horizon,
         dt_h=dt_h,
         export_caps_kw=export_caps_kw,
@@ -620,6 +769,9 @@ def _build_milp_model(
         battery_params_by_id=dict(grid_vars.battery_params_by_id),
         p_pv_curtail=list(grid_vars.p_pv_curtail),
         relaxed_soc_bounds_percent=relaxed_soc_bounds or None,
+        plant_start_energy_kwh=sum(
+            _initial_energy_by_ess(grid_vars, current_soc, current_soc_by_id).values()
+        ),
     )
 
 

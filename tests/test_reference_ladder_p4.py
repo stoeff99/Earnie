@@ -1,6 +1,10 @@
 """RuleRef P4: SE headline and ladder table read the cost table's figures."""
 from __future__ import annotations
 
+from ui.backtesting_baseline import SeBaseline
+
+LIVE_L0 = SeBaseline("l0", "live")
+
 import pytest
 
 from ui.backtesting_ladder import (
@@ -10,6 +14,12 @@ from ui.backtesting_ladder import (
 )
 from ui.backtesting_results_helpers import build_annual_cost_rows
 from ui.saving_text import saving_text
+
+
+@pytest.fixture(autouse=True)
+def _rule_reference_switch(monkeypatch):
+    """The ladder UI shows only with the hidden switch ``rule_reference``."""
+    monkeypatch.setenv("EARNIE_UI_MODES", "scenario_explorer,rule_reference")
 
 
 def _meta() -> dict:
@@ -73,7 +83,7 @@ def test_end_soc_term_counts_in_saving_and_share_like_the_table():
     summary = _live(meta)
     assert summary.saving_eur == pytest.approx(101.35)
     assert summary.rule_share == pytest.approx((1500.0 - 1001.35) / 600.0)
-    row = next(row for row in build_annual_cost_rows(meta) if row["Szenario"] == "Live")
+    row = next(row for row in build_annual_cost_rows(meta, LIVE_L0) if row["Szenario"] == "Live")
     assert row["Ersparnis vs. Standard-Regeln [€]"] == saving_text(summary.saving_eur)
 
 

@@ -248,6 +248,36 @@ def _looks_like_ehal_id(name: str) -> bool:
     return kind.startswith(("sens_", "get_", "set_"))
 
 
+# Unbound EHAL IDs already reported at WARNING; cleared when a value arrives.
+_unbound_missing_warned: set[str] = set()
+
+
+def _log_unbound_push_read(
+    name: str, value: Optional[float], state: str
+) -> None:
+    """Warn once per unbound EHAL ID without a push value, then log at DEBUG.
+
+    The 30 s power sampler reads optional getters (export limit, ESS limits) via
+    ``read_telemetry``; a site that never exports them would otherwise log five
+    WARNING lines every 30 s and push the cycle lines out of the Dienst-Log view.
+    """
+    if value is not None:
+        _unbound_missing_warned.discard(name)
+        return
+    if name in _unbound_missing_warned:
+        logger.debug(
+            "EHAL push: no value for unbound '%s' (state=%s)", name, state
+        )
+        return
+    _unbound_missing_warned.add(name)
+    logger.warning(
+        "EHAL push: no value for unbound '%s' (state=%s); repeats logged at "
+        "DEBUG until a value arrives",
+        name,
+        state,
+    )
+
+
 def fetch_loxone_generic_value(io_name: str) -> Optional[float]:
     """Numeric live read from the VO push inbox only (no hub poll).
 
@@ -280,12 +310,8 @@ def fetch_loxone_generic_value(io_name: str) -> Optional[float]:
         if _looks_like_ehal_id(name):
             if is_pushable_kind(field_kind(name)):
                 value, state = read_push_value(name)
-                if value is None and not is_explicit_offline():
-                    logger.warning(
-                        "EHAL push: no value for unbound '%s' (state=%s)",
-                        name,
-                        state,
-                    )
+                if value is not None or not is_explicit_offline():
+                    _log_unbound_push_read(name, value, state)
                 return value
             return None
         logger.warning(
@@ -380,20 +406,23 @@ def fetch_heat_feedback(
 ) -> dict[str, float | None]:
     """Mapped heat pump / heat store reads in EHAL units; unmapped kinds are left out.
 
-    A mapped kind without a value is ``None``. Hub units come from the role file
-    (``ehal.field_registry``), e.g. ``sens_heat_power`` kW → W.
+    A mapped kind without a value is ``None``. On Loxone the hub units come from the role
+    file (``ehal.field_registry``), e.g. ``sens_heat_power`` kW → W. A network backend (the
+    HA carrier) already pushes EHAL units, so the Loxone block is not applied there.
     """
     from ehal.field_registry import apply_loxone_read, loxone_spec
     from ehal.heat_fields import HEAT_FEEDBACK_KINDS
+    from integrations import ehal_live
     from settings.ehal_marker_resolve import marker_thermal_annual_read
 
+    hub_is_loxone = not ehal_live.is_ehal_network_backend()
     out: dict[str, float | None] = {}
     for kind in kinds if kinds is not None else HEAT_FEEDBACK_KINDS:
         address = marker_thermal_annual_read(consumer, kind)
         if not address:
             continue
         raw = fetch_loxone_generic_value(address)
-        spec = loxone_spec(kind)
+        spec = loxone_spec(kind) if hub_is_loxone else None
         out[kind] = apply_loxone_read(raw, spec) if spec is not None else raw
     return out
 

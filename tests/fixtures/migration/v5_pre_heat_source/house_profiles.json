@@ -9,7 +9,7 @@
             "pv_profile_csv": "fixture/data.csv",
             "battery_profile_csv": "fixture/data.csv",
             "grid_profile_csv": "fixture/data.csv",
-            "historical_csv_source": "fixture/separate",
+            "historical_csv_source": "separate",
             "baseload_distribution": "equal",
             "consumers": [
                 {
@@ -114,6 +114,7 @@
                     "ehal_bindings": {
                         "pool.pool_swimspa.sens_power_act": "",
                         "pool.pool_swimspa.set_enable": "",
+                        "pool.pool_swimspa.sens_temperature_water": "",
                         "sens_temperature_water": "",
                         "get_temperature_water_setpoint": "",
                         "get_temperature_tolerance_c": "",
@@ -316,7 +317,7 @@
             "pv_profile_csv": "fixture/data.csv",
             "battery_profile_csv": "fixture/data.csv",
             "grid_profile_csv": "fixture/data.csv",
-            "historical_csv_source": "fixture/separate",
+            "historical_csv_source": "separate",
             "baseload_distribution": "equal",
             "consumers": [
                 {
@@ -622,7 +623,7 @@
             "pv_profile_csv": "fixture/data.csv",
             "battery_profile_csv": "fixture/data.csv",
             "grid_profile_csv": "fixture/data.csv",
-            "historical_csv_source": "fixture/separate",
+            "historical_csv_source": "separate",
             "baseload_distribution": "equal",
             "consumers": [
                 {

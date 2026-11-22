@@ -11,6 +11,7 @@ from dataclasses import dataclass
 import pandas as pd
 import streamlit as st
 
+from runtime_store.env_vars import is_rule_reference_enabled
 from simulation.reference_costs import LADDER_L1, LADDER_L2
 from simulation.reference_ladder import rule_share
 from ui.backtesting_results_helpers import (
@@ -26,7 +27,7 @@ STEP_L0 = "l0"
 STEP_L3 = "l3"
 _STEPS = (STEP_L0, LADDER_L1, LADDER_L2, STEP_L3)
 _STEP_NAMES = {
-    STEP_L0: "Ohne Steuerung",
+    STEP_L0: "Referenz ohne Speicher",
     LADDER_L1: "Wechselrichter-Eigenverbrauch",
     LADDER_L2: "Standard-Regeln",
     STEP_L3: "Earnie",
@@ -41,9 +42,9 @@ _METRICS_PER_ROW = 3
 _HEADLINE_HELP = (
     "Kosten mit Standard-Regeln minus Kosten mit Earnie: das, was Earnie über Batterie und "
     "freie Regeln hinaus bringt. Der Anteil der Regeln sagt, wie viel der Gesamtersparnis "
-    "gegen „Ohne Steuerung“ man auch ohne Earnie erreicht. Die Standard-Regeln ersetzen die "
-    "frühere Referenz ohne Optimierung, deshalb ist dieser Wert kleiner als die frühere "
-    "Ersparnis. Das liegt an der Methode, nicht an einer schlechteren Optimierung."
+    "gegen die „Referenz ohne Speicher“ man auch ohne Earnie erreicht. Gegen die Standard-Regeln "
+    "ist die Ersparnis kleiner als gegen die Referenz ohne Speicher. Das liegt an der Methode, "
+    "nicht an einer schlechteren Optimierung."
 )
 _HEADLINE_CAPTION = (
     "Earnie plant im Szenario-Explorer mit bekannten PV-, Last- und Preisverläufen, die "
@@ -149,7 +150,12 @@ def ladder_table_rows(summaries: list[LadderSummary]) -> list[dict]:
 
 
 def render_ladder_headline(meta: dict) -> None:
-    """Saving L2 − L3 and rule share per scenario, the full ladder in an expander."""
+    """Saving L2 − L3 and rule share per scenario, the full ladder in an expander.
+
+    Only with the hidden switch ``rule_reference`` in ``EARNIE_UI_MODES``.
+    """
+    if not is_rule_reference_enabled():
+        return
     st.subheader("Ersparnis gegen Standard-Regeln")
     summaries = build_ladder_summaries(meta)
     if not summaries:
@@ -169,7 +175,7 @@ def render_ladder_headline(meta: dict) -> None:
     st.caption(_HEADLINE_CAPTION)
     if any(not summary.corrections for summary in summaries):
         st.caption(_NO_SOC_CAPTION)
-    with st.expander("Alle Stufen: von „Ohne Steuerung“ bis Earnie"):
+    with st.expander("Alle Stufen: von der Referenz ohne Speicher bis Earnie"):
         st.dataframe(
             pd.DataFrame(ladder_table_rows(summaries)), width="stretch", hide_index=True
         )

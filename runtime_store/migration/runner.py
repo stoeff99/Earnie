@@ -11,6 +11,7 @@ from runtime_store.migration.chain import apply_chain
 from runtime_store.migration.io_util import (
     TARIFF_TRACK_FILES,
     load_pack_docs,
+    pack_file_paths,
     replace_pack_docs,
     write_json_atomic,
 )
@@ -125,9 +126,10 @@ def migrate_config_dir_unattended(
         docs, label=label, steps=steps, validate_unchanged=False
     )
     written: list[str] = []
+    paths = pack_file_paths(root)
     for name, doc in migrated.items():
         if docs.get(name) != doc:
-            write_json_atomic(root / name, doc)
+            write_json_atomic(paths.get(name, root / name), doc)
             written.append(name)
     return tuple(written)
 
@@ -154,18 +156,25 @@ def run_migration(
             manual_todos=(),
             written_files=(),
         )
-    _require_answers(plan.questions, answers)
-
     docs = load_pack_docs(root)
     level = plan_level_blockers(docs)
     if level:
         raise MigrationError(level[0].message_de)
 
     chain = apply_chain(docs, answers, registry, stop_on_blocker=True)
+    # The questions of the run with the answers: an earlier answer can settle a later
+    # question of the dry run (plan.questions), which must then not be required.
+    _require_answers(chain.questions, answers)
     if chain.blockers:
         raise MigrationError(chain.blockers[0].message_de)
 
-    validate_migrated_docs(chain.docs)
+    try:
+        validate_migrated_docs(chain.docs)
+    except ValueError as exc:
+        # Before backup and replace: nothing is written; report it like the other stops.
+        raise MigrationError(
+            f"Migrierte Konfiguration ist ungültig, nichts wurde geändert: {exc}"
+        ) from exc
 
     from_model = _from_model(docs)
     to_model = CURRENT_DATA_MODEL

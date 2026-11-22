@@ -21,8 +21,10 @@ def _cfg(tmp_path, monkeypatch, *, local: dict | None = None):
         config_payload=minimal_config_payload(),
     )
     local_path = tmp_path / "local_settings.json"
+    # Long retention by default: tests record cycles on fixed dates, and
+    # finish_cycle prunes segments older than retention relative to today.
     local_path.write_text(
-        json.dumps(local or {"silent_mode": False}),
+        json.dumps(local or {"silent_mode": False, "recorder_retention_days": 36500}),
         encoding="utf-8",
     )
     monkeypatch.setenv("EARNIE_CONFIG_PATH", config_path)
@@ -285,8 +287,15 @@ def test_debug_dump_includes_recorder_window(tmp_path, monkeypatch):
     with zipfile.ZipFile(zip_path) as archive:
         names = set(archive.namelist())
         assert any(name.startswith("recorder/cycles_") for name in names)
-        assert any(name.startswith("recorder/configs/") for name in names)
+        assert all(
+            name.endswith(".jsonl.xz") for name in names if name.startswith("recorder/cycles_")
+        )
+        assert "recorder/configs.pack.json" in names
+        assert not any(name.startswith("recorder/configs/") for name in names)
         manifest = json.loads(archive.read("manifest.json"))
+    assert manifest["recorder"]["configs_pack"]["snapshot_count"] == 1
+    assert manifest["recorder"]["configs_pack"]["raw_snapshot_count"] == 0
+    assert manifest["recorder"]["segments_xz"]["count"] >= 1
     assert manifest["schema_version"] == 3
     assert manifest["recorder"]["cycle_count"] == 1
     assert manifest["recorder"]["config_hashes"]

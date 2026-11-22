@@ -1,6 +1,10 @@
 """RuleRef P3: ladder runs in the SE, L2 as the reference of the saving (spec §§ 2, 5)."""
 from __future__ import annotations
 
+from ui.backtesting_baseline import SeBaseline
+
+LIVE_L0 = SeBaseline("l0", "live")
+
 import inspect
 import os
 
@@ -31,6 +35,12 @@ from tests.fixtures.backtesting_fixtures import (
 os.environ.setdefault("EARNIE_OFFLINE", "1")
 
 
+@pytest.fixture(autouse=True)
+def _rule_reference_switch(monkeypatch):
+    """The ladder UI shows only with the hidden switch ``rule_reference``."""
+    monkeypatch.setenv("EARNIE_UI_MODES", "scenario_explorer,rule_reference")
+
+
 @pytest.fixture
 def ladder_env(monkeypatch):
     with activate_backtesting_fixtures(monkeypatch):
@@ -43,9 +53,12 @@ def ladder_env(monkeypatch):
         }
 
 
+_BOTH = ("l1", "l2")
+
+
 def test_identical_setups_share_their_ladder_runs(ladder_env):
     scenario = ladder_env["scenario"]
-    ladder, specs = plan_ladder_reference_tasks({"a": scenario, "b": dict(scenario)})
+    ladder, specs = plan_ladder_reference_tasks({"a": scenario, "b": dict(scenario)}, steps=_BOTH)
     assert [spec.ref_id for spec in specs] == ["l1:a", "l2:a"]
     assert ladder["b"] == ladder["a"] == {"l1": "l1:a", "l2": "l2:a"}
 
@@ -53,7 +66,7 @@ def test_identical_setups_share_their_ladder_runs(ladder_env):
 def test_other_storage_gets_its_own_runs(ladder_env):
     scenario = ladder_env["scenario"]
     ladder, specs = plan_ladder_reference_tasks(
-        {"a": scenario, "b": {**scenario, "battery_capacity_kwh": 25.0}}
+        {"a": scenario, "b": {**scenario, "battery_capacity_kwh": 25.0}}, steps=_BOTH
     )
     assert len(specs) == 4
     assert ladder["b"] == {"l1": "l1:b", "l2": "l2:b"}
@@ -63,7 +76,7 @@ def test_other_flex_set_gets_its_own_runs(ladder_env):
     scenario = ladder_env["scenario"]
     extra = {"id": "extra", "name": "Extra", "nominal_power_kw": 1.0, "optimizer_enabled": True}
     ladder, specs = plan_ladder_reference_tasks(
-        {"a": scenario, "b": {**scenario, "_planning_flex_consumers": [extra]}}
+        {"a": scenario, "b": {**scenario, "_planning_flex_consumers": [extra]}}, steps=_BOTH
     )
     assert len(specs) == 4
     assert ladder["a"]["l2"] != ladder["b"]["l2"]
@@ -71,12 +84,24 @@ def test_other_flex_set_gets_its_own_runs(ladder_env):
 
 def test_labels_name_the_scenario_and_the_step(ladder_env):
     _, specs = plan_ladder_reference_tasks(
-        {"a": ladder_env["scenario"]}, scenario_labels={"a": "Haus A"}
+        {"a": ladder_env["scenario"]}, steps=_BOTH, scenario_labels={"a": "Haus A"}
     )
     assert [spec.label for spec in specs] == [
         "Wechselrichter-Eigenverbrauch (Haus A)",
         "Standard-Regeln (Haus A)",
     ]
+
+
+def test_l1_box_alone_plans_no_l2(ladder_env):
+    ladder, specs = plan_ladder_reference_tasks({"a": ladder_env["scenario"]}, steps=("l1",))
+    assert [spec.ref_id for spec in specs] == ["l1:a"]
+    assert ladder == {"a": {"l1": "l1:a"}}
+
+
+def test_unknown_or_no_steps_fail_loud(ladder_env):
+    for steps in ((), ("l3",)):
+        with pytest.raises(ValueError, match="Referenz-Stufen"):
+            plan_ladder_reference_tasks({"a": ladder_env["scenario"]}, steps=steps)
 
 
 def test_every_ladder_id_counts_as_a_reference():
@@ -173,7 +198,10 @@ def test_price_load_reaches_the_day_after_the_end():
     from scripts.run_backtesting import _price_load_window
 
     start, end = pd.Timestamp("2026-06-01"), pd.Timestamp("2026-06-30")
-    assert _price_load_window(start, end, "perfect") == (start, pd.Timestamp("2026-07-01"))
+    assert _price_load_window(start, end, "perfect") == (
+        pd.Timestamp("2026-05-29"),
+        pd.Timestamp("2026-07-01"),
+    )
     load_start, load_end = _price_load_window(start, end, "mirror")
     assert load_start < start
     assert load_end == pd.Timestamp("2026-07-01")
@@ -184,6 +212,7 @@ def _meta(ladder: bool = True) -> dict:
         "reference_id": "historical_reference",
         "live_scenario_id": "live",
         "scenario_ids": ["historical_reference", "ref:live", "l1:live", "l2:live", "live"],
+        "reference_by_scenario": {"live": "ref:live"},
         "labels": {},
         "summary": {
             "total_eur": {
@@ -203,13 +232,13 @@ def _meta(ladder: bool = True) -> dict:
 def _rows(meta: dict) -> dict[str, dict]:
     from ui.backtesting_results_helpers import build_annual_cost_rows
 
-    return {row["Szenario"]: row for row in build_annual_cost_rows(meta)}
+    return {row["Szenario"]: row for row in build_annual_cost_rows(meta, LIVE_L0)}
 
 
 def test_saving_column_is_l2_minus_l3_and_the_old_delta_stays():
     row = _rows(_meta())["live"]
     assert row["Ersparnis vs. Standard-Regeln [€]"] == "100,00 € gespart"
-    assert row["Δ vs Referenz [€]"] == "-600,00 €"
+    assert row["Δ vs Referenz ohne Speicher von Live [€]"] == "-600,00 €"
 
 
 def test_reference_rows_have_no_saving_and_come_before_the_optimized_row():
@@ -233,6 +262,13 @@ def test_saving_counts_fuel_on_both_sides():
 
 def test_log_without_a_ladder_shows_no_saving():
     assert _rows(_meta(ladder=False))["live"]["Ersparnis vs. Standard-Regeln [€]"] == "—"
+
+
+def test_saving_column_hidden_without_the_switch(monkeypatch):
+    """Without ``rule_reference`` the cost table has no Standard-Regeln column."""
+    monkeypatch.setenv("EARNIE_UI_MODES", "scenario_explorer")
+    rows = _rows(_meta())
+    assert all("Ersparnis vs. Standard-Regeln [€]" not in row for row in rows.values())
 
 
 def test_ladder_report_appears_as_a_hint():

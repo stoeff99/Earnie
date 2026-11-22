@@ -45,7 +45,9 @@ from .milp_horizon import (
     _add_terminal_soc_constraint,
     _build_milp_model,
     _terminal_soc_energy_kwh,
+    plant_soc_view,
 )
+from .milp_horizon_extras import BASE_LEVEL_ENV, base_level_enabled, plant_capacity_kwh
 from .import_power_limit import ImportCaps
 from .milp_ev_pool import add_ev_pool_constraints
 from .milp_import_cap import add_import_cap_constraints
@@ -64,6 +66,7 @@ from .import_cap_report import (
 from .milp_vendor_mode import add_vendor_mode_export_constraints, plan_vendor_mode_enabled
 from .milp_result import (
     _extract_milp_plan,
+    _planned_soc_by_ess_at,
     _log_milp_decision,
     extract_horizon_schedule,
 )
@@ -77,6 +80,11 @@ from .milp_defaults import (  # noqa: F401  (re-exported for recorder_replay / f
 logger = logging.getLogger(__name__)
 
 _AUTOMATIK_FALLBACK = (0, 0.0, 99.0, {}, {}, EMPTY_MILP_PLAN, {})
+# ``milp_plan`` key: heat pump id → store charge target °C, 0 = none (HeatControl P3).
+HEAT_STORAGE_TARGETS_KEY = "heat_storage_targets"
+HEAT_STORAGE_LEVELS_KEY = "heat_storage_levels"
+# ``milp_plan`` key: ids of the heat pumps in a forced charge now (HeatControl P5).
+HEAT_FORCED_CHARGE_KEY = "heat_forced_charge"
 
 
 def _add_virtual_reserve_refill(
@@ -99,10 +107,13 @@ def _add_virtual_reserve_refill(
     if deadline_raw:
         try:
             deadline = datetime.fromisoformat(str(deadline_raw).replace("Z", "+00:00"))
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=timezone.utc)
-        except ValueError:
-            deadline = None
+        except ValueError as exc:
+            raise ValueError(
+                "Virtuelle Reserve: Nachlade-Deadline ist kein ISO-Zeitstempel "
+                f"({deadline_raw!r})."
+            ) from exc
+        if deadline.tzinfo is None:
+            deadline = deadline.replace(tzinfo=timezone.utc)
     _add_virtual_reserve_deadline_charge(
         model,
         matrix=matrix,
@@ -117,20 +128,68 @@ def _add_virtual_reserve_refill(
 
 
 def _base_level_start(
-    battery_params: dict | list[dict],
+    model: MilpHorizonModel,
     current_soc: float,
+    current_soc_by_id: dict[str, float] | None,
     soc_hold_index: int | None,
     soc_hold_percent: float | None,
-) -> tuple[int, float]:
-    """First slot the SoC base level tracks and the energy before it.
+) -> tuple[int, float] | None:
+    """First slot the SoC base level tracks and the plant energy before it (``None`` when off).
 
-    With a SoC hold the plan starts for real after the hold: the slots before it are not replayed
-    and only lead there.
+    The energy is that of all house batteries in the model, like the base level's target and held
+    energy. With a SoC hold the plan starts for real after the hold: the slots before it are not
+    replayed and only lead there; the hold percent is a plant SoC (``plant_capacity_kwh``). Without
+    a hold one battery starts at ``current_soc``; several need each one's SoC in
+    ``current_soc_by_id`` (``ValueError`` otherwise).
     """
-    capacity = float(_primary_battery_params(battery_params).get("battery_capacity_kwh") or 0.0)
+    if not base_level_enabled():
+        return None
     if soc_hold_index is not None and soc_hold_percent is not None:
-        return soc_hold_index + 1, float(soc_hold_percent) / 100.0 * capacity
-    return 0, float(current_soc) / 100.0 * capacity
+        return soc_hold_index + 1, float(soc_hold_percent) / 100.0 * plant_capacity_kwh(model)
+    ess_ids = list(model.ess_ids)
+    params_by_id = model.battery_params_by_id
+    if len(ess_ids) == 1:
+        capacity = float(params_by_id[ess_ids[0]].get("battery_capacity_kwh") or 0.0)
+        return 0, float(current_soc) / 100.0 * capacity
+    by_id = current_soc_by_id or {}
+    missing = [eid for eid in ess_ids if eid not in by_id]
+    if missing:
+        raise ValueError(
+            f"{BASE_LEVEL_ENV}: Start-SoC fehlt für Hausbatterie(n) {missing} (vorhanden: {sorted(by_id)})."
+        )
+    return 0, sum(
+        float(by_id[eid]) / 100.0 * float(params_by_id[eid].get("battery_capacity_kwh") or 0.0)
+        for eid in ess_ids
+    )
+
+
+def _wear_cent_per_kwh_by_ess(model: MilpHorizonModel) -> dict[str, float]:
+    """Wear [ct/kWh throughput] of each house battery in the model, from its own ``battery_wear``.
+
+    Battery params from the house config carry ``battery_wear`` (``battery_params_from_planning``).
+    A single battery without the key (legacy flat params) takes the live scenario's wear, as
+    before. With several batteries each needs its own: one battery's wear does not price another.
+    """
+    from .battery_wear import battery_wear_cent_per_kwh_from_config
+
+    ess_ids = list(model.ess_ids or [])
+    params_by_id = model.battery_params_by_id or {}
+    out: dict[str, float] = {}
+    for eid in ess_ids:
+        bat = params_by_id[eid]
+        capacity = float(bat.get("battery_capacity_kwh") or 0.0)
+        if capacity <= 0.0:
+            out[eid] = 0.0
+        elif "battery_wear" in bat:
+            out[eid] = battery_wear_cent_per_kwh_from_config(bat["battery_wear"], capacity)
+        elif len(ess_ids) == 1:
+            out[eid] = config.get_battery_wear_cent_per_kwh(capacity)
+        else:
+            raise ValueError(
+                f"Batterie '{eid}': battery_wear fehlt in den Speicherparametern; mit mehreren "
+                f"Hausbatterien braucht jede ihren eigenen Verschleiß ({ess_ids})."
+            )
+    return out
 
 
 def _build_milp_model_with_objective(
@@ -183,22 +242,17 @@ def _build_milp_model_with_objective(
         inverter_params=inv,
         pv_systems=pvs,
     )
-    wear_cent_per_kwh = 0.0
     primary = _primary_battery_params(battery_params)
     _add_virtual_reserve_refill(model, matrix, primary)
-    if float(primary.get("battery_capacity_kwh") or 0.0) > 0.0:
-        # Wear from primary ESS capacity (multi-ESS wear refinement later).
-        wear_cent_per_kwh = config.get_battery_wear_cent_per_kwh(
-            float(primary["battery_capacity_kwh"])
-        )
     _add_milp_objective(
         model,
         matrix,
         k_push,
         inputs.ev_milp_by_id,
-        wear_cent_per_kwh=wear_cent_per_kwh,
+        wear_cent_per_kwh=0.0,
+        wear_cent_per_kwh_by_ess=_wear_cent_per_kwh_by_ess(model),
         base_level_start=_base_level_start(
-            battery_params, current_soc, soc_hold_index, soc_hold_percent
+            model, current_soc, current_soc_by_id, soc_hold_index, soc_hold_percent
         ),
     )
     return model
@@ -234,13 +288,23 @@ def _add_flex_side_constraints(
     )
     add_ev_pool_constraints(model)
     window = matrix[: inputs.horizon]
+    thermal_contexts = _resolve_thermal_flex_contexts(
+        window, inputs.active, thermal_flex_contexts
+    )
     add_thermal_flex_constraints(
         model,
         window,
         inputs.schedule_indices,
-        _resolve_thermal_flex_contexts(window, inputs.active, thermal_flex_contexts),
+        thermal_contexts,
         consumer_continue_on=consumer_continue_on,
     )
+    from optimizer.thermal_flex_context import LIVE_STORE_PLAN_KEY
+
+    model.live_store_plans = {
+        str(cid): ctx[LIVE_STORE_PLAN_KEY]
+        for cid, ctx in thermal_contexts.items()
+        if isinstance(ctx, dict) and ctx.get(LIVE_STORE_PLAN_KEY) is not None
+    }
 
 
 def _buffer_refill_needs_grid(model: MilpHorizonModel) -> bool:
@@ -266,12 +330,16 @@ def _add_soc_anchor_constraints(
     sunrise_soc_min_index: int | None,
     terminal_soc_percent: float | None,
 ) -> None:
-    """SOC-Anker in Vorrangfolge: Hold-Slot, PV-only bis Sonnenaufgang, End-SoC."""
+    """SOC-Anker in Vorrangfolge: Hold-Slot, PV-only bis Sonnenaufgang, End-SoC.
+
+    ``soc_hold_percent`` and ``terminal_soc_percent`` are plant SoC values: they bind the energy
+    of all house batteries (``plant_capacity_kwh``), not the first battery alone.
+    """
     battery_params = _primary_battery_params(battery_params)
+    # The sunrise check compares the plan's SoC: the plant's with several house batteries.
+    current_soc, soc_params = plant_soc_view(model, current_soc, battery_params)
     if soc_hold_index is not None and soc_hold_percent is not None:
-        e_hold = (float(soc_hold_percent) / 100.0) * battery_params[
-            "battery_capacity_kwh"
-        ]
+        e_hold = (float(soc_hold_percent) / 100.0) * plant_capacity_kwh(model)
         _add_soc_equality_constraint(model, soc_hold_index, e_hold)
         if verbose:
             logger.info(
@@ -281,7 +349,7 @@ def _add_soc_anchor_constraints(
             )
     elif sunrise_soc_min_index is not None:
         # Floor already via e_batt lowBound; do not force == SOC_min (residual dump).
-        min_soc = float(battery_params["min_soc"])
+        min_soc = float(soc_params["min_soc"])
         below_min = float(current_soc) < min_soc - 1e-9
         refill_kwh = float(
             battery_params.get("_virtual_reserve_refill_kwh")
@@ -331,7 +399,7 @@ def _add_soc_anchor_constraints(
                     sunrise_soc_min_index,
                     f"; grid charge allowed for {', '.join(exempt)}" if exempt else "",
                 )
-    elif e_terminal := _terminal_soc_energy_kwh(battery_params, terminal_soc_percent):
+    elif e_terminal := _terminal_soc_energy_kwh(model, terminal_soc_percent):
         _add_terminal_soc_constraint(model, e_terminal)
         if verbose:
             logger.info(
@@ -460,8 +528,16 @@ def _extract_optimizer_controls_from_model(
     current_soc: float,
     battery_params: dict,
 ) -> _OptimizerControls:
-    """Modus/Leistung/SoC für t=0 inkl. E-Auto-Preset-Leistung außerhalb des MILP."""
+    """Modus/Leistung/SoC für t=0 inkl. E-Auto-Preset-Leistung außerhalb des MILP.
+
+    With several house batteries the controls refer to the plant (``plant_soc_view``) and
+    ``milp_plan["planned_soc_by_ess"]`` holds each battery's planned SoC at the end of slot 0.
+    """
     milp_plan = _extract_milp_plan(model)
+    current_soc, battery_params = plant_soc_view(model, current_soc, battery_params)
+    planned_by_ess = _planned_soc_by_ess_at(model, 0)
+    if planned_by_ess:
+        milp_plan["planned_soc_by_ess"] = planned_by_ess
     consumer_powers, total_flex_power = _consumer_powers_now(model)
     preset_t0 = preset_by_slot.get(0, {})
     consumer_powers.update(preset_t0)
@@ -659,6 +735,21 @@ def milp_optimizer(
         controls.milp_plan["import_cap_report"] = report_from_model(
             model, matrix, import_caps, remaining
         )
+    if model.live_store_plans:
+        from optimizer.heat_storage_target import (
+            forced_charge_ids,
+            heat_storage_targets,
+            store_level_report,
+        )
+
+        # HeatControl P3/P4: charge target and planned store level per heat pump; P5: forced
+        # charge (SG-Ready state 4) on a negative price or curtailed surplus.
+        forced = forced_charge_ids(
+            model, matrix, float(controls.milp_plan.get("p_pv_curtail") or 0.0)
+        )
+        controls.milp_plan[HEAT_FORCED_CHARGE_KEY] = forced
+        controls.milp_plan[HEAT_STORAGE_TARGETS_KEY] = heat_storage_targets(model, forced)
+        controls.milp_plan[HEAT_STORAGE_LEVELS_KEY] = store_level_report(model)
     urgent_observability = _collect_urgent_rule_observability(
         model, matrix, remaining, schedule_indices, contexts, filters
     )

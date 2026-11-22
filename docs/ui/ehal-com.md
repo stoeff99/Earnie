@@ -213,7 +213,9 @@ Role template: `share/ehal/roles/heatpump.json`. Greenfield prefix `Earnie_Waerm
 | Area / meaning              | Type          | EHAL value name (stub / wire) | OpenEMS | evcc | Victron | HA / Loxone |
 | ------------------------------ | --------------- | -------------------------------- | ------- | ---- | ------- | ----------------------------------------------- |
 | Heat pump power               | Measurement   | `heatpump.{slug}.sens_power_act` |        |      |         | HA power entity / `Earnie_Waermepumpe_Leistung` or EFM |
-| Heat pump enable / SG-Ready   | Control value | `heatpump.{slug}.set_enable`    |         |      |         | HA switch/input_boolean / `Earnie_Waermepumpe_Freigabe` |
+| Heat pump enable              | Control value | `heatpump.{slug}.set_enable`    |         |      |         | HA switch/input_boolean / `Earnie_Waermepumpe_Freigabe` |
+| SG-Ready state requested (2/3/4) | Control value | `heatpump.{slug}.set_sg_ready_state` |    |      |         | HA input_number/number / `Earnie_Waermepumpe_SG_Ready_Soll` |
+| Store charge target (°C, 0 = none) | Control value | `heatpump.{slug}.set_temperature_heat_storage_target` | | |   | HA input_number/number / `Earnie_Waermespeicher_Ladeziel` |
 | Heat storage `T_eq`           | Measurement   | `sens_temperature_heat_storage` |         |      |         | HA °C sensor / `Earnie_Waermespeicher_Temp_eq` |
 | Heat storage `T_low`          | Measurement   | `sens_temperature_heat_storage_low` |     |      |         | HA °C sensor (bottom) / `Earnie_Waermespeicher_Temp_low` |
 | Heat storage top sensor       | Measurement   | `sens_temperature_heat_storage_top` |     |      |         | HA °C sensor (top) / `Earnie_Waermespeicher_Temp_top` |
@@ -223,14 +225,20 @@ Role template: `share/ehal/roles/heatpump.json`. Greenfield prefix `Earnie_Waerm
 | Operating mode (0–6)          | Measurement   | `sens_operating_mode`           |         |      |         | HA sensor / `Earnie_Waermepumpe_Betriebsart` |
 | SG-Ready state applied (1–4)  | Measurement   | `sens_sg_ready_state`           |         |      |         | HA sensor / `Earnie_Waermepumpe_SG_Ready` |
 | Thermal power                 | Measurement   | `sens_heat_power`               |         |      |         | HA power entity / `Earnie_Waermepumpe_Waermeleistung` (kW) |
-| Source temperature            | Measurement   | `sens_temperature_source`       |         |      |         | HA °C sensor / `Earnie_Waermepumpe_Temp_Quelle` |
+| Source temperature during operation (held by the backend at standstill) | Measurement | `sens_temperature_source` |  |      |         | HA °C sensor / `Earnie_Waermepumpe_Temp_Quelle` |
 | Hot-water tank / comfort minimum | Measurement / Parameter | `sens_temperature_dhw` / `get_temperature_dhw_min` | | | | HA °C sensors / `Earnie_Warmwasser_Temp` / `_min` |
 | Room temperature / setpoint   | Measurement / Parameter | `sens_temperature_room` / `get_temperature_room_setpoint` | | | | HA °C sensors / `Earnie_Raum_Temp` / `_Soll` |
 
 
 Notes: entity-scoped — VI = enable from Earnie (`flex.{hk_id}.…` in the check); VO = optional push `flex.{hk_id}.sens_power_act` plus store temps. Outside temperature only on the plant (`sens_temperature_outside`, see C.1) — not on the heat-pump VO. There is no target-kW Merker for the heat pump. Recipe: `share/loxone/recipes/heatpump.json`; VO: `VO_Earnie_Heatpump.xml`.
 
+**Operating state (HeatControl P2):** `set_sg_ready_state` is an optional write next to the required enable: `3` where the plan runs the heat pump (charge to setpoint + `heat_storage.boost_k`), else `2`. With COP points in the heating system (HeatControl P5) a planned run on a negative buy price or on curtailed PV surplus is sent as `4` (forced charge up to the maximum). The HA package's watchdog sets it to `2` when `status.json` is unreachable; Loxone needs the same in its fallback logic.
+
+**Store charge target (HeatControl P3):** `set_temperature_heat_storage_target` is an optional write: the planned end temperature of the present run (between setpoint and setpoint + boost, capped by the reported maximum), `0` when the plan does not run the heat pump now. The HA watchdog sets it to `0`.
+
 **Feedback (HeatControl P1):** the rows from the top sensor down are optional and read-only; Live-Lesen lists them for every `thermal_annual` consumer as `heatpump.{slug}.<field>`. With setpoint and tolerance both mapped, Live plans with the controller's store band instead of `heat_storage.setpoint_c` / `tolerance_c`; the mapping page warns when only one of the two is mapped. The other fields are recorded (`thermal_observability[].feedback`).
+
+**Source temperature:** `sens_temperature_source` is the source temperature (brine, ground water) while the compressor runs. With COP points in the heating system, Live uses it for the efficiency of the heat pump, held over the horizon. A sensor in the source circuit shows the source only during operation, so the backend sends the mean over the run after a settling time, freezes it at the stop and holds it until the next valid run ("running" = electric power above a threshold, not the controller's request). Earnie uses the value as reported and does not filter it. Details: [Rückmeldesignale der Heizung](../konfiguration/flexible-verbraucher.md#haus-wärme-rückmeldesignale).
 
 **Heat storage:** stratified tanks must expose energy-equivalent `T_eq` (volume-weighted mean) as `sens_temperature_heat_storage`, plus raw bottom sensor `T_low` as `sens_temperature_heat_storage_low`. Do not bind a single top-layer sensor as the RC state. On HA, activate both fields on the `thermal_annual` consumer (same entity-scoped activation keys as Loxone) and fill the two temperature entities into the matching `ENTITY_*` placeholders of the YAML package. Operator guide: [waermespeicher-schichtung-teq.md](../konfiguration/waermespeicher-schichtung-teq.md); physics in [thermals-p2.md](../dev/done/thermals-p2.md).
 
@@ -294,7 +302,7 @@ EHAL-Com has no status bar of its own. Write mode and service state live on **Op
 - **Silent-Modus** toggle (section *Schreibzugriffe*): when on, the optimizer does not write setpoints to the hub.
 - **Status**, **PID**, **Lock**, and **Letzter Optimierungslauf**: state of the optimizer service (`main.py`) and the age of its last run.
 
-Setpoints reach the hub only in **Loud mode while the service is running**. Loud mode with a stopped service writes nothing. EHAL-Com shows the outcome of the last run: **Live-Schreiben** reports `Silent-Modus beim letzten Lauf …` when that run was silent. On Loxone, a caption at the top shows when the Miniserver last called Earnie (`Letzter Aufruf vom Miniserver`).
+Setpoints reach the hub only in **Loud mode while the service is running**. Loud mode with a stopped service writes nothing. EHAL-Com shows the outcome of the last run: **Live-Schreiben** reports `Silent-Modus beim letzten Lauf …` when that run was silent. If a Loud run stored no write records, it shows a warning instead and lists the planned setpoints, not the written ones. On Loxone, a caption at the top shows when the Miniserver last called Earnie (`Letzter Aufruf vom Miniserver`).
 
 ### Live Read
 
@@ -307,7 +315,7 @@ Only `sens_*` and `get_*` (measurements / inputs). The table lists **all** expec
 | `Wert (EHAL)`          | Value in EHAL units (Loxone: after role-registry conversion; HA push: already canonical on the wire). `—` when no conversion path exists. |
 | `Status`               | `OK`, `Warnung`, error states, or `Kein Mapping`. For push backends also push-state strings (`0 angenommen (verstummt)`, `0 (gehalten)`, `Zuletzt bekannt (gehalten)`, …). `Nicht aktiviert (nicht verwendet)`: a consumer signal receives values but is not activated in the signal list, so Earnie ignores it (e.g. no heat pump power in the energy flow); `Detail` keeps the receipt state. Activate it under **Optionale Signale aktivieren / deaktivieren**. |
 | `Detail`               | Error text (empty when OK); optional empty rows may show a fallback hint. |
-| `Zuletzt gelesen` (last read) | Timestamp of the query; for push rows the inbox `last_ts` (local clock) is preferred when available. |
+| `Zuletzt gelesen` (last read) | Pull rows: timestamp of the query. Push rows: the inbox `last_ts` (local clock), i.e. when the hub last pushed; `—` when the signal was never received. |
 
 **Units:** from role `loxone` / `openems` blocks in `share/ehal/roles/*.json` (HA: EHAL wire units; conversion happens in the carrier YAML Jinja) — not hard-coded in the UI. Every value cell shows its unit as a suffix when known.
 
@@ -414,10 +422,14 @@ Shown for **every** backend. This is the binding UI (replaces the former Loxone 
 | Hub unit | Loxone only — expected hub unit from role `loxone` block (e.g. **kW**); omitted for HA |
 | EHAL unit | EHAL wire unit from the registry (e.g. **W**); `—` if none |
 | Required by | EHAL functions from `ehal/functions.py` that need the field |
-| Match | Read = last received in the push inbox (age) / never; write = last hub fetch of `status.json` / never published |
+| Match | Read = last received in the push inbox (age) / never; older than five minutes shows a warning, except for digital signals (0/1 states such as `sens_heating_active`, `sens_evcs_connected`, `sens_absent_mode`): they are pushed on a change only, so their last value stays valid. Write = last hub fetch of `status.json` / never published; a value published after the last fetch shows as waiting for the fetch. `heartbeat_earnie` is not in the publish ledger (`status.json` fills in the current Unix time on every fetch): it shows the last `status.json` fetch, or „status.json noch nicht abgerufen“. A heartbeat push alone does not count as a fetch.. Mapped MQTT topics are pushed on a change too: they stay valid while the MQTT session is up (see [MQTT](../einrichtung/mqtt.md)). |
 | Export | Loxone: ZIP of VO + VI pilot templates + README; VO either HTTP to Earnie or **MQTT via the LoxBerry MQTT gateway (UDP)**, see [MQTT](../einrichtung/mqtt.md); HA: use the **YAML-Paket** section (activated signals) |
 
-Optional signals default off; toggle them in the Signalliste (on = add activation key, off = remove). Required signals are activated when a component is saved in the Hauskonfigurator. For a grid-tied house battery this includes `ess.{id}.sens_ess_power`; changing an inverter's `ac_connection` re-evaluates its batteries. Existing packs get the key through the configuration migration (`dm4.required_signal_activation`); regenerate the HA YAML package afterwards and map the new `ENTITY_ess_<id>_sens_ess_power` placeholder.
+Optional signals default off; toggle them in the Signalliste (on = add activation key, off = remove). The key is spelled as the EHAL mapping stores it: heat-pump and pool read fields (e.g. `sens_temperature_heat_storage`, `sens_temperature_water`) bare, the others qualified. A field stored under either spelling counts as activated, switching it on adds no second key, and switching it off removes every spelling. Only a click writes: each render reseeds the switches from the files, so a switch state left in a browser tab (e.g. kept open over a container restart) never changes the configuration. Packs that already hold both get them merged by the configuration migration (`dm6.consumer_bare_bindings`; two different Merker names block it until one is removed). Required signals are activated when a component is saved in the Hauskonfigurator. For a grid-tied house battery this includes `ess.{id}.sens_ess_power`; changing an inverter's `ac_connection` re-evaluates its batteries. Existing packs get the key through the configuration migration (`dm4.required_signal_activation`); regenerate the HA YAML package afterwards and map the new `ENTITY_ess_<id>_sens_ess_power` placeholder.
+
+**Wallboxes:** the charger signals are listed under the wallbox (`evcs.<Wallbox>.*`), one set per wallbox an EV uses, and the switches write `components.json` (`wallboxes[].ehal_bindings`). The EV lists its vehicle signals only (`ev.<E-Auto>.*`). `set_evcs_max_current` is required; `sens_evcs_connected` is required at a wallbox a dynamically assigned EV may use.
+
+**Export check:** the export stops with a message naming the Kennung when a qualified ID is not accepted by Earnie (allowed: `a–z`, `0–9`, `_`, at most 64 characters). IDs created in the Hauskonfigurator always fit; a hand-edited or imported id may not.
 
 Always listed as **Pflicht** (not a binding, not in the optional-signals expander): `heartbeat_smarthome` (read / Hub→Earnie) and `heartbeat_earnie` (write / Earnie→Hub, Unix seconds). Control receipt `request_optimize` (VO cmd `Earnie_Request_Optimize` → daemon POST; age stays OK even when older than five minutes).
 

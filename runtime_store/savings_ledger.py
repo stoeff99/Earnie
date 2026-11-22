@@ -20,14 +20,18 @@ from typing import Any, Callable
 from data.live_consumption import is_dead_telemetry_snapshot
 from optimizer import battery as bat
 from optimizer.milp_horizon import (
-    aggregate_battery_params_for_load,
     coerce_battery_params_list,
+    plant_battery_params,
+    plant_soc_percent,
 )
-from optimizer.slot_duration import DEFAULT_DT_H, validate_dt_h
+from optimizer.slot_duration import DEFAULT_DT_H, quarter_hour_grid, validate_dt_h
 from runtime_store.power_interval_sampler import MIN_SAMPLE_COUNT_FOR_MEAN
 from runtime_store.savings_ledger_flex import FlexDayInputs, retime_flex_day
 
-SAVINGS_V = 2
+# 3 (decided 2026-11-19, maintainer): v2 with the plant battery over all house batteries in the
+# shadow plant (spec § 3, § 9 item 15). Houses with one battery book the same as v2, but every
+# chain restarts once.
+SAVINGS_V = 3
 # First version with the day replay (flex re-timing, spec § 7); ``SAVINGS_V`` reaches it in Ledger P9d.
 SAVINGS_V_REPLAY = 2
 
@@ -134,13 +138,49 @@ def slot_skip_reason(closed: dict[str, Any] | None) -> str | None:
 
 
 def shadow_battery_params(battery_params: dict | list[dict] | None) -> dict:
-    """Battery the shadow plant runs: one ESS as is, several aggregated like the baseline."""
+    """Battery the shadow plant runs: one ESS as is; several as the plant battery of the
+    optimized run and the baselines (``plant_battery_params``; spec § 3).
+
+    ``battery_params`` are the house-balance batteries
+    (``optimizer.sim_horizon_chart_soc.house_balance_batteries``); the caller filters them,
+    because this module reads no config.
+    """
     batteries = coerce_battery_params_list(battery_params)
     if not batteries:
         raise ValueError("savings ledger: no house battery parameters for the shadow plant")
     if len(batteries) == 1:
         return batteries[0]
-    return aggregate_battery_params_for_load(batteries)
+    return plant_battery_params(batteries)
+
+
+_SOC_EDGES = ("start", "end")
+
+
+def with_plant_soc(closed: dict[str, Any] | None, batteries: list[dict]) -> dict[str, Any] | None:
+    """``closed`` with ``soc_start_percent`` / ``soc_end_percent`` of the plant battery.
+
+    The sampler logs the SoC of the first house battery there. With one house battery that is
+    the plant's and ``closed`` is returned as is. With several (``batteries``: the
+    house-balance batteries) the plant SoC is the energy-weighted SoC of the battery maps
+    ``soc_<edge>_percent_by_ess``. When a map is missing or lacks a battery, the plant SoC of
+    that edge is unknown and the key is removed: the ledger treats the slot as one without
+    SoC (a chain start waits for the next slot, the day close carries the correction).
+    """
+    if not isinstance(closed, dict) or len(batteries) < 2:
+        return closed
+    out = dict(closed)
+    for edge in _SOC_EDGES:
+        key = f"soc_{edge}_percent"
+        by_ess = closed.get(f"{key}_by_ess")
+        out.pop(key, None)
+        if not isinstance(by_ess, dict):
+            continue
+        try:
+            soc = plant_soc_percent(batteries, {str(k): float(v) for k, v in by_ess.items()})
+        except ValueError:
+            continue
+        out[key] = round(soc, 2)
+    return out
 
 
 def _cost_eur(grid_kwh: float, k_act_cent: float, k_push_cent: float) -> float:
@@ -240,6 +280,9 @@ CHAIN_FIRST_RUN = "first_run"
 CHAIN_STATE_UNREADABLE = "state_unreadable"
 CHAIN_SAVINGS_V_CHANGED = "savings_v_changed"
 CHAIN_BACKFILL = "backfill"
+# A house battery was added to or removed from the configuration: the shadow plant changes
+# (with or without shadow battery), so the chain cannot continue.
+CHAIN_BATTERY_CHANGED = "battery_changed"
 
 DayBounds = Callable[[datetime], tuple[datetime, datetime]]
 # v2: consumers, profiles and windows of the day a state holds open (I/O lives with the caller,
@@ -576,18 +619,13 @@ def _slot_row(inp: LedgerInput, slot: LedgerSlot, dt_h: float) -> dict[str, Any]
 
 
 def _grid_slot_starts(day_start: datetime, day_end: datetime, dt_h: float) -> list[datetime]:
-    """Slot starts in ``[day_start, day_end)`` on the quarter-hour grid."""
+    """Slot starts in ``[day_start, day_end)`` on the quarter-hour grid, stepped in real time."""
     step = timedelta(hours=dt_h)
     minutes = int(step.total_seconds() // 60)
     first = day_start.replace(minute=(day_start.minute // minutes) * minutes, second=0, microsecond=0)
     if first < day_start:
         first += step
-    starts = []
-    moment = first
-    while moment < day_end:
-        starts.append(moment)
-        moment += step
-    return starts
+    return quarter_hour_grid(first, day_end, step=step, include_end=False)
 
 
 def _slots_in_day(day_start: datetime, day_end: datetime, dt_h: float) -> int:

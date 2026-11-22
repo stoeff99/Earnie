@@ -183,7 +183,7 @@ def plan(store, monkeypatch):
     )
     calls: list[float] = []
 
-    def fake_forecast_one(*, lat, lon, tilt, azimuth, kwp, target_hours):
+    def fake_forecast_one(*, lat, lon, tilt, azimuth, kwp, target_hours, shading=None):
         calls.append(kwp)
         return [kwp / 10] * len(target_hours), True
 
