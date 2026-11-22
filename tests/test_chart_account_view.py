@@ -406,3 +406,22 @@ def test_aligned_ranges_put_both_zeros_at_the_same_height():
     assert -l_lo / (l_hi - l_lo) == pytest.approx(-r_lo / (r_hi - r_lo))
     assert l_lo <= -35.0 and l_hi >= 3.5
     assert r_lo <= -3.0 and r_hi >= 14.0
+
+
+@pytest.mark.parametrize("saving", [[], [0.0, 0.0]])
+def test_aligned_ranges_survive_a_saving_book_that_has_not_started(saving):
+    """No savings yet (empty or all zero): no ZeroDivisionError, both zeros still aligned."""
+    from ui.chart_account_render import aligned_ranges
+
+    (l_lo, l_hi), (r_lo, r_hi) = aligned_ranges([-35.0, 3.5], saving)
+
+    assert -l_lo / (l_hi - l_lo) == pytest.approx(-r_lo / (r_hi - r_lo))
+    assert r_hi > r_lo
+
+
+def test_aligned_ranges_survive_all_zero_axes():
+    from ui.chart_account_render import aligned_ranges
+
+    (l_lo, l_hi), (r_lo, r_hi) = aligned_ranges([0.0], [])
+
+    assert l_hi > l_lo and r_hi > r_lo

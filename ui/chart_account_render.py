@@ -511,9 +511,11 @@ _AXIS_PAD = 0.05
 
 
 def _span(values: list[float]) -> tuple[float, float]:
-    """Data range including 0, padded."""
+    """Data range including 0, padded; all-zero (or no) data spans 0..1."""
     low = min([0.0, *values])
     high = max([0.0, *values])
+    if high == low:
+        return 0.0, 1.0
     pad = (high - low) * _AXIS_PAD or 1.0
     return low - (pad if low < 0 else 0.0), high + (pad if high > 0 else 0.0)
 
