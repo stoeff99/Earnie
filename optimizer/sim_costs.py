@@ -302,8 +302,13 @@ def _run_savings_horizons(
     sunrise_soc_min_index: int | None,
     consumers: list | None,
     current_soc_by_id: dict[str, float] | None = None,
+    optimized_battery_params: dict | list[dict] | None = None,
 ) -> _SavingsRows:
-    """Optimierter Open-Loop-Lauf plus freie und ziel-gematchte Baseline."""
+    """Optimierter Open-Loop-Lauf plus freie und ziel-gematchte Baseline.
+
+    ``optimized_battery_params``: battery params of the live plan (e.g. the buffer floor,
+    ``optimizer.battery_buffer``) for the optimized run; ``None`` = configured params.
+    """
     from optimizer.charging_context import apply_horizon_charging_limits
     from optimizer.sim_baseline import (
         simulate_baseline_horizon,
@@ -331,6 +336,7 @@ def _run_savings_horizons(
             flexible_consumers=consumers,
             commit_hours=len(matrix),
             current_soc_by_id=current_soc_by_id,
+            battery_params=optimized_battery_params,
         )
     with record_phase("savings_baseline"):
         baseline_rows = simulate_baseline_horizon(
@@ -540,6 +546,7 @@ def calculate_optimization_savings(
     consumers: list | None = None,
     current_soc_by_id: dict[str, float] | None = None,
     baseline_initial_soc: float | None = None,
+    optimized_battery_params: dict | list[dict] | None = None,
 ) -> dict:
     """Berechnet die Einsparung in Euro gegenüber einer nicht-optimierten Baseline-Simulation.
 
@@ -574,6 +581,7 @@ def calculate_optimization_savings(
         sunrise_soc_min_index=sunrise_soc_min_index,
         consumers=consumers,
         current_soc_by_id=current_soc_by_id,
+        optimized_battery_params=optimized_battery_params,
     )
     return _assemble_savings_dict(
         matrix,
