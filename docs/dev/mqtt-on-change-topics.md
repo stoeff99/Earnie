@@ -20,5 +20,5 @@ after each message, and Live-Lesen showed "Kein Mapping".
 | Session down | Stale: the 5 min last-known hold applies, then a read error (fail loud). Changes during an outage arrive only if the source publishes retained. |
 | Values | No zero rule: 0 is a plain value, and a quiet power value holds (no "0 angenommen"). |
 | Hub link | `link_alive` ignores on-change rows (their age says nothing about the VO link). |
-| Session state | Daemon: the running carrier. UI process: `ehal_mqtt_status.json` (`connected`). Missing file = not connected. |
+| Session state | Daemon: the running carrier. Without a carrier (UI process): `ehal_mqtt_status.json` (`connected`), only while MQTT is enabled and the file's host, port and topic prefix match the current settings. Missing file = not connected. |
 | UI | Signalliste: OK while valid, age shown with "(bei Änderung)". Live-Lesen: an expired value is shown with its read state ("Lesefehler") and a Detail note, not "Kein Mapping". |

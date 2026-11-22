@@ -113,7 +113,10 @@ def update_below_floor_since(
             bid = _battery_id(bat, index)
             active_ids.add(bid)
             if bid not in soc_by_id:
-                raise ValueError(f"Batterie-Puffer {bid}: kein Ist-SoC für den Zyklus.")
+                # Multi-ESS: a battery without its own SoC is dropped from this cycle's plan
+                # (filter_planning_batteries_with_soc); its below-floor time stays as it was.
+                logger.warning("Batterie-Puffer %s: kein Ist-SoC — Zustand unverändert.", bid)
+                continue
             floor = float(bat["min_soc"]) + buffer
             below = float(soc_by_id[bid]) < floor - REPORT_TOLERANCE_PCT
             if below and bid not in entries:
@@ -220,14 +223,17 @@ def _last_slot_ending_by(
         start = matrix[t].get("slot_datetime")
         if not isinstance(start, datetime):
             raise ValueError(f"Batterie-Puffer: Matrix-Slot {t} ohne slot_datetime.")
-        if _naive(start) + timedelta(hours=dt_h) <= _naive(deadline):
+        if _comparable(start, deadline) + timedelta(hours=dt_h) <= _comparable(deadline, start):
             last = t
         else:
             return 0 if last is None else last
     return None
 
 
-def _naive(dt: datetime) -> datetime:
+def _comparable(dt: datetime, other: datetime) -> datetime:
+    """``dt`` as is when both are zone-aware (real instants), else its wall-clock time."""
+    if dt.tzinfo is not None and other.tzinfo is not None:
+        return dt
     return dt.replace(tzinfo=None) if dt.tzinfo is not None else dt
 
 

@@ -105,13 +105,25 @@ def test_mapped_topic_is_recorded_as_on_change(tmp_path, monkeypatch):
 
 
 def test_session_state_comes_from_the_status_file_without_a_carrier(tmp_path, monkeypatch):
+    from dataclasses import replace
+
+    from tests.test_ehal_mqtt import _SETTINGS
+
     path = tmp_path / "mqtt.json"
     monkeypatch.setattr(ehal_mqtt, "_link_status_path", lambda: str(path))
+    monkeypatch.setattr(ehal_mqtt, "settings_from_config", lambda: _SETTINGS)
+    link = {"host": _SETTINGS.host, "port": _SETTINGS.port, "topic_prefix": _SETTINGS.topic_prefix}
     assert not ehal_mqtt.mqtt_session_connected()  # no file: not connected
-    ehal_mqtt._write_link_status({"connected": True})
+    ehal_mqtt._write_link_status({**link, "connected": True})
     assert ehal_mqtt.mqtt_session_connected()
-    ehal_mqtt._write_link_status({"connected": False})
+    ehal_mqtt._write_link_status({**link, "connected": False})
     assert not ehal_mqtt.mqtt_session_connected()
+
+    ehal_mqtt._write_link_status({**link, "connected": True})
+    monkeypatch.setattr(ehal_mqtt, "settings_from_config", lambda: replace(_SETTINGS, enabled=False))
+    assert not ehal_mqtt.mqtt_session_connected()  # MQTT switched off since
+    monkeypatch.setattr(ehal_mqtt, "settings_from_config", lambda: replace(_SETTINGS, host="10.0.0.9"))
+    assert not ehal_mqtt.mqtt_session_connected()  # file is from another broker
 
 
 def test_signal_list_shows_quiet_on_change_topic_as_ok(link):

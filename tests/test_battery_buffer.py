@@ -109,9 +109,23 @@ def test_state_is_dropped_when_the_buffer_is_switched_off():
     assert buf.update_below_floor_since(_battery(buffer_soc=0.0), {"haus": 8.0}, now=NOW) == {}
 
 
-def test_missing_soc_fails_loud():
-    with pytest.raises(ValueError, match="Ist-SoC"):
-        buf.update_below_floor_since(_battery(), {}, now=NOW)
+def test_battery_without_soc_keeps_its_state_and_the_others_are_tracked():
+    other = _battery(id="garage")
+    buf.update_below_floor_since([_battery(), other], {"haus": 8.0, "garage": 50.0}, now=NOW)
+    later = NOW + timedelta(hours=1)
+    since = buf.update_below_floor_since([_battery(), other], {"garage": 8.0}, now=later)
+    assert since == {"haus": NOW, "garage": later}
+
+
+def test_deadline_compares_real_instants_across_zones():
+    from zoneinfo import ZoneInfo
+
+    zurich = ZoneInfo("Europe/Zurich")
+    start = datetime(2026, 11, 19, 12, 0, tzinfo=zurich)
+    matrix = [{"slot_datetime": start + timedelta(minutes=15 * i)} for i in range(8)]
+    # 12:00 UTC is 13:00 in Zurich: slots ending by then are 0..3.
+    deadline = datetime(2026, 11, 19, 12, 0, tzinfo=ZoneInfo("UTC"))
+    assert buf._last_slot_ending_by(matrix, 8, deadline, 0.25) == 3
 
 
 # --- planning ----------------------------------------------------------------------------------

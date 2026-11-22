@@ -151,8 +151,18 @@ def mqtt_session_connected() -> bool:
         carrier = _carrier
     if carrier is not None:
         return carrier.is_connected()
+    settings = settings_from_config()
+    if not settings.enabled:
+        return False
     status = load_link_status()
-    return bool(status and status.get("connected") is True)
+    if not status or status.get("connected") is not True:
+        return False
+    # A file from an earlier broker setup says nothing about the current one.
+    return (
+        status.get("host") == settings.host
+        and status.get("port") == settings.port
+        and status.get("topic_prefix") == settings.topic_prefix
+    )
 
 
 def load_link_status() -> dict[str, Any] | None:

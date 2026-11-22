@@ -281,7 +281,12 @@ def _apply_live_battery_buffer(
     soc_by_id = dict(current_soc_by_id or {})
     if len(batteries) == 1:
         soc_by_id.setdefault(str(batteries[0].get("id") or "ess_0"), float(current_soc))
-    since = update_below_floor_since(battery_params, soc_by_id, now=datetime.now())
+    from zoneinfo import ZoneInfo
+
+    import config
+
+    now = datetime.now(ZoneInfo(config.get_planning_timezone()))
+    since = update_below_floor_since(battery_params, soc_by_id, now=now)
     return apply_buffer_to_battery_params(battery_params, since)
 
 
