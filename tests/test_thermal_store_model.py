@@ -322,3 +322,19 @@ def test_house_sim_follows_the_plan_through_the_target():
     assert run_ends
     for end in run_ends:
         assert temps[end] == pytest.approx(targets[end], abs=0.5)
+
+
+def test_live_outdoor_fallback_reads_the_plant_binding_of_the_active_house(monkeypatch):
+    """Open-Meteo down: the mapped plant outdoor sensor is found without a passed document."""
+    from house_config import profiles_store
+    from integrations import ehal_live
+    from optimizer import thermal_live_store as tls
+
+    doc = {"plant": {"ehal_bindings": {"sens_temperature_outside": "Aussen_T"}}}
+    monkeypatch.setattr(profiles_store, "load_default_house_profiles_doc", lambda: doc)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        ehal_live, "read_optional_temp_c", lambda name: seen.append(name) or 3.5
+    )
+    assert tls._read_live_outdoor_temp_c(None) == 3.5
+    assert seen == ["Aussen_T"]

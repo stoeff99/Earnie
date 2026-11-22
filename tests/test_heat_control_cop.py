@@ -540,6 +540,22 @@ def test_state_4_is_written_for_a_forced_heat_pump():
     assert off == {key: 2.0}
 
 
+def test_snapshot_records_state_4_for_a_forced_heat_pump(monkeypatch):
+    """The watchdog compares against the snapshot: it must hold the 4 that was sent."""
+    from integrations import loxone_writes as lw
+
+    key = f"heatpump.{_CID}.set_sg_ready_state"
+    consumer = {"id": _CID, "name": "WP", "type": "thermal_annual", "ehal_bindings": {key: ""}}
+    monkeypatch.setattr(lw.config, "get_flexible_consumers", lambda **_kw: [consumer])
+    monkeypatch.setattr(lw, "ess_c1_kind_values", lambda *_a, **_kw: [])
+    monkeypatch.setattr(lw, "_ess_battery_params", lambda params, _cfg: params or {})
+    snap = lw.build_sent_loxone_snapshot(
+        0, 0.0, 0.0, {_CID: 2.0}, {}, heat_forced_charge=frozenset({_CID})
+    )
+    assert snap[key] == 4.0
+    assert lw.build_sent_loxone_snapshot(0, 0.0, 0.0, {_CID: 2.0}, {})[key] == 3.0
+
+
 def test_observability_names_the_efficiency_source():
     from optimizer.thermal_live_cop import efficiency_observability
 

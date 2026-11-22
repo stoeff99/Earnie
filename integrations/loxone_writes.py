@@ -668,6 +668,8 @@ def build_sent_loxone_snapshot(
     *,
     export_cap_kw: float | None | object = _OMIT_EXPORT_CAP,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
     automatik_discharge_cap_kw: float | None = None,
     battery_params: dict | None = None,
 ) -> dict[str, float]:
@@ -722,6 +724,10 @@ def build_sent_loxone_snapshot(
             consumer_pv_follow,
             send=False,
             heat_controls=heat_controls,
+            # Same targets and forced charge as the write path, so the watchdog expects
+            # the values actually sent (SG-Ready 4, store target).
+            heat_storage_targets=heat_storage_targets,
+            heat_forced_charge=heat_forced_charge,
         )
 
     return snapshot

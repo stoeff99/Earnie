@@ -480,10 +480,17 @@ def live_store_plan_for_matrix(
 
 
 def _read_live_outdoor_temp_c(house_doc: dict | None) -> float | None:
-    """Live outdoor temperature (plant ``sens_temperature_outside``); None when unmapped/empty."""
+    """Live outdoor temperature (plant ``sens_temperature_outside``); None when unmapped/empty.
+
+    The binding sits in the house document's plant block: without a document from the caller
+    the active one is loaded (only reached when the Open-Meteo forecast failed).
+    """
+    from house_config.profiles_store import load_default_house_profiles_doc
     from integrations.ehal_live import read_optional_temp_c
     from settings.ehal_marker_resolve import marker_sens_temperature_outside
 
+    if house_doc is None:
+        house_doc = load_default_house_profiles_doc()
     return read_optional_temp_c(marker_sens_temperature_outside(house_doc=house_doc))
 
 

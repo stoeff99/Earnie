@@ -207,6 +207,8 @@ def build_sent_loxone_snapshot(
     *,
     export_cap_kw: float | None | object = OMIT_EXPORT_CAP,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
     automatik_discharge_cap_kw: float | None = None,
     battery_params: dict | None = None,
 ) -> dict[str, float]:
@@ -221,6 +223,8 @@ def build_sent_loxone_snapshot(
         consumer_pv_follow,
         export_cap_kw=export_cap_kw,
         heat_controls=heat_controls,
+        heat_storage_targets=heat_storage_targets,
+        heat_forced_charge=heat_forced_charge,
         automatik_discharge_cap_kw=automatik_discharge_cap_kw,
         battery_params=battery_params,
     )

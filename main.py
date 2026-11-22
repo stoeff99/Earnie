@@ -1099,6 +1099,8 @@ def _main_cycle(
             consumer_pv_follow,
             export_cap_kw=export_cap,
             heat_controls=heat_controls,
+            heat_storage_targets=heat_storage_targets,
+            heat_forced_charge=heat_forced_charge,
             automatik_discharge_cap_kw=automatik_discharge_cap,
             battery_params=apply_effective_ess_limits(
                 config.get_battery_params(), telemetry=telemetry_for_export
