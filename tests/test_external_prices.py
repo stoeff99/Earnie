@@ -151,13 +151,24 @@ def test_market_uses_published_values_and_estimates_the_rest(store):
     published = [(2.0 + 1.5 * epex[slot]) / 100 for slot in slots[:32]]
     ext.ingest_ekz_payload(_payload(published), now=_DAY)
 
-    result = ext.external_market(slots, epex)
+    result = ext.external_market(slots, epex, now=_DAY)
 
     assert result.estimated == 8
     assert result.fit == (pytest.approx(2.0), pytest.approx(1.5))
     assert result.market[slots[0]] == pytest.approx(2.0 + 1.5 * 10.0)
     assert result.market[slots[-1]] == pytest.approx(2.0 + 1.5 * epex[slots[-1]])
     assert ext.store_summary()["pairs"] == 32
+
+
+def test_market_prunes_pairs_against_the_given_now(store):
+    slots = [_DAY + _SLOT * i for i in range(40)]
+    epex = {slot: 10.0 + i for i, slot in enumerate(slots)}
+    published = [(2.0 + 1.5 * epex[slot]) / 100 for slot in slots[:32]]
+    ext.ingest_ekz_payload(_payload(published), now=_DAY)
+
+    later = _DAY + timedelta(days=ext.KEEP_DAYS + 1)
+    ext.external_market(slots, epex, now=later)
+    assert ext.store_summary()["pairs"] == 0
 
 
 def test_market_without_pairs_is_an_error(store):
@@ -171,7 +182,7 @@ def test_market_gap_without_epex_is_an_error(store):
     ext.ingest_ekz_payload(_payload([(5.0 + i) / 100 for i in range(29)]), now=_DAY)
     epex = {slot: float(i) for i, slot in enumerate(slots[:29])}
     with pytest.raises(ValueError, match="weder einen externen Preis"):
-        ext.external_market(slots, epex)
+        ext.external_market(slots, epex, now=_DAY)
 
 
 # --- import seam ---------------------------------------------------------------------------
