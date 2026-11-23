@@ -1,6 +1,10 @@
 """RuleRef P3b: end-SoC valuation and the SE window view on L2 (spec §§ 3.3, 5)."""
 from __future__ import annotations
 
+from ui.backtesting_baseline import SeBaseline
+
+LIVE_L0 = SeBaseline("l0", "live")
+
 import os
 from datetime import datetime, timedelta
 
@@ -33,6 +37,12 @@ from ui.chart_baseline_label import (
 )
 
 os.environ.setdefault("EARNIE_OFFLINE", "1")
+
+@pytest.fixture(autouse=True)
+def _rule_reference_switch(monkeypatch):
+    """The ladder UI shows only with the hidden switch ``rule_reference``."""
+    monkeypatch.setenv("EARNIE_UI_MODES", "scenario_explorer,rule_reference")
+
 
 _DAY = pd.Timestamp("2026-06-10")
 _BATTERY = {"battery_capacity_kwh": 10.0, "efficiency": 0.9}
@@ -136,7 +146,7 @@ def _meta(correction: float | None) -> dict:
 
 
 def _live_row(meta: dict) -> dict:
-    return next(row for row in build_annual_cost_rows(meta) if row["Szenario"] == "live")
+    return next(row for row in build_annual_cost_rows(meta, LIVE_L0) if row["Szenario"] == "live")
 
 
 def test_saving_column_includes_the_soc_term_and_names_it():

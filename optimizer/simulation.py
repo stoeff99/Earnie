@@ -65,6 +65,13 @@ from .sim_costs import (
     hourly_savings_euro_from_rows,
     total_consumption_kwh_from_rows,
 )
+from .sim_house_batteries import (
+    HouseBatteryControl,
+    finalize_house_row_energy,
+    house_battery_start_socs,
+    house_chart_row,
+    house_plant_soc,
+)
 from .sim_horizon_helpers import (
     _apply_forced_grid_recharge_at_horizon_end,
     _cap_flex_delivery,
@@ -83,6 +90,8 @@ from optimizer.sim_horizon_chart_soc import (  # noqa: F401  (re-exported)
     _initial_soc_by_ess,
     _resolve_chart_soc_entities,
     _resolve_horizon_batteries,
+    house_balance_batteries,
+    plant_start_soc,
     _resolve_standby_chart_plans,
     _seed_virtual_soc_for_chart,
 )
@@ -269,8 +278,11 @@ def _prepare_horizon_state(
     if disable_horizon_soc_anchor:
         horizon_terminal_soc = None
     else:
+        # The MILP terminal anchor binds all house batteries: it needs the plant SoC.
         horizon_terminal_soc = (
-            None if options.sunrise_soc_min_index is not None else initial_soc
+            None
+            if options.sunrise_soc_min_index is not None
+            else plant_start_soc(batteries, initial_soc, current_soc_by_id)
         )
     standby_plans, standby_packs_by_id = _resolve_standby_chart_plans(
         optimization_matrix, current_soc_by_id
@@ -367,11 +379,77 @@ def _solve_slot_mpc(
     )
 
 
+def _solve_slot_mpc_house(
+    setup: _HorizonSetup,
+    house: list[dict],
+    row: dict,
+    soc_by_house: dict[str, float],
+    hour_index: int,
+    slot_in: _SlotInputs,
+) -> tuple[dict, tuple[HouseBatteryControl, ...], dict[str, float] | None]:
+    """Slot re-solve with several house batteries: the MILP plans each from its simulated SoC."""
+    options = setup.options
+    rel_sunrise = _relative_sunrise_index(
+        options.sunrise_soc_min_index, hour_index, len(slot_in.remaining_slice)
+    )
+    rel_hold = _relative_sunrise_index(
+        options.soc_hold_index, hour_index, len(slot_in.remaining_slice)
+    )
+    import_caps = options.import_caps_from(hour_index)
+    _, _, _, consumer_powers, consumer_pv_follow, plan, _ = milp_optimizer(
+        slot_in.remaining_slice,
+        row["hour"],
+        house_plant_soc(house, soc_by_house),
+        battery_params=setup.batteries,
+        k_push=options.k_push,
+        verbose=options.verbose,
+        consumers=setup.consumers_cfg,
+        consumer_remaining_kwh=slot_in.remaining,
+        spa_remaining_kwh=None,
+        flex_indices=slot_in.flex_indices,
+        charging_contexts=setup.charging_contexts,
+        filter_contexts=setup.filters,
+        terminal_soc_percent=_terminal_soc_for_commit(
+            options.commit_hours, len(slot_in.remaining_slice), setup.horizon_terminal_soc
+        ),
+        sunrise_soc_min_index=rel_sunrise,
+        consumer_continue_on=slot_in.continue_on,
+        soc_hold_index=rel_hold,
+        soc_hold_percent=options.soc_hold_percent if rel_hold is not None else None,
+        current_soc_by_id=_milp_soc_map(setup, soc_by_house),
+        import_caps=import_caps,
+    )
+    planned_by = plan.get("planned_soc_by_ess")
+    chart_row, controls = house_chart_row(
+        row,
+        soc_by_house,
+        house,
+        setup.battery_params,
+        setup.consumers_cfg,
+        plan,
+        planned_by,
+        consumer_powers,
+        consumer_pv_follow,
+    )
+    mark = first_slot_mark(plan, import_caps) if import_caps is not None else None
+    if mark is not None:
+        chart_row.update(mark)
+    return chart_row, controls, planned_by
+
+
+def _milp_soc_map(setup: _HorizonSetup, soc_by_house: dict[str, float]) -> dict[str, float] | None:
+    """SoC map for a solve inside the run: the start map with the simulated house batteries."""
+    if not soc_by_house:
+        return setup.current_soc_by_id
+    return {**(setup.current_soc_by_id or {}), **soc_by_house}
+
+
 def _refill_commit_buffer(
     setup: _HorizonSetup,
     sim_soc: float,
     hour_index: int,
     slot_in: _SlotInputs,
+    soc_by_house: dict[str, float],
 ) -> list[dict]:
     """Open-Loop-MILP über die Restmatrix; liefert die festgeschriebenen Slots."""
     options = setup.options
@@ -408,7 +486,8 @@ def _refill_commit_buffer(
         soc_hold_percent=(
             options.soc_hold_percent if rel_hold is not None else None
         ),
-        current_soc_by_id=setup.current_soc_by_id,
+        # The simulated SoC, not the run's start map (a refill starts inside the matrix).
+        current_soc_by_id=_milp_soc_map(setup, soc_by_house),
         import_caps=options.import_caps_from(hour_index),
     )
     commit_slots = _commit_slots_for_buffer(
@@ -439,31 +518,28 @@ def _soc_after_hold_slot(options: _HorizonOptions, slot_index: int, sim_soc: flo
     return float(hold)
 
 
-def _advance_delivered_and_flex_run(
+def _cap_flex_and_advance_run(
     setup: _HorizonSetup,
     chart_row: dict,
-    mode: int,
-    target_power: float,
     delivered_horizon: dict[str, float],
     generic_flex_run: dict[str, dict],
-) -> float:
-    """Kappt Flex auf das Horizontziel, schreibt den Run-State fort, finalisiert die Energie."""
+) -> None:
+    """Kappt Flex auf das Horizontziel und schreibt den Run-State fort."""
     _cap_flex_delivery(
         chart_row, setup.consumers_cfg, setup.horizon_limits, delivered_horizon
     )
     for consumer in setup.consumers_cfg:
         power = float(chart_row.get(consumer_column_name(consumer), 0.0) or 0.0)
         update_generic_flex_run_state(generic_flex_run, consumer, power)
-    old_soc = float(chart_row["Simulierter SoC (%)"])
-    return finalize_chart_row_energy(
-        chart_row, mode, target_power, old_soc, setup.battery_params
-    )
 
 
+def _slot_limit_marks(slot: dict) -> dict:
+    """Import cap limit and cause of a schedule slot (empty when the slot has none)."""
+    from .import_cap_report import SLOT_CAUSE_KEY, SLOT_LIMIT_KEY
 
-
-
-
+    if SLOT_LIMIT_KEY not in slot:
+        return {}
+    return {SLOT_LIMIT_KEY: slot[SLOT_LIMIT_KEY], SLOT_CAUSE_KEY: slot[SLOT_CAUSE_KEY]}
 
 
 @contextmanager
@@ -521,25 +597,49 @@ def _booking_rows(
     return rows
 
 
-def _reject_slot_resolve_with_several_house_batteries(batteries: list[dict]) -> None:
-    """``commit_hours=1`` plans one battery: it cannot run a house with several.
+def _house_soc_after_hold_slot(
+    options: _HorizonOptions,
+    slot_index: int,
+    house: list[dict],
+    soc_by_house: dict[str, float],
+    planned_soc_by_ess: dict[str, float] | None,
+) -> dict[str, float]:
+    """``_soc_after_hold_slot`` with several house batteries: the plant SoC is exactly the hold.
 
-    The slot re-solve carries one plant SoC from slot to slot and gives the MILP the aggregate
-    of the batteries (capacity of the first, power of all). With several house batteries that
-    is a different plant, so the run stops instead of booking it. Open loop plans each battery.
+    Each battery takes its planned SoC (its own SoC when the slot has no plan per battery); all
+    are then shifted by the same SoC difference, which moves the plant SoC by exactly that much.
     """
-    from .milp_defaults import _default_inverter_params
-    from .milp_inverter import coerce_inverter_params_list, filter_house_balance_batteries
-
-    house = filter_house_balance_batteries(
-        batteries, coerce_inverter_params_list(_default_inverter_params())
-    )
-    if len(house) > 1:
-        ids = ", ".join(str(b.get("id") or "?") for b in house)
-        raise ValueError(
-            f"commit_hours=1 (Neuberechnung je Slot) unterstützt nur eine Hausbatterie, "
-            f"gefunden: {ids}. Mit mehreren Hausbatterien commit_hours > 1 (Open-Loop) verwenden."
+    hold = options.soc_hold_percent
+    if options.soc_hold_index is None or hold is None or slot_index != options.soc_hold_index:
+        return soc_by_house
+    simulated = house_plant_soc(house, soc_by_house)
+    if abs(simulated - float(hold)) > 1.0:
+        logger.info(
+            "SoC-Hold Slot %d: simuliert %.1f %% statt %.1f %% (MILP-Plan nicht erreicht)",
+            slot_index,
+            simulated,
+            float(hold),
         )
+    base = {
+        ess_id: float((planned_soc_by_ess or {}).get(ess_id, soc))
+        for ess_id, soc in soc_by_house.items()
+    }
+    shift = float(hold) - house_plant_soc(house, base)
+    return {ess_id: soc + shift for ess_id, soc in base.items()}
+
+
+def _single_battery_soc_map(setup: _HorizonSetup, sim_soc: float) -> dict[str, float]:
+    """Simulated SoC of a single house battery for a refill solve (empty without a start map).
+
+    The MILP takes a single battery's start SoC from ``current_soc_by_id`` when it is there, so
+    a refill inside the matrix has to find the simulated SoC in the map, not the run's start.
+    """
+    by_id = setup.current_soc_by_id or {}
+    house = house_balance_batteries(setup.batteries)
+    if len(house) != 1:
+        return {}
+    ess_id = str(house[0].get("id") or "ess_0").strip() or "ess_0"
+    return {ess_id: float(sim_soc)} if ess_id in by_id else {}
 
 
 def _run_horizon_slots(
@@ -548,9 +648,18 @@ def _run_horizon_slots(
     on_progress,
     simulation_hour_offset: int | None,
 ) -> tuple[list[dict], float]:
-    """Läuft die Matrix Slot für Slot ab (MPC bzw. Open-Loop-Commit-Puffer)."""
+    """Läuft die Matrix Slot für Slot ab (MPC bzw. Open-Loop-Commit-Puffer).
+
+    With several house batteries every slot steps each battery (``sim_house_batteries``) and
+    ``sim_soc`` is their plant SoC.
+    """
     chart_rows: list[dict] = []
-    sim_soc = initial_soc
+    house = house_balance_batteries(setup.batteries)
+    several = len(house) > 1
+    soc_by_house = (
+        house_battery_start_socs(house, setup.current_soc_by_id) if several else {}
+    )
+    sim_soc = plant_start_soc(setup.batteries, initial_soc, setup.current_soc_by_id)
     soc_by_ess = _initial_soc_by_ess(setup, initial_soc)
     virtual_entries = _seed_virtual_soc_for_chart(setup, soc_by_ess)
     chart_entities = list(setup.chart_soc_entities) or list(setup.batteries)
@@ -565,37 +674,73 @@ def _run_horizon_slots(
             set_cbc_milp_context(simulation_hour_index=hour_base + i)
             slot_in = _slot_solve_inputs(setup, i, delivered_horizon, generic_flex_run)
             slot: dict | None = None
-            if setup.options.commit_hours <= 1:
+            controls: tuple[HouseBatteryControl, ...] = ()
+            planned_by: dict[str, float] | None = None
+            if setup.options.commit_hours <= 1 and several:
+                chart_row, controls, planned_by = _solve_slot_mpc_house(
+                    setup, house, row, soc_by_house, i, slot_in
+                )
+            elif setup.options.commit_hours <= 1:
                 sim_soc, chart_row, mode, target_power = _solve_slot_mpc(
                     setup, row, sim_soc, i, slot_in
                 )
             else:
                 if buffer_pos >= len(commit_buffer):
-                    commit_buffer = _refill_commit_buffer(setup, sim_soc, i, slot_in)
+                    commit_buffer = _refill_commit_buffer(
+                        setup,
+                        sim_soc,
+                        i,
+                        slot_in,
+                        soc_by_house if several else _single_battery_soc_map(setup, sim_soc),
+                    )
                     buffer_pos = 0
                 slot = commit_buffer[buffer_pos]
                 buffer_pos += 1
-                sim_soc, chart_row, mode, target_power = _chart_row_from_schedule_slot(
-                    setup.booking_matrix[i] if setup.booking_matrix is not None else row,
-                    sim_soc,
-                    setup.battery_params,
-                    setup.consumers_cfg,
-                    slot,
+                booked_row = (
+                    setup.booking_matrix[i] if setup.booking_matrix is not None else row
                 )
+                if several:
+                    planned_by = slot.get("planned_soc_by_ess")
+                    chart_row, controls = house_chart_row(
+                        booked_row,
+                        soc_by_house,
+                        house,
+                        setup.battery_params,
+                        setup.consumers_cfg,
+                        slot["milp_plan"],
+                        planned_by,
+                        dict(slot.get("consumer_powers") or {}),
+                        dict(slot.get("consumer_pv_follow") or {}),
+                    )
+                    chart_row.update(_slot_limit_marks(slot))
+                else:
+                    sim_soc, chart_row, mode, target_power = _chart_row_from_schedule_slot(
+                        booked_row,
+                        sim_soc,
+                        setup.battery_params,
+                        setup.consumers_cfg,
+                        slot,
+                    )
             # Attach start-of-slot per-ESS SoC (same timing as COL_SOC), then finalize
             # end-of-slot plant SoC, then advance maps for the next attach. Writing
             # COL_SOC (start) back into soc_by_ess lagged house columns by one slot
             # vs aggregate / Steuerbefehl underlay.
             attach_ess_soc_columns(chart_row, soc_by_ess, chart_entities)
-            sim_soc = _advance_delivered_and_flex_run(
-                setup,
-                chart_row,
-                mode,
-                target_power,
-                delivered_horizon,
-                generic_flex_run,
-            )
-            sim_soc = _soc_after_hold_slot(setup.options, i, sim_soc)
+            _cap_flex_and_advance_run(setup, chart_row, delivered_horizon, generic_flex_run)
+            if several:
+                soc_by_house = finalize_house_row_energy(
+                    chart_row, controls, house, soc_by_house
+                )
+                soc_by_house = _house_soc_after_hold_slot(
+                    setup.options, i, house, soc_by_house, planned_by
+                )
+                sim_soc = house_plant_soc(house, soc_by_house)
+            else:
+                old_soc = float(chart_row["Simulierter SoC (%)"])
+                sim_soc = finalize_chart_row_energy(
+                    chart_row, mode, target_power, old_soc, setup.battery_params
+                )
+                sim_soc = _soc_after_hold_slot(setup.options, i, sim_soc)
             _advance_chart_soc_after_slot(
                 setup,
                 chart_row,
@@ -604,6 +749,7 @@ def _run_horizon_slots(
                 slot_index=i,
                 virtual_entries=virtual_entries,
                 end_soc=sim_soc,
+                house_soc=soc_by_house if several else None,
             )
             chart_rows.append(chart_row)
             if on_progress is not None:
@@ -638,8 +784,9 @@ def simulate_horizon(
     """
     Simuliert einen Optimierungshorizont über die gesamte Matrix.
 
-    commit_hours=1: re-solve every matrix slot (Live MPC). One house battery only; with
-    several the run raises (the slot re-solve carries a single plant SoC).
+    commit_hours=1: re-solve every matrix slot (Live MPC).
+    Several house batteries: the run keeps a SoC per house battery in both paths
+    (``sim_house_batteries``); the SoC column is the plant SoC.
     commit_hours=N (N>1): wall-clock hours → commit N/dt_h QH slots open-loop (SE).
     disable_horizon_soc_anchor: keine Terminal-/Sonnenaufgangs-SOC_min-Gleichheit.
     flex_book_hours / flex_book_start: Flex nur in Absolutstunden
@@ -684,8 +831,6 @@ def simulate_horizon(
         flexible_consumers=flexible_consumers,
         current_soc_by_id=current_soc_by_id,
     )
-    if commit_hours <= 1:
-        _reject_slot_resolve_with_several_house_batteries(setup.batteries)
     if booking_matrix is not None:
         setup = replace(
             setup,
@@ -694,18 +839,23 @@ def simulate_horizon(
     chart_rows, sim_soc = _run_horizon_slots(
         setup, initial_soc, on_progress, simulation_hour_offset
     )
+    plant_initial_soc = plant_start_soc(setup.batteries, initial_soc, setup.current_soc_by_id)
     if sunrise_soc_min_index is None and not disable_horizon_soc_anchor:
         sim_soc = _apply_forced_grid_recharge_at_horizon_end(
             chart_rows,
             sim_soc,
             battery_params=setup.battery_params,
-            horizon_anchor_soc=initial_soc,
+            horizon_anchor_soc=plant_initial_soc,
         )
     _finalize_chart_rows_for_display(chart_rows, setup.charging_contexts)
-    if chart_rows:
+    if chart_rows and len(house_balance_batteries(setup.batteries)) > 1:
+        # Several house batteries: the end is their simulated plant SoC (the plant battery
+        # booked from the last row's start would not match the batteries' own limits).
+        chart_rows[-1]["_horizon_end_soc"] = round(float(sim_soc), 1)
+    elif chart_rows:
         chart_rows[-1]["_horizon_end_soc"] = horizon_end_soc_percent(
             chart_rows,
-            initial_soc,
+            plant_initial_soc,
             setup.battery_params,
         )
     return chart_rows

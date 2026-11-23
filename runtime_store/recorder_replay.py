@@ -84,9 +84,15 @@ def load_config_snapshot(recorder_root: Path | str, config_hash: str) -> dict[st
     root = Path(recorder_root)
     path = root / "configs" / f"{config_hash}.json"
     if not path.is_file():
+        hint = ""
+        if (root / "configs.pack.json").is_file():
+            hint = (
+                "; the snapshots are still packed: "
+                f"python -m runtime_store.recorder_config_pack {root}"
+            )
         raise FileNotFoundError(
             f"recorder config snapshot missing: {path} "
-            f"(config_hash={config_hash!r})"
+            f"(config_hash={config_hash!r}){hint}"
         )
     with path.open(encoding="utf-8") as handle:
         payload = json.load(handle)
@@ -972,6 +978,11 @@ def _segment_paths_for_root(root: Path) -> list[Path]:
         direct = sorted(root.glob("cycles_*.jsonl.gz"))
         if direct:
             return direct
+        if any(root.glob("cycles_*.jsonl.xz")):
+            raise FileNotFoundError(
+                f"recorder segments under {root} are still xz-packed: "
+                f"python -m runtime_store.recorder_config_pack {root}"
+            )
         os.environ["EARNIE_RUNTIME_PATH"] = str(root.parent)
         return cycle_recorder.list_segment_paths()
     finally:
@@ -1000,7 +1011,7 @@ def _entry_is_flagged(entry: dict[str, Any]) -> bool:
 
 def solve_hit_time_limit(record: dict[str, Any]) -> bool:
     """True when the plan of one solve record comes from a stage stopped at its time limit."""
-    if record.get("stage") == "strict":
+    if record.get("stage") in ("strict", "strict_incumbent"):
         return bool(record.get("strict_time_limit_hit"))
     if record.get("stage") == "gap":
         return bool(record.get("gap_time_limit_hit"))

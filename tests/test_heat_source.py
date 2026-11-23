@@ -1,6 +1,10 @@
 """SUSI P1 — heat sources, fuel path, heating rod part and SE fuel / CO2 rows."""
 from __future__ import annotations
 
+from ui.backtesting_baseline import SeBaseline
+
+LIVE_L0 = SeBaseline("l0", "live")
+
 from datetime import date, datetime, time
 
 import pandas as pd
@@ -42,11 +46,11 @@ def test_fuel_defaults_and_units():
     assert gas == {"type": "gas"}  # defaults are resolved by getters, never stored
     assert not heat_source_is_electric(gas)
     assert heat_source_efficiency(gas) == 0.95
-    assert fuel_price_eur_per_kwh(gas) == pytest.approx(0.1043)
-    assert fuel_price_eur_per_kwh({"type": "oil"}) == pytest.approx(1.048 / 10.0)
-    assert fuel_price_eur_per_kwh({"type": "pellets"}) == pytest.approx(322.0 / 4900.0)
+    assert fuel_price_eur_per_kwh(gas) == pytest.approx(0.1211)
+    assert fuel_price_eur_per_kwh({"type": "oil"}) == pytest.approx(1.75 / 10.0)
+    assert fuel_price_eur_per_kwh({"type": "pellets"}) == pytest.approx(447.7 / 4900.0)
     assert fuel_price_eur_per_kwh({"type": "oil", "fuel_price": 120.0}) == pytest.approx(0.12)
-    assert heating_rod_fuel_credit_cent_per_kwh(gas) == pytest.approx(10.43 / 0.95)
+    assert heating_rod_fuel_credit_cent_per_kwh(gas) == pytest.approx(12.11 / 0.95)
     assert heat_source_is_electric({"type": "electric_direct"})
     assert heat_source_efficiency({"type": "electric_direct"}) == 0.99
 
@@ -287,7 +291,7 @@ def test_collect_flex_gas_house_has_only_the_rod():
     rod = flex[0]
     assert rod["parent_id"] == "wp_heating"
     assert rod["parent_heat_electric"] is False
-    assert rod["fuel_credit_cent_per_kwh"] == pytest.approx(10.43 / 0.95)
+    assert rod["fuel_credit_cent_per_kwh"] == pytest.approx(12.11 / 0.95)
 
 
 def test_collect_flex_heat_pump_with_rod():
@@ -505,9 +509,9 @@ def test_heat_fuel_for_result_subtracts_rod_heat(monkeypatch):
     block = heat_fuel_for_result(df, {"_house_profile": _profile(consumer)})
     expected_fuel = 40.0 - 4.0 / 0.95
     assert block["fuel_kwh"] == pytest.approx(expected_fuel, abs=0.05)
-    assert block["fuel_eur"] == pytest.approx(expected_fuel * 0.1043, abs=0.01)
+    assert block["fuel_eur"] == pytest.approx(expected_fuel * 0.1211, abs=0.01)
     assert block["import_kwh"] == pytest.approx(48.0)
-    assert block["co2_kg"] == pytest.approx((48.0 * 226 + expected_fuel * 249) / 1000, abs=0.1)
+    assert block["co2_kg"] == pytest.approx((48.0 * 156 + expected_fuel * 271) / 1000, abs=0.1)
     assert block["carriers"] == ["gas"]
     assert block["heating_systems"] == {"wp_heating": "gas_rod"}
     assert block["rod_kwh"] == pytest.approx(4.0)
@@ -521,7 +525,7 @@ def test_heat_fuel_without_profile_has_only_electricity():
     )
     block = heat_fuel_for_result(df, None)
     assert block["fuel_kwh"] == 0.0
-    assert block["co2_kg"] == pytest.approx(4 * 226 / 1000, abs=0.1)
+    assert block["co2_kg"] == pytest.approx(4 * 156 / 1000, abs=0.1)
 
 
 def test_annual_cost_rows_add_fuel_to_jahres_kosten():
@@ -535,7 +539,7 @@ def test_annual_cost_rows_add_fuel_to_jahres_kosten():
             "historisch": {"fuel_kwh": 12000.0, "fuel_eur": 1250.0, "co2_kg": 4000.0}
         },
     }
-    row = build_annual_cost_rows(meta)[0]
+    row = build_annual_cost_rows(meta, LIVE_L0)[0]
     assert row["Jahres Kosten [€]"] == "2250,00 €"
     assert row["Brennstoffkosten [€]"] == "1250,00 €"
     assert row["CO2 [kg]"] == "4000"

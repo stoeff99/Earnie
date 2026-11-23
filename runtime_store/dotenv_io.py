@@ -41,7 +41,8 @@ def read_loxone_credentials() -> tuple[str, str, str]:
     return (
         _normalized_env_value("LOXONE_IP"),
         _normalized_env_value("LOXONE_USER"),
-        _normalized_env_value("LOXONE_PASS"),
+        # The password as stored: edge spaces and quotes are part of it.
+        str(os.getenv("LOXONE_PASS", "")),
     )
 
 
@@ -91,21 +92,6 @@ def needs_loxone_setup() -> bool:
     from runtime_store.ehal_setup import hub_credentials_configured
 
     return not hub_credentials_configured()
-
-
-def deferred_loxone_blocks_live() -> bool:
-    """True when main must wait for LOXONE_* before entering the live loop.
-
-    Greenfield may defer Loxone credentials during planning. That wait must
-    not apply when the active EHAL hub is HA/OpenEMS (network backends).
-    """
-    if not loxone_setup_deferred():
-        return False
-    if loxone_credentials_configured():
-        return False
-    from runtime_store.ehal_setup import is_network_backend
-
-    return not is_network_backend()
 
 
 def require_loxone_credentials_for_config() -> bool:
@@ -166,7 +152,7 @@ def _dotenv_values_safe(path: str) -> dict:
     from dotenv import dotenv_values
 
     try:
-        vals = dotenv_values(path)
+        vals = dotenv_values(path, interpolate=False)
     except OSError:
         return {}
     return vals if isinstance(vals, dict) else {}

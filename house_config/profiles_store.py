@@ -4,12 +4,19 @@ from __future__ import annotations
 import json
 import os
 
+from ehal.flex_fields import flex_ehal_slug
+from ehal.qualified_ids import consumer_namespace
 from house_config.wallboxes import reject_shared_fixed_wallboxes
 from house_config.netznutzung import normalize_netznutzung_config
 from house_config.baseload import normalize_baseload_distribution
 from house_config.consumption_csv import load_hourly_profile_csv
 from house_config.geo_timezone import timezone_for_land
 from house_config.profile_schema_defaults import profile_default
+from data.solar_horizon import (
+    copy_horizon_fields,
+    normalize_horizon_fields,
+    stored_horizon_fields,
+)
 from house_config.house_cooling import (
     COOLING_ENABLED_KEY,
     COOLING_KEY,
@@ -99,9 +106,11 @@ def _normalize_profile_consumers(
     house_thermal: dict | None,
     persons: int,
     wallboxes: dict | None,
+    horizon_fields: dict | None = None,
 ) -> list[dict]:
     consumers: list[dict] = []
     seen: set[str] = set()
+    seen_kennung: dict[tuple[str, str], str] = {}
     thermal_consumer_indices: list[int] = []
     for c_index, item in enumerate(consumers_raw):
         consumer = _normalize_consumer(
@@ -119,6 +128,8 @@ def _normalize_profile_consumers(
             consumer["thermal"]["latitude"] = latitude
             consumer["thermal"]["longitude"] = longitude
             consumer["thermal"]["timezone_name"] = timezone_name
+            # The horizon shades collector and windows of the year model (SUSI P3a).
+            copy_horizon_fields(horizon_fields, consumer["thermal"])
         if consumer["type"] == "thermal_rc" and consumer.get("thermal_rc"):
             consumer["thermal_rc"]["latitude"] = latitude
             consumer["thermal_rc"]["longitude"] = longitude
@@ -128,6 +139,20 @@ def _normalize_profile_consumers(
                 f"profiles '{profile_id}': doppelte consumer id '{consumer['id']}'."
             )
         seen.add(consumer["id"])
+        # ``zaehler_<slug>`` and ``<slug>`` share one EHAL Kennung: one qualified ID would
+        # carry the values of two consumers.
+        kennung = (
+            consumer_namespace(consumer["id"], consumer["type"]),
+            flex_ehal_slug(consumer["id"]),
+        )
+        other = seen_kennung.get(kennung)
+        if other is not None:
+            raise ValueError(
+                f"profiles '{profile_id}': die Verbraucher '{other}' und '{consumer['id']}' "
+                f"haben dieselbe EHAL-Kennung '{kennung[0]}.{kennung[1]}' (das Präfix "
+                "'zaehler_' zählt nicht zur Kennung) — eine der beiden ids umbenennen."
+            )
+        seen_kennung[kennung] = consumer["id"]
         consumers.append(consumer)
     if len(thermal_consumer_indices) > 1:
         raise ValueError(
@@ -189,10 +214,22 @@ def _profile_geo_and_csv_fields(raw: dict) -> dict:
     battery_profile_csv = str(raw.get("battery_profile_csv", "") or "").strip()
     grid_profile_csv = str(raw.get("grid_profile_csv", "") or "").strip()
     historical_csv_source = str(raw.get("historical_csv_source", "") or "").strip().lower()
-    if historical_csv_source not in ("separate", "energiemonitor", "balance"):
+    profile_label = str(raw.get("id", "") or "").strip() or "?"
+    if not historical_csv_source:
         historical_csv_source = "separate"
+    elif historical_csv_source not in ("separate", "energiemonitor", "balance"):
+        raise ValueError(
+            f"profiles '{profile_label}': historical_csv_source "
+            f"{raw.get('historical_csv_source')!r} ist unbekannt "
+            "(erlaubt: separate, energiemonitor, balance)."
+        )
     land_raw = str(raw.get("land", "") or "").strip().upper()
-    land = land_raw if land_raw in {"AT", "DE", "CH"} else "AT"
+    if land_raw and land_raw not in {"AT", "DE", "CH"}:
+        raise ValueError(
+            f"profiles '{profile_label}': land {raw.get('land')!r} ist unbekannt "
+            "(erlaubt: AT, DE, CH)."
+        )
+    land = land_raw or "AT"
     latitude = _float_field_or_default(raw, "latitude", profile_default("latitude"))
     longitude = _float_field_or_default(raw, "longitude", profile_default("longitude"))
     if "netznutzung_arbeitspreis_cent_kwh" in raw:
@@ -283,6 +320,7 @@ def _normalize_profile(
     fields = _profile_geo_and_csv_fields(raw)
     region = fields.pop("region")
     eur_chf_rate = fields.pop("eur_chf_rate")
+    horizon_fields = normalize_horizon_fields(raw, label=where)
     normalized_consumers = _normalize_profile_consumers(
         consumers_raw,
         profile_id=profile_id,
@@ -293,6 +331,7 @@ def _normalize_profile(
         house_thermal=house_thermal,
         persons=persons,
         wallboxes=wallboxes,
+        horizon_fields=horizon_fields,
     )
     # Switch off: the heating consumer is kept for the file but not planned.
     consumers = [
@@ -345,12 +384,45 @@ def _normalize_profile(
         spec[HOUSE_THERMAL_KEY] = house_thermal
     if inactive:
         spec[INACTIVE_CONSUMERS_KEY] = inactive
+    signs = _normalize_balance_sign_inverts(raw, where)
+    if signs is not None:
+        spec[BALANCE_SIGN_INVERTS_KEY] = signs
     # Only when set, so profiles without a region keep their exact normalized shape.
     if region:
         spec["region"] = region
     if eur_chf_rate is not None:
         spec["eur_chf_rate"] = eur_chf_rate
+    # Only with a stored horizon (SUSI P3a): no field means no horizon, as before.
+    spec.update(stored_horizon_fields(horizon_fields))
     return spec
+
+
+BALANCE_SIGN_INVERTS_KEY = "balance_sign_inverts"
+_BALANCE_SIGN_PARTS = ("pv", "battery", "grid")
+
+
+def _normalize_balance_sign_inverts(raw: dict, where: str) -> dict[str, bool] | None:
+    """Sign flags the Bilanz load was derived with (optional; absent = unknown)."""
+    value = raw.get(BALANCE_SIGN_INVERTS_KEY)
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"{where}: {BALANCE_SIGN_INVERTS_KEY} muss ein Objekt sein.")
+    unknown = sorted(set(value) - set(_BALANCE_SIGN_PARTS))
+    if unknown:
+        raise ValueError(
+            f"{where}: {BALANCE_SIGN_INVERTS_KEY} hat unbekannte Felder {unknown} "
+            f"(erlaubt: {', '.join(_BALANCE_SIGN_PARTS)})."
+        )
+    out: dict[str, bool] = {}
+    for part in _BALANCE_SIGN_PARTS:
+        flag = value.get(part, False)
+        if not isinstance(flag, bool):
+            raise ValueError(
+                f"{where}: {BALANCE_SIGN_INVERTS_KEY}.{part} muss true oder false sein."
+            )
+        out[part] = flag
+    return out
 
 
 def _attach_internal_gains(
@@ -651,7 +723,9 @@ def _serialize_profile(profile: dict) -> dict:
     }
     if profile.get(HOUSE_THERMAL_KEY):
         out[HOUSE_THERMAL_KEY] = serialize_house_thermal(profile[HOUSE_THERMAL_KEY])
-    land = str(profile.get("land") or "AT").strip().upper()
+    if profile.get(BALANCE_SIGN_INVERTS_KEY) is not None:
+        out[BALANCE_SIGN_INVERTS_KEY] = dict(profile[BALANCE_SIGN_INVERTS_KEY])
+    land =str(profile.get("land") or "AT").strip().upper()
     out["land"] = land if land in {"AT", "DE", "CH"} else "AT"
     if profile.get("region"):
         out["region"] = profile["region"]
@@ -668,6 +742,7 @@ def _serialize_profile(profile: dict) -> dict:
     if profile.get("default_pv_azimuth") is not None:
         out["default_pv_azimuth"] = profile["default_pv_azimuth"]
     out["netznutzung"] = normalize_netznutzung_config(profile.get("netznutzung"))
+    out.update(stored_horizon_fields(profile))
     return out
 
 
@@ -710,16 +785,18 @@ def save_house_profiles_document(path: str, doc: dict) -> None:
 
 
 def _refuse_shadow_config_write(path: str) -> None:
-    """Raise when Shadow would mutate files under the shared config dir."""
+    """Raise when Shadow would mutate the shared config: a file under the config dir, or
+    the active house profile wherever ``EARNIE_HOUSE_PROFILES_PATH`` puts it."""
     from pathlib import Path
 
-    from runtime_store.persist_paths import config_dir
+    from runtime_store.persist_paths import config_dir, resolve_house_profiles_json_path
     from runtime_store.shadow.errors import ConfigReadOnlyError
 
     try:
         target = Path(path).resolve()
         cfg_root = Path(config_dir()).resolve()
-        if target == cfg_root or cfg_root in target.parents:
+        active_house = Path(resolve_house_profiles_json_path()).resolve()
+        if target == cfg_root or cfg_root in target.parents or target == active_house:
             raise ConfigReadOnlyError(
                 f"Shadow Mode: Konfiguration schreibgeschützt ({path})"
             )

@@ -102,6 +102,30 @@ def test_require_loxone_credentials_for_prod_without_onboarding(tmp_path, monkey
     assert dotenv_io.require_loxone_credentials_for_config() is False
 
 
+def test_loxone_push_only_daemon_needs_no_credentials(tmp_path, monkeypatch):
+    """Loxone is push-only (VO inbox, VI status.json): no LOXONE_* gate for the daemon.
+
+    Regression: main.py waited for LOXONE_* (logged once at INFO) and never ran a
+    cycle, although the live path does not call the Miniserver.
+    """
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EARNIE_CONFIG_PATH", str(config_dir / "config.json"))
+    monkeypatch.delenv("EARNIE_OFFLINE", raising=False)
+    monkeypatch.delenv("LOXONE_IP", raising=False)
+    monkeypatch.delenv("LOXONE_USER", raising=False)
+    monkeypatch.delenv("LOXONE_PASS", raising=False)
+    (config_dir / "config.json").write_text(
+        '{"flexible_consumers": [{"id": "swimspa"}], "ehal": {"backend": "loxone"}}',
+        encoding="utf-8",
+    )
+
+    assert dotenv_io.needs_loxone_setup() is False
+    assert dotenv_io.require_loxone_credentials_for_config() is False
+    assert not hasattr(dotenv_io, "deferred_loxone_blocks_live")
+
+
 def test_loxone_setup_not_deferred_when_betrieb_unlocked(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
@@ -308,3 +332,23 @@ def test_loxone_dotenv_conflict_skips_unreadable_canonical(monkeypatch, tmp_path
     monkeypatch.setenv("EARNIE_ENV_PATH", str(tmp_path / "earnie_env"))
     monkeypatch.setattr(dotenv_io, "_dotenv_values_safe", lambda _p: {})
     assert dotenv_io.loxone_dotenv_conflict() is None
+
+
+def test_dotenv_roundtrip_keeps_password_literal(tmp_path):
+    """``${...}``, edge spaces and quotes survive write and read (UI review 4d)."""
+    from runtime_store.dotenv_io import _merge_dotenv_content, read_loxone_dotenv_file
+
+    password = r' p${HOME}a"ss\x '
+    path = tmp_path / ".env"
+    path.write_text(
+        _merge_dotenv_content(
+            None, {"LOXONE_USER": "admin", "LOXONE_PASS": password, "LOXONE_IP": "192.168.1.2"}
+        ),
+        encoding="utf-8",
+    )
+    assert read_loxone_dotenv_file(str(path))[2] == password
+
+
+def test_loxone_credentials_keep_password_edges(monkeypatch):
+    monkeypatch.setenv("LOXONE_PASS", ' pw" ')
+    assert dotenv_io.read_loxone_credentials()[2] == ' pw" '

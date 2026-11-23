@@ -83,7 +83,7 @@ EHAL base units (adapters normalize hub-native units into these):
 
 | Quantity / domain                                                                                                                                  | Unit   | Sign / range                                                                          |
 | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------- |
-| Active power telemetry (`sens_grid_power_active`, `sens_pv_production_active`, `sens_evcs_active_power`, `sens_ess_power`, `sens_inv_power_ac`, `sens_inv_power_pv`, `sens_power_consumers`) | **W**  | See below                                                                             |
+| Active power telemetry (`sens_grid_power_active`, `sens_pv_production_active`, `sens_evcs_active_power`, `sens_ess_power`, `sens_inv_power_ac`, `sens_inv_power_pv`, `sens_power_consumers`, consumer `sens_power_act`, `sens_ev_charge_power`) | **W**  | See below                                                                             |
 | ESS charge/discharge **limits**, `set_grid_export_power_limit` / `get_grid_export_power_limit`, `get_ess_max_charge_power` / `get_ess_max_discharge_power`, `get_inv_max_ac_power` / `get_inv_max_pv_power`, `set_inv_ac_power_limit` | **W**  | Non-negative **magnitudes** (true caps); direction is in the field name, not the sign |
 | `set_ess_active_power`                                                                                                                             | **W**  | Signed; `+` = discharge, `−` = charge (omit on Automatik)                             |
 | Energy counters / capacity (`sens_pv_energy`, `sens_grid_energy_import` / `_export`, `sens_ess_energy_charge` / `_discharge`, `sens_energy_total`, `sens_evcs_bat_capacity`) | **kWh** | Cumulative or capacity ≥ `0`; HA may convert Wh → kWh at the boundary                 |
@@ -94,6 +94,8 @@ EHAL base units (adapters normalize hub-native units into these):
 | `get_temperature_heat_storage_tolerance`                                                                                                           | **K**  | Band below the setpoint; `≥ 0`                                                        |
 | `sens_heat_power`                                                                                                                                  | **W**  | Thermal power, `≥ 0`; Loxone kW via the role's `loxone` block                         |
 | `sens_operating_mode` / `sens_sg_ready_state`                                                                                                      | —      | Enum `0`…`6` (off, space heating, hot water, defrost, locked, cooling, fault) / SG-Ready state `1`…`4` |
+| `set_sg_ready_state` (level 1, HeatControl P2; `heatpump.<id>.set_sg_ready_state`)                                                                 | —      | SG-Ready state; Earnie sends `3` (charge to setpoint + `heat_storage.boost_k`) where the plan runs the generator, else `2`; `1` / `4` not sent yet. Backend falls back to `2` when `status.json` is stale |
+| `set_temperature_heat_storage_target` (level 2, HeatControl P3; `heatpump.<id>.set_temperature_heat_storage_target`)                               | **°C** | Store charge target: planned end temperature of the present run, between setpoint and setpoint + boost (capped by `get_temperature_heat_storage_max`); `0` = no target. Backend falls back to `0` when `status.json` is stale |
 | Duration (`get_filter_remaining_hours`, `get_filter_native_duration_hours`, …)                                                                     | **h**  | Hours; non-negative                                                                   |
 | Modes / flags (`set_ess_mode`, `set_evcs_mode`, `sens_absent_mode`, `sens_evcs_connected`, …)                                                       | —      | Dimensionless (enums or `0`/`1`); no physical unit                                    |
 
@@ -334,9 +336,9 @@ On failed setpoint writes (OEM locks, read-only REST, missing HA write entities)
 
 1. Catch the error; **do not crash** the optimizer.
 2. Log with enough context for support (adapter_id, field, hub status/message).
-3. Flip the matching capability flag (`supports_ess_write=false` and/or `supports_evcs_current=false`).
-4. Emit **Write-Error-Telemetry** (see below) so UI can show a user hint.
-5. Continue with read-only / degraded control for that subsystem.
+3. **Keep the capability flags** as the configuration defines them: a failed write never flips `supports_ess_write` / `supports_evcs_current` and never disables a charger. Adapters are cached for the daemon's lifetime, so a flip would turn one transient failure (e.g. a POST timeout) into a silent skip until restart.
+4. Emit **Write-Error-Telemetry** (see below) on **every** failed cycle so UI can show a user hint.
+5. Continue the cycle (a failed field does not block the other fields, e.g. the HA `set_ess_active_power = 0` release) and **retry** every field on the next cycle. A persistent failure (OEM lock, missing binding) therefore shows up as a write error and log warning each cycle, not as a quiet skip.
 
 
 
@@ -364,7 +366,7 @@ Machine schema: `[share/ehal/write_error.schema.json](../../share/ehal/write_err
 | ------------------------------ | ------------------------------------------------------------------------ |
 | Optional telemetry absent      | Omit / null; Core continues                                              |
 | Primary `ess.{id}.sens_ess_soc` absent | Live abort                                                         |
-| Setpoint write fails           | Log + capability degrade + Write-Error-Telemetry; optimizer continues    |
+| Setpoint write fails           | Log + Write-Error-Telemetry each cycle; retried next cycle; optimizer continues |
 | Capability false from start    | Skip writes for that family; no repeated error spam beyond periodic hint |
 | Schema validation fail         | Reject document; adapter must not pass invalid JSON to Core              |
 
@@ -378,7 +380,7 @@ Fields map to known OpenEMS Edge channels (semantic reference). Channel architec
 
 | EHAL field                      | OpenEMS (prototype)                                                                                                                         |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sens_grid_power_active`        | `_sum/GridActivePower` (normalize: `+` = import)                                                                                            |
+| `sens_grid_power_active`        | `_sum/GridActivePower` (OpenEMS: `+` = buy-from-grid, `−` = sell-to-grid; same sign as EHAL, role `openems` block `sign: 1`)                |
 | `sens_pv_production_active`     | `_sum/ProductionActivePower`                                                                                                                |
 | `ess.{id}.sens_ess_soc`         | `ess0/Soc` / `_sum/EssSoc` (primary; not on plant telemetry doc)                                                                              |
 | `sens_ess_power`                | ESS ActivePower (OpenEMS sign; already EHAL-aligned)                                                                                        |
@@ -387,6 +389,8 @@ Fields map to known OpenEMS Edge channels (semantic reference). Channel architec
 | `set_ess_charge_power_limit`    | e.g. `SetActivePowerGreaterOrEquals` (adapter maps magnitude)                                                                               |
 | `set_ess_discharge_power_limit` | e.g. `SetActivePowerLessOrEquals`                                                                                                           |
 | `set_ess_mode`                  | *(ignored by OpenEMS)*                                                                                                                      |
+| `set_ess_target_soc`            | *(no channel; reported as unconfigured — no trace row, one warning per adapter)* |
+| `set_grid_export_power_limit`   | *(no channel wired; reported as **skipped** — trace row "Übersprungen: kein OpenEMS-Kanal …" via `last_skipped_messages()`, one warning per adapter. The feed-in cap is **not enforced** on OpenEMS plants.)* |
 | `get_ess_soc_min` / `get_ess_soc_max` / `get_ess_max_charge_power` / `get_ess_max_discharge_power` | *(optional 2.7.j; omit when no Edge channel — Core uses HK fallback)* |
 | `set_evcs_max_current`          | EVCS Max Current                                                                                                                            |
 | `sens_absent_mode`              | Optional side-channel: `plant.ehal_bindings.sens_absent_mode` = `componentId/ChannelId` (no fixed Edge default; not in core telemetry wire) |
@@ -404,7 +408,7 @@ Fields map to known OpenEMS Edge channels (semantic reference). Channel architec
 
 | Class            | When                                                                                                                                                                                                                                                                                                                                                           |
 | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Heatpump         | Not on the core EHAL plant wire; stub role (`share/ehal/roles/heatpump.json`) + Loxone recipe/VO (`share/loxone/recipes/heatpump.json`, `VO_Earnie_Heatpump.xml`). Live: `thermal_annual` consumer `ehal_bindings` for `flex.*` plus `sens_temperature_heat_storage` / `sens_temperature_heat_storage_low` (HA entity IDs or Loxone Merker via entity-scoped HITL). Level 3 feedback (HeatControl P1, list in `ehal/heat_fields.py`): twelve optional read fields on the same consumer, exchanged as `heatpump.{Kennung}.<field>`. Function `heat_storage_band` (`ehal/functions.py`): with `get_temperature_heat_storage_setpoint` and `get_temperature_heat_storage_tolerance` both mapped, Live plans with the backend's band; one of the two alone leaves the configured band in place; both mapped but a value missing fails loud. The other fields are recorded only |
+| Heatpump         | Not on the core EHAL plant wire; stub role (`share/ehal/roles/heatpump.json`) + Loxone recipe/VO (`share/loxone/recipes/heatpump.json`, `VO_Earnie_Heatpump.xml`). Live: `thermal_annual` consumer `ehal_bindings` for `flex.*` plus `sens_temperature_heat_storage` / `sens_temperature_heat_storage_low` (HA entity IDs or Loxone Merker via entity-scoped HITL). Level 3 feedback (HeatControl P1, list in `ehal/heat_fields.py`): twelve optional read fields on the same consumer, exchanged as `heatpump.{Kennung}.<field>`. Function `heat_storage_band` (`ehal/functions.py`): with `get_temperature_heat_storage_setpoint` and `get_temperature_heat_storage_tolerance` both mapped, Live plans with the backend's band; one of the two alone leaves the configured band in place; both mapped but a value missing in a cycle also plans with the configured band, with a warning and `band_source = config_no_value`. The heat kinds are stored bare on the consumer (the signal list writes the same key; `dm6.consumer_bare_bindings` merges packs with both spellings). The other fields are recorded only |
 | Heating rod      | Part of a `thermal_annual` consumer, Kennung `{consumer_id}_heating_rod`. Fields `heatpump.{Kennung}.set_enable`, `.sens_power_act`, `.sens_consumer_active`, stored in `consumers[].heating_rod_ehal_bindings`, deliberately not in `ehal_bindings` (every reader there would take them for the heat source's own). Never required: Live plans the rod only with `set_enable`, a power or run-state read and the store temperature of the consumer. No Earnie-side fail-safe: a set release stays until Earnie writes again, the smart home owns over-temperature and outage behaviour |
 | Generic consumer | Flex fields mapped via `consumers[].ehal_bindings` as **`consumer.{Kennung}.*`** (same as Live/VO), incl. **`sens_consumer_active`**. Legacy `flex.{slug}.*` accepted until config migration. Stub role + recipe; VO Merker `Earnie_Verbraucher_<Slug>_Aktiv`                                                                                                                                                                                    |
 
@@ -447,6 +451,7 @@ Fields map to known OpenEMS Edge channels (semantic reference). Channel architec
 - Optional absent / holiday: set `plant.ehal_bindings.sens_absent_mode` to `componentId/ChannelId` (read via `read_channel`; no HITL plant mapper yet).
 - Optional inverter: bindings on `inverters[].ehal_bindings` as `inv.{id}.*` (capability `supports_inv_power_limit` reported false until mapped; curtailment write when mapped + `control=full`).
 - Southbound silent gate: reuse `silent_mode` (`local_settings.json`) for OpenEMS writes as well.
+- ESS fields without an OpenEMS channel are never reported as written: `set_grid_export_power_limit` → `last_skipped_fields()` (Live trace "Übersprungen" with the OpenEMS reason from `last_skipped_messages()`; other adapters keep the generic "Mapping unvollständig" text), `set_ess_target_soc` → `last_unconfigured_fields()` (no row); each logs one warning per adapter instance. `set_ess_mode` stays silently ignored (Design C1).
 - Write failures → `runtime/ehal_write_error.json` + UI banner on EHAL-Com / Daemon page.
 
 
@@ -470,7 +475,7 @@ Adapter: `integrations/ha_adapter.py` (push inbox + `status.json` only). Carrier
 
 ### Units on the HA telemetry wire
 
-Values in the telemetry URL path must already be in **canonical EHAL units** (§ Units table): active power **W**, energy **kWh**, SoC/fills **%**, EVCS current **A**, etc. Earnie does not receive HA `unit_of_measurement` on push — the **HA carrier** (generated Jinja) converts native entity units before calling `/ehal/telemetry/…` (W/kW/MW → W, Wh/kWh/MWh → kWh, %, A; unknown unit → no push + HA log). Setpoints in `status.json` use the same EHAL numeric units as Loxone (e.g. ESS limits in **W**).
+Values in the telemetry URL path must already be in **canonical EHAL units** (§ Units table): active power **W**, energy **kWh**, SoC/fills **%**, EVCS current **A**, etc. Earnie does not receive HA `unit_of_measurement` on push — the **HA carrier** (generated Jinja) converts native entity units before calling `/ehal/telemetry/…` (W/kW/MW → W, Wh/kWh/MWh → kWh, %, A; unknown unit → no push + HA log). This covers the consumer power `sens_power_act` and the counters `sens_energy_total` / `sens_ess_energy_charge` / `_discharge` too; a package generated before they had a unit pushes the entity's number as it is and must be generated again. Setpoints in `status.json` use the same EHAL numeric units as Loxone (e.g. ESS limits in **W**).
 
 ### Config and binding UI
 
@@ -498,9 +503,9 @@ Values in the telemetry URL path must already be in **canonical EHAL units** (§
 
 - Onboarding helper **inside** the Loxone-EHAL path — not a live I/O replacement.
 - Structure scan (`integrations/loxone_structure.py`): supports **compare-all** (LoxAPP3 + candidate presence against LoxAPP3, source id `http_probe`, + optional **MCP 17.1**) for lab/compare; MCP helpers remain in `integrations/` for later re-integration.
-- **EHAL-Com UI:** mapping names come from the LoxAPP3-presence variant (`sources=(http_probe,)`). MCP URL input, Ollama button, Quellenvergleich, and source picker are not in the shipping UI.
+- **EHAL-Com UI:** there is no per-signal Merker mapping UI; bindings come from the Loxone-Import (Smarthome-Backend) and the Signalliste. MCP URL input, Ollama button, Quellenvergleich, and source picker are not in the shipping UI.
 - **Greenfield presence probe:** `integrations/loxone_greenfield_import.probe_marker_names` classifies known `greenfield_device_map.json` names against LoxAPP3 control names (no Merker HTTP). EFM meters still need LoxAPP3.
-- Contract UI on EHAL-Com: **Signalliste** for all backends (qualified IDs, Pflicht/optional/aktiviert, match status; Loxone VO/VI export; HA YAML package). Activation keys live on `plant` / `consumers[].ehal_bindings` / `batteries[].ehal_bindings` / `inverters[].ehal_bindings` (`components.json` for ESS and inverters). The older HITL helpers `ui/ehal_loxone_mapping.py` / `ui/ehal_ha_mapping.py` are not mounted on the page.
+- Contract UI on EHAL-Com: **Signalliste** for all backends (qualified IDs, Pflicht/optional/aktiviert, match status; Loxone VO/VI export; HA YAML package). Activation keys live on `plant` / `consumers[].ehal_bindings` / `batteries[].ehal_bindings` / `inverters[].ehal_bindings` (`components.json` for ESS and inverters). The older HITL mapping UIs (`ui/ehal_loxone_mapping*.py`, `ui/ehal_ha_mapping.py`) have been removed.
 - Optional LLM (code retained, **not** exposed in UI): local **Ollama** HTTP (`/api/chat`, JSON). Not bundled in Earnie image / LoxBerry ZIP.
 - EFM interpretation C (meter tree → Hausprofil consumers + optional flex power): research note `[efm-auto-sync.md](../dev/done/efm-auto-sync.md)`; library `integrations/loxone_efm_meters.py` via greenfield `merge_efm` (Smarthome-Backend Loxone-Import).
 

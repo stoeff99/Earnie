@@ -14,8 +14,8 @@ from settings.flexible_consumers import flex_kw_lookup
 from optimizer import battery as bat
 from optimizer.consumer_power import power_limits_kw
 from optimizer.milp_horizon import (
-    aggregate_battery_params_for_load,
     coerce_battery_params_list,
+    plant_battery_params,
 )
 from optimizer.rod_store import RodStoreBalance, next_level_kwh
 from optimizer.slot_duration import DEFAULT_DT_H
@@ -34,15 +34,27 @@ logger = logging.getLogger(__name__)
 def _baseline_battery_params(
     battery_params: dict | list[dict] | None,
 ) -> dict:
-    """House-load aggregate for baseline (multi-ESS list → singular dict)."""
+    """Baseline battery: the plant battery of the optimized run.
+
+    One house battery is taken as is. With several the baseline runs the same plant as the
+    optimized open-loop run (``plant_battery_params`` over the house-balance batteries), as
+    does the savings ledger's shadow plant (``docs/dev/savings-ledger.md`` § 3). ``None``
+    reads the live config's batteries.
+    """
     if battery_params is None:
-        return config.get_battery_params()
-    batteries = coerce_battery_params_list(battery_params)
-    if not batteries:
-        return config.get_battery_params()
-    if len(batteries) == 1:
-        return batteries[0]
-    return aggregate_battery_params_for_load(batteries)
+        listed = coerce_battery_params_list(config.get_battery_params_list())
+        if len(listed) < 2:
+            return config.get_battery_params()
+        batteries = listed
+    else:
+        batteries = coerce_battery_params_list(battery_params)
+        if not batteries:
+            return config.get_battery_params()
+        if len(batteries) == 1:
+            return batteries[0]
+    from optimizer.sim_horizon_chart_soc import house_balance_batteries
+
+    return plant_battery_params(house_balance_batteries(batteries))
 
 
 def _matched_baseline_profile_kw(row: dict, consumer: dict) -> float:

@@ -86,6 +86,21 @@ def fetch_flexible_consumers_live_kw(
     )
 
 
+def fetch_network_flex_live_kw(consumers: list) -> dict[str, float]:
+    """Measured flex power on a network backend: the heating rods on HA, nothing on OpenEMS.
+
+    Only measured consumers get a key (no fallback). Every other consumer keeps zero power
+    in the planning snapshot and ``cons_data`` on network backends.
+    """
+    from integrations.ehal_live import is_ha_backend
+
+    if not is_ha_backend():
+        return {}
+    from integrations.ha_flex_power import read_ha_heating_rod_kw_live
+
+    return read_ha_heating_rod_kw_live(list(consumers))
+
+
 def fetch_live_power() -> dict | None:
     """Plant live power dict from Loxone push meters (legacy plant-flat path)."""
     from integrations.loxone_live_power import fetch_loxone_live_power
@@ -125,11 +140,18 @@ def write_flexible_consumer_states(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> list[LoxoneWriteRecord]:
     from integrations.loxone_writes import send_flexible_consumer_states
 
     return send_flexible_consumer_states(
-        consumer_powers, charging_contexts, consumer_pv_follow, heat_controls=heat_controls
+        consumer_powers,
+        charging_contexts,
+        consumer_pv_follow,
+        heat_controls=heat_controls,
+        heat_storage_targets=heat_storage_targets,
+        heat_forced_charge=heat_forced_charge,
     )
 
 
@@ -139,11 +161,18 @@ def write_flexible_consumer_enables(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> list[LoxoneWriteRecord]:
     from integrations.loxone_writes import send_flexible_consumer_enables
 
     return send_flexible_consumer_enables(
-        consumer_powers, charging_contexts, consumer_pv_follow, heat_controls=heat_controls
+        consumer_powers,
+        charging_contexts,
+        consumer_pv_follow,
+        heat_controls=heat_controls,
+        heat_storage_targets=heat_storage_targets,
+        heat_forced_charge=heat_forced_charge,
     )
 
 
@@ -154,6 +183,7 @@ def write_huawei_modbus_states(
     *,
     export_cap_kw: float | None | object = OMIT_EXPORT_CAP,
     automatik_discharge_cap_kw: float | None = None,
+    battery_params: dict | None = None,
 ) -> list[LoxoneWriteRecord]:
     from integrations.loxone_writes import send_huawei_modbus_states
 
@@ -163,6 +193,7 @@ def write_huawei_modbus_states(
         target_soc,
         export_cap_kw=export_cap_kw,
         automatik_discharge_cap_kw=automatik_discharge_cap_kw,
+        battery_params=battery_params,
     )
 
 
@@ -176,7 +207,10 @@ def build_sent_loxone_snapshot(
     *,
     export_cap_kw: float | None | object = OMIT_EXPORT_CAP,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
     automatik_discharge_cap_kw: float | None = None,
+    battery_params: dict | None = None,
 ) -> dict[str, float]:
     from integrations.loxone_writes import build_sent_loxone_snapshot as _impl
 
@@ -189,7 +223,10 @@ def build_sent_loxone_snapshot(
         consumer_pv_follow,
         export_cap_kw=export_cap_kw,
         heat_controls=heat_controls,
+        heat_storage_targets=heat_storage_targets,
+        heat_forced_charge=heat_forced_charge,
         automatik_discharge_cap_kw=automatik_discharge_cap_kw,
+        battery_params=battery_params,
     )
 
 

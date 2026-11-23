@@ -42,7 +42,11 @@ BACKTESTING_CSV_LEGACY = "backtesting_hourly.csv"
 BACKTESTING_CBC_EVENTS_JSONL = "backtesting_cbc_events.jsonl"
 BACKTESTING_PRICE_SERIES_CSV = "backtesting_prices.csv"
 LOG_VERSION = BACKTESTING_LOG_SCHEMA
-_DEFAULT_LOG_DIR = resolve_backtesting_log_dir()
+
+
+def _default_log_dir() -> str:
+    """Resolved per call: the cloud demo gives every session its own runtime folder."""
+    return resolve_backtesting_log_dir()
 
 
 def _compute_config_fingerprint(period: dict) -> str:
@@ -583,8 +587,12 @@ def _attach_period_bounds(
         payload["period"]["first_ts"] = pd.Timestamp(min(all_ts)).isoformat()
         payload["period"]["last_ts"] = pd.Timestamp(max(all_ts)).isoformat()
         payload["period"]["hours"] = len(all_ts) // max(scenario_count, 1)
+    if "references" in period:
+        payload["references"] = list(period["references"])
     if period.get("reference_by_scenario"):
         payload["reference_by_scenario"] = period["reference_by_scenario"]
+    if period.get("l1_by_scenario"):
+        payload["l1_by_scenario"] = period["l1_by_scenario"]
     if period.get("ladder_by_scenario"):
         payload["ladder_by_scenario"] = period["ladder_by_scenario"]
         payload["ladder_report"] = period["ladder_report"]
@@ -621,7 +629,7 @@ def save_backtesting_log(
     ``booked_consumption``: ``booked_consumption_by_result`` over the period-clipped
     results (Jahres Verbrauch, Rechnungen, Plausibilität ``booked_kwh``).
     """
-    target_dir = _DEFAULT_LOG_DIR if log_dir is None else log_dir
+    target_dir = _default_log_dir() if log_dir is None else log_dir
     os.makedirs(target_dir, exist_ok=True)
     json_path = os.path.join(target_dir, BACKTESTING_LOG_JSON)
     csv_path = os.path.join(target_dir, BACKTESTING_CSV)
@@ -675,7 +683,7 @@ def load_backtesting_log(log_dir: str | None = None) -> tuple[dict, pd.DataFrame
     Lädt Backtesting-Log.
     Returns: (metadata dict, hourly DataFrame mit allen Szenarien)
     """
-    target_dir = _DEFAULT_LOG_DIR if log_dir is None else log_dir
+    target_dir = _default_log_dir() if log_dir is None else log_dir
     json_path = os.path.join(target_dir, BACKTESTING_LOG_JSON)
     if not os.path.exists(json_path):
         raise FileNotFoundError(
@@ -713,7 +721,7 @@ def load_backtesting_log(log_dir: str | None = None) -> tuple[dict, pd.DataFrame
 
 def backtesting_log_json_path(log_dir: str | None = None) -> str:
     """Absoluter Pfad zu backtesting_log.json im Backtesting-Ausgabeordner."""
-    target_dir = _DEFAULT_LOG_DIR if log_dir is None else log_dir
+    target_dir = _default_log_dir() if log_dir is None else log_dir
     return os.path.join(target_dir, BACKTESTING_LOG_JSON)
 
 

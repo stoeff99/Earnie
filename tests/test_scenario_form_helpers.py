@@ -164,7 +164,6 @@ def test_new_scenario_template_clones_last_selected_not_live():
             "label": "Live",
             "enabled": True,
             "settings": {"battery_ids": ["bat_live"]},
-            "own_reference": False,
         },
         {
             "id": "ohne_pv",
@@ -174,7 +173,6 @@ def test_new_scenario_template_clones_last_selected_not_live():
                 "battery_ids": ["bat1"],
                 "pv_system_ids": ["pv1", "pv2"],
             },
-            "own_reference": True,
         },
     ]
     template = new_scenario_template(
@@ -182,7 +180,7 @@ def test_new_scenario_template_clones_last_selected_not_live():
     )
     assert template["label"] == "Ohne PV copy"
     assert template["enabled"] is False
-    assert template["own_reference"] is True
+    assert "own_reference" not in template
     assert template["settings"]["battery_ids"] == ["bat1"]
     assert template["settings"]["pv_system_ids"] == ["pv1", "pv2"]
 
@@ -440,15 +438,11 @@ def test_normalize_scenario_form_snapshot_keeps_enabled_false():
     assert snapshot["enabled"] is False
 
 
-def test_normalize_scenario_form_snapshot_keeps_own_reference():
+def test_normalize_scenario_form_snapshot_has_no_own_reference():
     snapshot = normalize_scenario_form_snapshot(
-        {
-            "label": "Ref",
-            "own_reference": True,
-            "settings": {"battery_ids": ["bat1"]},
-        },
+        {"label": "Ref", "settings": {"battery_ids": ["bat1"]}},
     )
-    assert snapshot["own_reference"] is True
+    assert "own_reference" not in snapshot
 
 
 def test_ordered_user_scenario_ids_live_first_then_file_order():
@@ -485,3 +479,38 @@ def test_ordered_user_scenario_ids_dedupes_and_skips_blank():
         labels={"live": "Live", "b": "B", "a": "A"},
     )
     assert ordered == ["live", "b", "a"]
+
+
+def test_missing_refs_are_carried_and_dropped_on_request():
+    from ui.scenario_form_helpers import (
+        carry_missing_refs,
+        drop_missing_refs,
+        hidden_scenario_settings,
+        missing_scenario_refs,
+    )
+
+    stored = {
+        "import_tariff_id": "gone_tariff",
+        "battery_ids": ["bat_a", "gone_bat"],
+        "house_profile_id": "home",
+        "pv_kwp": 6.0,
+    }
+    missing = missing_scenario_refs(
+        stored,
+        profiles={"home": {"id": "home"}},
+        batteries=[{"id": "bat_a"}],
+        pv_systems=[],
+        import_tariffs=[{"id": "fixed"}],
+        export_tariffs=[],
+    )
+    assert missing == {"import_tariff_id": ["gone_tariff"], "battery_ids": ["gone_bat"]}
+    form = {"battery_ids": ["bat_a"], "house_profile_id": "home"}
+    carried = carry_missing_refs(form, missing)
+    assert carried["import_tariff_id"] == "gone_tariff"
+    assert carried["battery_ids"] == ["bat_a", "gone_bat"]
+    # A pick of another tariff replaces the missing one.
+    assert carry_missing_refs({"import_tariff_id": "fixed"}, missing)["import_tariff_id"] == "fixed"
+    dropped = drop_missing_refs(stored, missing)
+    assert "import_tariff_id" not in dropped
+    assert dropped["battery_ids"] == ["bat_a"]
+    assert hidden_scenario_settings(stored) == {"pv_kwp": 6.0}

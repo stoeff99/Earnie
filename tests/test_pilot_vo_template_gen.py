@@ -212,7 +212,7 @@ def test_token_ok(tmp_path: Path) -> None:
     assert gen.read_token(env) == "dummytoken0123456"
 
 
-def test_heartbeat_template_and_analog_has_no_off_command() -> None:
+def test_heartbeat_template_has_no_off_command() -> None:
     text = gen.render_template(
         "Heartbeat", [gen.heartbeat_signal()], host="192.168.178.35", port=8541, token="abcd1234efgh"
     )
@@ -220,14 +220,20 @@ def test_heartbeat_template_and_analog_has_no_off_command() -> None:
     assert cmd.get("Title") == "Push_Earnie_Heartbeat"
     assert cmd.get("CmdOn") == "/ehal/telemetry/heartbeat_smarthome/<v>?t=abcd1234efgh"
     assert cmd.get("Analog") == "true"
-    assert cmd.get("CmdOff") == ""  # analog outputs have no Off command
+    assert cmd.get("CmdOff") == ""  # a 0 heartbeat is not a link signal
     assert (cmd.get("Repeat"), cmd.get("RepeatRate")) == ("10", "10")
 
 
-def test_all_collected_analog_commands_have_empty_off(tmp_path: Path) -> None:
+def test_all_collected_analog_commands_push_an_explicit_zero(tmp_path: Path) -> None:
+    # Without an Off command nothing arrives at 0: a limit of 0 or 0.0 °C would be unreadable.
     sigs = [s for s in gen.collect_read_signals(_config(tmp_path)) if not s.digital]
+    assert sigs
     root = ET.fromstring(gen.render_template("X", sigs, host="h", port=1, token="abcd1234").encode("utf-8"))
-    assert all(c.get("CmdOff") == "" for c in root if c.tag == "VirtualOutCmd")
+    cmds = [c for c in root if c.tag == "VirtualOutCmd"]
+    by_title = {s.title: s for s in sigs}
+    for cmd in cmds:
+        ehal_id = by_title[cmd.get("Title")].ehal_id
+        assert cmd.get("CmdOff") == f"/ehal/telemetry/{ehal_id}/0?t=abcd1234"
 
 
 def test_token_in_address_moves_the_token_out_of_the_commands(tmp_path: Path) -> None:
@@ -284,7 +290,8 @@ def test_mqtt_udp_template_sends_topic_and_value_to_the_gateway(tmp_path: Path) 
     analog = cmds["Push_grid_meter_sens_grid_power_active"]
     # Value as payload, never as a topic level (the gateway would make one topic per value).
     assert analog.get("CmdOn") == "earnie/telemetry/grid.meter.sens_grid_power_active <v.3>"
-    assert analog.get("CmdOff") == ""
+    # Off pushes an explicit 0, as on the HTTP path (a value of 0 would arrive otherwise never).
+    assert analog.get("CmdOff") == "earnie/telemetry/grid.meter.sens_grid_power_active 0"
     assert list(analog.attrib) == ANALOG_ATTRS
     digital = cmds["Push_sens_absent_mode"]
     assert (digital.get("CmdOn"), digital.get("CmdOff")) == (

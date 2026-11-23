@@ -117,7 +117,7 @@ def test_meta_every_step_covered_by_fixture_detect(tmp_path):
     for name in (
         *HAPPY_SNAPSHOTS, "v3_last", "v3_ha_sign", "v4_pre_ha_pull", "v4_pre_se_conf_defaults",
         "v4_pre_tariff_track", "v5_pre_scenario_feed_in", "v5_pre_heat_source",
-        "v5_pre_heating_systems", "v5_pre_grid_levies",
+        "v5_pre_heating_systems", "v5_pre_grid_levies", "v6_pre_wallbox_charger_keys",
     ):
         docs = load_pack_docs(_copy_snapshot(tmp_path / "meta", name))
         for step in STEPS:
@@ -160,6 +160,9 @@ def test_per_step_detect_apply_smoke(tmp_path):
         "dm5.house_cooling": "v5_pre_heating_systems",
         "dm6.wallboxes": "v5_pre_heat_source",
         "dm6.debug_dump_flag_removal": "v5_pre_heat_source",
+        "dm6.scenario_own_reference_removal": "v5_pre_heat_source",
+        "dm6.consumer_bare_bindings": "v5_pre_heat_source",
+        "dm6.wallbox_charger_keys": "v6_pre_wallbox_charger_keys",
         "tf1.tariff_format": "v4_pre_tariff_track",
         "tf1.grid_area_levies": "v5_pre_grid_levies",
     }
@@ -411,7 +414,8 @@ def test_run_rejects_unknown_house_profile_ref_before_writing(tmp_path):
     doc["scenarios"][0]["settings"]["house_profile_id"] = "example_efh"
     path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     before = {p.name: p.read_text(encoding="utf-8") for p in config_dir.glob("*.json")}
-    with pytest.raises(ValueError, match="example_efh"):
+    # 2d-9: a MigrationError, so the wizard and the CLI show it instead of a traceback.
+    with pytest.raises(MigrationError, match="ungültig.*example_efh"):
         run_migration(config_dir, KEEP_NAMES)
     after = {p.name: p.read_text(encoding="utf-8") for p in config_dir.glob("*.json")}
     assert after == before
@@ -493,8 +497,9 @@ def test_loxone_names_unknown_backend_surfaces_error(tmp_path):
     doc = json.loads(path.read_text(encoding="utf-8"))
     doc["ehal"] = {"backend": "homeassistant", "adapter_id": "earnie-hems"}
     path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    with pytest.raises(ValueError, match="ehal.backend"):
-        plan_migration(config_dir)
+    plan = plan_migration(config_dir)
+    assert plan.can_run is False
+    assert any("ehal.backend" in blocker.message_de for blocker in plan.blockers)
 
 
 def test_loxone_names_unknown_answer_blocks(tmp_path):

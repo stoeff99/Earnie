@@ -1,16 +1,19 @@
 """Open-Meteo archive irradiance and temperature for PV / solar-thermal synthesis."""
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
+import json
 import threading
 
 import pandas as pd
 
 from data import opendata_session
 from data.eu_market_features import month_ranges
+from data.solar_horizon import DNI_VAR, HorizonProfile, shade_hourly_payload
 from opendata import FetchBudgetExceeded, fetch_budget, open_meteo
 from runtime_store.env_vars import read_env
 
@@ -20,6 +23,7 @@ OPEN_METEO_ARCHIVE = open_meteo.ARCHIVE_URL
 OPEN_METEO_CACHE_DIR = Path("data/cache/open_meteo_utc")
 HOURLY_VAR = "global_tilted_irradiance"
 HOURLY_VAR_DAY1_FORECAST = f"{HOURLY_VAR}_previous_day1"
+DNI_VAR_DAY1_FORECAST = f"{DNI_VAR}_previous_day1"
 HOURLY_TEMP_VAR = "temperature_2m"
 REFERENCE_WM2 = 1000.0
 DEFAULT_THERMAL_EFFICIENCY = 0.40
@@ -31,12 +35,18 @@ climate_fetch_budget = fetch_budget
 # Process-wide mem-cache: disk JSON → bundle; invalidate on file mtime change.
 _bundle_mem_cache: dict[str, tuple[int, "OpenMeteoClimateBundle"]] = {}
 _bundle_mem_lock = threading.Lock()
+# Shaded bundles (SUSI P3a) are not written to disk:
+# (raw file, horizon token) -> (mtime of the raw file, bundle).
+_shaded_mem_cache: "OrderedDict[tuple[str, str], tuple[int, OpenMeteoClimateBundle]]" = OrderedDict()
+_SHADED_MEM_MAX = 8
+RAW_CACHE_VERSION = 1
 
 
 def clear_open_meteo_bundle_mem_cache() -> None:
     """Reset in-process climate bundle cache (tests / forced reload)."""
     with _bundle_mem_lock:
         _bundle_mem_cache.clear()
+        _shaded_mem_cache.clear()
 
 
 @dataclass(frozen=True)
@@ -199,6 +209,7 @@ def _fetch_hourly_archive_chunk(
     hourly_vars: str,
     extra_params: dict[str, Any] | None = None,
     fetch=open_meteo.archive,
+    payload_transform=None,
 ) -> dict[str, pd.Series]:
     # One UTC day earlier: the first local hours of ``start`` belong to the previous UTC day.
     payload = fetch(
@@ -210,6 +221,29 @@ def _fetch_hourly_archive_chunk(
         hourly=hourly_vars,
         extra_params=extra_params,
     )
+    return _chunk_series(
+        payload,
+        timezone=timezone,
+        start=start,
+        end=end,
+        hourly_vars=hourly_vars,
+        payload_transform=payload_transform,
+    )
+
+
+def _chunk_series(
+    payload: dict[str, Any],
+    *,
+    timezone: str,
+    start: date,
+    end: date,
+    hourly_vars: str,
+    payload_transform=None,
+) -> dict[str, pd.Series]:
+    """Local wall-clock series of ``[start, end)`` from one UTC archive payload."""
+    if payload_transform is not None:
+        # On the UTC stamps, before the local wall clock: the sun position needs real time.
+        payload = payload_transform(payload)
     series_by_var = _hourly_series_from_payload(
         payload,
         hourly_vars=hourly_vars,
@@ -249,6 +283,40 @@ def fetch_hourly_temperature_c_series(
     return _concat_hourly_chunks(chunks)
 
 
+def _tilted_request(
+    tilted_var: str,
+    dni_var: str,
+    *,
+    lat: float,
+    lon: float,
+    tilt: float,
+    azimuth: float,
+    horizon: HorizonProfile | None,
+):
+    """(hourly variables, extra chunk-fetch keywords) of a tilted-irradiance request.
+
+    Without a horizon the request and the chunk fetch are the ones from before SUSI P3a
+    (same parameters, same cache and shadow keys, no extra keyword). The mask uses the same
+    whole degrees Open-Meteo is asked for.
+    """
+    if horizon is None:
+        return tilted_var, {}
+
+    def _shade(payload: dict) -> dict:
+        return shade_hourly_payload(
+            payload,
+            tilted_var=tilted_var,
+            dni_var=dni_var,
+            lat=lat,
+            lon=lon,
+            tilt_deg=float(int(round(tilt))),
+            azimuth_deg=float(int(round(azimuth))),
+            horizon=horizon,
+        )
+
+    return f"{tilted_var},{dni_var}", {"payload_transform": _shade}
+
+
 def fetch_hourly_tilted_irradiance_wm2_series(
     start: date,
     end: date,
@@ -258,10 +326,18 @@ def fetch_hourly_tilted_irradiance_wm2_series(
     tilt: float,
     azimuth: float,
     timezone: str,
+    horizon: HorizonProfile | None = None,
 ) -> pd.Series:
-    """Stündliche geneigte Einstrahlung (W/m²) für eine Oberfläche."""
+    """Stündliche geneigte Einstrahlung (W/m²) für eine Oberfläche.
+
+    With ``horizon`` the direct beam is removed while the sun is behind it (SUSI P3a); only
+    then the request also asks for ``direct_normal_irradiance``.
+    """
     if end < start:
         raise ValueError("Open-Meteo Irradianz: end muss nicht vor start liegen.")
+    hourly_vars, transform = _tilted_request(
+        HOURLY_VAR, DNI_VAR, lat=lat, lon=lon, tilt=tilt, azimuth=azimuth, horizon=horizon
+    )
     chunks: list[pd.Series] = []
     for chunk_start, chunk_end in month_ranges(start, end + timedelta(days=1)):
         payload = _fetch_hourly_archive_chunk(
@@ -270,11 +346,12 @@ def fetch_hourly_tilted_irradiance_wm2_series(
             timezone=timezone,
             start=chunk_start,
             end=chunk_end,
-            hourly_vars=HOURLY_VAR,
+            hourly_vars=hourly_vars,
             extra_params={
                 "tilt": int(round(tilt)),
                 "azimuth": int(round(azimuth)),
             },
+            **transform,
         )
         chunks.append(payload[HOURLY_VAR])
     return _concat_hourly_chunks(chunks)
@@ -289,10 +366,23 @@ def fetch_hourly_tilted_irradiance_day1_forecast_wm2_series(
     tilt: float,
     azimuth: float,
     timezone: str,
+    horizon: HorizonProfile | None = None,
 ) -> pd.Series:
-    """Tilted irradiance as forecast 24 h earlier, local wall clock; NaN where no run is archived."""
+    """Tilted irradiance as forecast 24 h earlier, local wall clock; NaN where no run is archived.
+
+    With ``horizon`` shaded like the archive series, with the DNI of the same forecast run.
+    """
     if end < start:
         raise ValueError("Open-Meteo Prognosearchiv: end muss nicht vor start liegen.")
+    hourly_vars, transform = _tilted_request(
+        HOURLY_VAR_DAY1_FORECAST,
+        DNI_VAR_DAY1_FORECAST,
+        lat=lat,
+        lon=lon,
+        tilt=tilt,
+        azimuth=azimuth,
+        horizon=horizon,
+    )
     chunks: list[pd.Series] = []
     for chunk_start, chunk_end in month_ranges(start, end + timedelta(days=1)):
         payload = _fetch_hourly_archive_chunk(
@@ -301,12 +391,13 @@ def fetch_hourly_tilted_irradiance_day1_forecast_wm2_series(
             timezone=timezone,
             start=chunk_start,
             end=chunk_end,
-            hourly_vars=HOURLY_VAR_DAY1_FORECAST,
+            hourly_vars=hourly_vars,
             extra_params={
                 "tilt": int(round(tilt)),
                 "azimuth": int(round(azimuth)),
             },
             fetch=open_meteo.previous_runs,
+            **transform,
         )
         chunks.append(payload[HOURLY_VAR_DAY1_FORECAST])
     return _concat_hourly_chunks(chunks)
@@ -465,8 +556,13 @@ def open_meteo_cache_path(
     surfaces: list[TiltedSurface],
     *,
     cache_dir: Path | None = None,
+    horizon: HorizonProfile | None = None,
 ) -> Path:
     token = _surface_cache_token(_unique_surfaces(surfaces))
+    if horizon is not None:
+        # Unshaded UTC payloads with DNI, the same file for every horizon; the mask is
+        # applied on reading. Without a horizon the name is unchanged.
+        token = f"{token}_hzraw"
     tz_token = timezone.replace("/", "-")
     name = (
         f"{lat:.4f}_{lon:.4f}_{start.isoformat()}_{end.isoformat()}_"
@@ -580,6 +676,187 @@ def _save_bundle_to_cache(
     _store_bundle_mem(path, bundle)
 
 
+def _fetch_archive_payload(
+    *,
+    lat: float,
+    lon: float,
+    start: date,
+    end: date,
+    hourly_vars: str,
+    extra_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Raw UTC archive payload of the chunk ``[start, end)`` (one UTC day earlier, as above)."""
+    return open_meteo.archive(
+        opendata_session.session(),
+        latitude=lat,
+        longitude=lon,
+        start_date=start - timedelta(days=1),
+        end_date=end - timedelta(days=1),
+        hourly=hourly_vars,
+        extra_params=extra_params,
+    )
+
+
+def _raw_key(hourly_vars: str, start: date, end: date, surface: TiltedSurface | None) -> str:
+    where = ""
+    if surface is not None:
+        where = f"|{int(round(surface.tilt_deg))}|{int(round(surface.azimuth_deg))}"
+    return f"{hourly_vars}|{start.isoformat()}|{end.isoformat()}{where}"
+
+
+def _raw_requests(
+    start: date, end: date, surfaces: list[TiltedSurface]
+) -> list[tuple[str, date, date, TiltedSurface | None]]:
+    """(hourly variables, chunk start, chunk end, surface or None for the temperature)."""
+    chunks = list(month_ranges(start, end + timedelta(days=1)))
+    requests = [(HOURLY_TEMP_VAR, first, stop, None) for first, stop in chunks]
+    for surface in surfaces:
+        requests += [(f"{HOURLY_VAR},{DNI_VAR}", first, stop, surface) for first, stop in chunks]
+    return requests
+
+
+def _fetch_raw_payloads(
+    start: date, end: date, *, lat: float, lon: float, surfaces: list[TiltedSurface]
+) -> dict[str, dict]:
+    payloads: dict[str, dict] = {}
+    for hourly_vars, first, stop, surface in _raw_requests(start, end, surfaces):
+        extra = None
+        if surface is not None:
+            extra = {
+                "tilt": int(round(surface.tilt_deg)),
+                "azimuth": int(round(surface.azimuth_deg)),
+            }
+        payload = _fetch_archive_payload(
+            lat=lat, lon=lon, start=first, end=stop, hourly_vars=hourly_vars, extra_params=extra
+        )
+        payloads[_raw_key(hourly_vars, first, stop, surface)] = {"hourly": payload.get("hourly")}
+    return payloads
+
+
+def _load_raw_from_cache(path: Path) -> dict[str, dict] | None:
+    if not path.exists():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Open-Meteo cache unlesbar ({path}): {exc}") from exc
+    if not isinstance(doc, dict) or doc.get("version") != RAW_CACHE_VERSION:
+        raise ValueError(f"Open-Meteo cache ({path}): unbekannte Version.")
+    return doc["payloads"]
+
+
+def _save_raw_to_cache(path: Path, payloads: dict[str, dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps({"version": RAW_CACHE_VERSION, "payloads": payloads})
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def _bundle_from_raw(
+    payloads: dict[str, dict],
+    start: date,
+    end: date,
+    *,
+    lat: float,
+    lon: float,
+    timezone: str,
+    surfaces: list[TiltedSurface],
+    horizon: HorizonProfile,
+    source: str,
+) -> OpenMeteoClimateBundle:
+    """Temperature and shaded surface series from the unshaded UTC payloads."""
+    temperature: list[pd.Series] = []
+    tilted: dict[TiltedSurface, list[pd.Series]] = {surface: [] for surface in surfaces}
+    for hourly_vars, first, stop, surface in _raw_requests(start, end, surfaces):
+        key = _raw_key(hourly_vars, first, stop, surface)
+        if key not in payloads:
+            raise ValueError(f"Open-Meteo cache unvollständig ({source}): {key} fehlt.")
+        transform: dict[str, Any] = {}
+        if surface is not None:
+            _vars, transform = _tilted_request(
+                HOURLY_VAR,
+                DNI_VAR,
+                lat=lat,
+                lon=lon,
+                tilt=surface.tilt_deg,
+                azimuth=surface.azimuth_deg,
+                horizon=horizon,
+            )
+        series = _chunk_series(
+            payloads[key],
+            timezone=timezone,
+            start=first,
+            end=stop,
+            hourly_vars=hourly_vars,
+            **transform,
+        )
+        if surface is None:
+            temperature.append(series[HOURLY_TEMP_VAR])
+        else:
+            tilted[surface].append(series[HOURLY_VAR])
+    return OpenMeteoClimateBundle(
+        temperature_c=_concat_hourly_chunks(temperature),
+        tilted_wm2={surface: _concat_hourly_chunks(chunks) for surface, chunks in tilted.items()},
+    )
+
+
+def _build_shaded_bundle(
+    start: date,
+    end: date,
+    *,
+    lat: float,
+    lon: float,
+    timezone: str,
+    surfaces: list[TiltedSurface],
+    use_cache: bool,
+    cache_dir: Path | None,
+    horizon: HorizonProfile,
+) -> OpenMeteoClimateBundle:
+    """Bundle with a horizon: the weather is fetched once per site, the mask per horizon.
+
+    The file holds the unshaded payloads with DNI, so a changed horizon needs no request.
+    """
+    path = open_meteo_cache_path(
+        lat, lon, timezone, start, end, surfaces, cache_dir=cache_dir, horizon=horizon
+    )
+    mem_key = (_cache_path_key(path), horizon.token())
+    payloads = None
+    if use_cache:
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            mtime_ns = None
+        if mtime_ns is not None:
+            with _bundle_mem_lock:
+                hit = _shaded_mem_cache.get(mem_key)
+                if hit is not None and hit[0] == mtime_ns:
+                    _shaded_mem_cache.move_to_end(mem_key)
+                    return hit[1]
+        payloads = _load_raw_from_cache(path)
+    if payloads is None:
+        payloads = _fetch_raw_payloads(start, end, lat=lat, lon=lon, surfaces=surfaces)
+        if use_cache:
+            _save_raw_to_cache(path, payloads)
+    bundle = _bundle_from_raw(
+        payloads,
+        start,
+        end,
+        lat=lat,
+        lon=lon,
+        timezone=timezone,
+        surfaces=surfaces,
+        horizon=horizon,
+        source=str(path),
+    )
+    if use_cache:
+        mtime_ns = path.stat().st_mtime_ns
+        with _bundle_mem_lock:
+            _shaded_mem_cache[mem_key] = (mtime_ns, bundle)
+            _shaded_mem_cache.move_to_end(mem_key)
+            while len(_shaded_mem_cache) > _SHADED_MEM_MAX:
+                _shaded_mem_cache.popitem(last=False)
+    return bundle
+
+
 def build_open_meteo_climate_bundle(
     start: date,
     end: date,
@@ -590,10 +867,14 @@ def build_open_meteo_climate_bundle(
     surfaces: list[TiltedSurface],
     use_cache: bool = True,
     cache_dir: Path | None = None,
+    horizon: HorizonProfile | None = None,
 ) -> OpenMeteoClimateBundle:
     """
     Lädt Temperatur und geneigte Einstrahlung für alle Oberflächen.
     API-Fehler werden durchgereicht (kein Fallback).
+
+    With ``horizon`` every surface series is shaded (SUSI P3a). The cache file then holds the
+    unshaded data with DNI and is the same for every horizon.
     """
     end = _cap_inclusive_end(end)
     if end < start:
@@ -602,6 +883,18 @@ def build_open_meteo_climate_bundle(
             f"(letzter Archivtag: {archive_latest_complete_date().isoformat()})."
         )
     unique_surfaces = _unique_surfaces(surfaces)
+    if horizon is not None:
+        return _build_shaded_bundle(
+            start,
+            end,
+            lat=lat,
+            lon=lon,
+            timezone=timezone,
+            surfaces=unique_surfaces,
+            use_cache=use_cache,
+            cache_dir=cache_dir,
+            horizon=horizon,
+        )
     if use_cache:
         cached = _load_bundle_from_cache(
             lat,
@@ -659,6 +952,7 @@ def build_open_meteo_climate_bundle_for_year(
     surfaces: list[TiltedSurface],
     use_cache: bool = True,
     cache_dir: Path | None = None,
+    horizon: HorizonProfile | None = None,
 ) -> OpenMeteoClimateBundle:
     """Volles Kalenderjahr (01-01 .. 12-31)."""
     return build_open_meteo_climate_bundle(
@@ -670,4 +964,5 @@ def build_open_meteo_climate_bundle_for_year(
         surfaces=surfaces,
         use_cache=use_cache,
         cache_dir=cache_dir,
+        horizon=horizon,
     )

@@ -62,6 +62,15 @@ class TestParseMonth:
         ts = _parse_month("6")
         assert ts == pd.Timestamp(2026, 6, 1)
 
+    def test_parses_month_with_year(self, monkeypatch):
+        from datetime import date
+
+        monkeypatch.setattr(
+            "data.profile_manager.get_cons_data_date_bounds",
+            lambda: (date(2025, 3, 1), date(2026, 2, 28)),
+        )
+        assert _parse_month("2025-03") == pd.Timestamp(2025, 3, 1)
+
     def test_rejects_invalid_month(self):
         import argparse
 
@@ -91,7 +100,7 @@ class TestResolveBacktestingWindow:
         assert resolved_start <= resolved_end
 
     def test_june_2026_clamped_to_fixture_data(self, monkeypatch):
-        """Juni 2026: Enddatum wird auf letzten Log-Tag (2026-06-25) begrenzt."""
+        """Juni 2026: Enddatum wird auf letzten Log-Tag (2026-06-29) begrenzt."""
         monkeypatch.setattr(
             "scripts.run_backtesting.pd.Timestamp.now",
             lambda: pd.Timestamp("2026-07-03"),
@@ -104,7 +113,7 @@ class TestResolveBacktestingWindow:
             "last_12_months",
         )
         assert resolved_start == pd.Timestamp("2026-06-01")
-        assert resolved_end == pd.Timestamp("2026-06-25")
+        assert resolved_end == pd.Timestamp("2026-06-29")
 
     def test_requires_both_months(self):
         start = _parse_month("6")
@@ -175,3 +184,20 @@ class TestSocChainTwoWindows:
         assert not all(df["sim_soc"] == pytest.approx(50.0, abs=0.01)), (
             "SoC sollte sich über zwei Fenster hinweg verändern"
         )
+
+
+
+def test_calendar_window_anchors_cover_the_sunrise_chain(monkeypatch):
+    from scripts.run_backtesting import calendar_window_anchors
+    from simulation.horizon_mode import FIXED_24H, SUNRISE_WINDOW
+
+    monkeypatch.setattr(
+        "scripts.run_backtesting.window_anchor_for_date",
+        lambda day: pd.Timestamp(day).to_pydatetime().replace(hour=7),
+    )
+    start, end = pd.Timestamp("2025-03-01"), pd.Timestamp("2025-03-31")
+    fixed = calendar_window_anchors(start, end, FIXED_24H)
+    assert min(fixed) == "2025-03-01" and max(fixed) == "2025-03-31"
+    sunrise = calendar_window_anchors(start, end, SUNRISE_WINDOW)
+    assert min(sunrise) == "2025-03-01" and max(sunrise) == "2025-04-01"
+    assert sunrise["2025-04-01"] == "2025-04-01T07:00:00"

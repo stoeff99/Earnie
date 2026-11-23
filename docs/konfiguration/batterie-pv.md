@@ -22,9 +22,10 @@ Im **Szenario-Explorer** (Verbrauchsdaten / cons_data) gilt für die PV-Linien:
 | `backing` / `role` / `attached_consumer_ids` | – | `components.json` → Powerstation | Nur bei `type: powerstation`: `virtual`\|`physical` bzw. `single_use`\|`standby_backup`. `attached_consumer_ids` (Liste) ist optional; die Zuordnung ist auch über manuelle Geräte mit `mode: reserve` + `powerstation_id` möglich. Ältere Konfigurationen: `attached_consumer_id` entspricht dem ersten Listenelement. |
 | `inverter_id` | – | `components.json` → `batteries[]` / `pv_systems[]` | Referenz auf `inverters[].id`. Pflicht für Hausbatterien, physische Powerstations und alle PV-Felder. Virtuelle Powerstations haben **keinen** Wechselrichter. |
 | `kwp` | kWp | `components.json` → `pv_systems[]` | Installierte PV-Leistung je Anlage; die Summe ergibt `pv_kwp` |
-| `pv_tilt` | ° | `components.json` → `pv_systems[]` | Dachneigung **je Anlage** (bei mehreren Anlagen gibt es keine gemeinsame Neigung) |
+| `pv_tilt` | ° | `components.json` → `pv_systems[]` | Dachneigung **je Anlage** (bei mehreren Anlagen gibt es keine gemeinsame Neigung). Nachkommastellen sind erlaubt (z. B. `17.5`) |
 | `pv_azimuth` | ° | `components.json` → `pv_systems[]` | Ausrichtung je Anlage: `0` = Süd, `-90` = Ost, `90` = West |
 | `latitude`, `longitude` | ° | `house_profiles.json` (über das Szenario) | Standort für die PV-Prognose (Forecast.Solar / Open-Meteo). Alternativ je PV-Anlage Solcast über MQTT, siehe [MQTT-Anbindung](../einrichtung/mqtt.md#pv-prognose-von-solcast-loxberry-plugin-pv-solcast-ng) |
+| `horizon_source`, `horizon` | – / ° | `house_profiles.json` | Horizont am Standort (Gelände, Gebäude, Bäume), siehe [Horizont](#horizont). Ohne die Felder rechnet Earnie mit freiem Horizont. |
 | `k_push_cent` | Cent/kWh | `tariffs.json` (Export-Tarif) | **Einspeisevergütung** |
 | `battery_capacity_kwh` | kWh | `components.json` → `batteries[]` | Nutzbare Speicherkapazität |
 | `battery_max_charge_power_kw` | kW | `components.json` → `batteries[]` | Max. Ladeleistung (ersetzt das gemeinsame `battery_max_power_kw`) |
@@ -67,13 +68,13 @@ Solange ein Gerät aktiv ist, gibt Earnie die gehaltene Reserve frei, der SoC-Fl
 - Im Modus **Automatik** begrenzt Earnie das geschriebene Entladelimit auf die Energie über diesem Floor, die in einer Viertelstunde abfließen darf. Bei 13 % SoC sind das rund 0,4 kW. So kann ein großer Verbraucher (z. B. SwimSpa) die Reserve nicht innerhalb eines Slots leeren, die danach aus dem Netz nachgeladen werden müsste. Weiter über dem Floor bleibt das volle Entladelimit. Unabhängig davon kann der Plan das Entladelimit im Automatikbetrieb begrenzen (siehe [Benutzer-Handbuch](../user-manual/Benutzer-Handbuch-Earnie.md), „Entladegrenze im Automatikbetrieb“); es gilt der kleinere Wert.
 - Die Anlage meldet den SoC in ganzen Prozent. Liegt die Anzeige höchstens 1 % unter dem Floor (z. B. 12 % bei 12,3 %), nimmt Earnie die Anzeige als Floor und lädt nicht sofort nach. Liegt der SoC weiter darunter, lädt Earnie die Reserve wie bisher nach.
 
-Einige Felder sind ausgeblendet: Max. Lade-/Entladeleistung, Wirkungsgrad, SoC-Grenzen, Leistungsschwelle, Standby, Steuerbarkeit, `limits_from_live` und Verschleiß. Beim Speichern bzw. Normalisieren übernimmt Earnie diese Werte von der Hausbatterie. Ohne Hausbatterie gelten feste Defaults.
+Einige Felder sind ausgeblendet: Max. Lade-/Entladeleistung, Wirkungsgrad, SoC-Grenzen, Leistungsschwelle, Standby, Steuerbarkeit, `limits_from_live` und Verschleiß. Beim Speichern bzw. Normalisieren übernimmt Earnie diese Werte von der Hausbatterie. Ohne Hausbatterie speichert der Hauskonfigurator die virtuelle Powerstation nicht. Er zeigt dann einen Fehler; lege zuerst eine Hausbatterie an oder wähle Backing „Physisch“.
 
 - Die Entladeleistung der virtuellen Powerstation ist immer `0`.
 - Der Verschleiß bleibt aus, weil die Zyklen auf der Hausbatterie zählen.
 - Ein `inverter_id` gibt es nicht.
 
-Physische Powerstations (`backing: physical`) behalten das volle Batterie-Formular. Sie bekommen einen **integrierten Powerstation-Wechselrichter** (`owned_by` = Batterie-ID, Abschnitt „Integrierter Wechselrichter“ im Hauskonfigurator). Dieser speist nur die angeschlossenen Verbraucher, nicht den AC-Bus des Hauses. Sein AC-Eingang kann am Netz hängen (einseitige Last), das Gerät ist also **nicht** „netzlos“.
+Physische Powerstations (`backing: physical`) behalten das volle Batterie-Formular. Sie bekommen einen **integrierten Powerstation-Wechselrichter** (`owned_by` = Batterie-ID, Abschnitt „Integrierter Wechselrichter“ im Hauskonfigurator). Dieser speist nur die angeschlossenen Verbraucher, nicht den AC-Bus des Hauses. Sein AC-Eingang kann am Netz hängen (einseitige Last), das Gerät ist also **nicht** „netzlos“. Der Wechselrichter heißt `wr_<Batterie-ID>`. Ändert sich die Batterie-ID, zieht er mit allen Feldern und Bindings auf die neue ID um. Felder, die der Abschnitt nicht zeigt (z. B. `max_ac_charge_kw`), bleiben beim Speichern erhalten.
 
 ### Standby-Backup (`role: standby_backup`)
 
@@ -98,11 +99,45 @@ Die Live-PV-Leistung (AC-Summe der Anlage) leitet Earnie aus den netzgekoppelten
 
 Earnie holt die PV-Prognose je PV-Feld in dieser Reihenfolge:
 
-1. **forecast.solar** mit Neigung, Ausrichtung und kWp des Felds. Earnie fragt höchstens alle 15 min neu ab und hält ein Rate-Limit (HTTP 429) ein. Dazwischen nutzt es die letzte Antwort. Diese liegt auch in `runtime/pv_forecast_cache.json` und überbrückt so einen Neustart, solange sie höchstens 6 h alt ist. forecast.solar liefert die Leistung **zum** jeweiligen Zeitpunkt (volle Stunden sowie Sonnenauf- und -untergang). Earnie nimmt für jeden Slot den Mittelwert dieses Verlaufs über die Dauer des Slots. Damit stimmt die Slot-Energie mit der Stundenenergie von forecast.solar überein, auch in der Stunde von Sonnenauf- und -untergang.
+1. **forecast.solar** mit Neigung, Ausrichtung und kWp des Felds, bei eingeschaltetem Horizont auch mit der Horizontlinie (siehe *Horizont* unten). Earnie fragt höchstens alle 15 min neu ab und hält ein Rate-Limit (HTTP 429) ein. Dazwischen nutzt es die letzte Antwort. Diese liegt auch in `runtime/pv_forecast_cache.json` und überbrückt so einen Neustart, solange sie höchstens 6 h alt ist. forecast.solar liefert die Leistung **zum** jeweiligen Zeitpunkt (volle Stunden sowie Sonnenauf- und -untergang). Earnie nimmt für jeden Slot den Mittelwert dieses Verlaufs über die Dauer des Slots. Damit stimmt die Slot-Energie mit der Stundenenergie von forecast.solar überein, auch in der Stunde von Sonnenauf- und -untergang.
 2. **Open-Meteo-Einstrahlung** (`global_tilted_irradiance`) für Neigung und Ausrichtung des Felds, wenn forecast.solar keine Daten liefert. Die Leistung ist Einstrahlung / 1000 W/m² × kWp, wie im Backtesting. Das Log meldet das als WARNING, und das Cockpit zeigt einen Hinweis mit den betroffenen PV-Feldern.
 3. **Abbruch des Zyklus**, wenn auch Open-Meteo nicht antwortet. Earnie plant dann nicht mit erfundenen PV-Werten, sondern meldet einen Fehler und versucht es im nächsten Zyklus erneut, wie bei fehlenden Day-Ahead-Preisen.
 
 Die Quelle je PV-Feld steht im Laufzustand (`optimizer_run_state.json`, Feld `pv_forecast_sources`: `forecast_solar`, `open_meteo` oder `none` bei 0 kWp).
+
+<a id="horizont"></a>
+
+### Horizont (Verschattung durch Gelände und Gebäude)
+
+Steht die Sonne hinter einem Berg, einem Nachbarhaus oder einem Baum, erreicht sie das Haus nicht direkt. Earnie kann das einrechnen: Im Hauskonfigurator unter **Standort** den Schalter **Horizont berücksichtigen** einschalten und für 16 Himmelsrichtungen (alle 22,5°) den Höhenwinkel des Horizonts einstellen. Das Diagramm zeigt je Richtung einen Balken, beschriftet mit Himmelsrichtung und Azimut wie bei den PV-Feldern (Süd 0°, Ost -90°, West 90°): den Balken mit der Maus auf die Höhe ziehen oder mit ▲ / ▼ in 1°-Schritten ändern. Richtungen, die die Sonne am Standort nie erreicht, sind grau und bleiben auf 0°.
+
+**Messen:** vom Dach oder von der PV-Anlage aus mit der Kompass-App die Richtung und mit der Neigungsmesser-App des Handys den Winkel bis zur Oberkante von Berg, Haus oder Baum anpeilen. 0° heißt freier Horizont. Das Diagramm zeigt hinter den Balken den Horizont als graue Fläche und die Sonnenbahnen am 21. Juni, zur Tagundnachtgleiche und am 21. Dezember. Wo eine Sonnenbahn unter dem Horizont liegt, fehlt an diesem Tag die direkte Sonne.
+
+| Feld | Bedeutung |
+| ---- | --------- |
+| `horizon_source` | `manual`: die Liste in `horizon` wird angewendet. `none`: kein Horizont; eine vorhandene Liste bleibt gespeichert, wirkt aber nicht (Schalter aus). |
+| `horizon` | Liste aus `azimuth_deg` (0 = Süd, -90 = Ost, 90 = West, ±180 = Nord, wie bei den PV-Feldern) und `elevation_deg` (0–90°). Zwischen den Punkten interpoliert Earnie linear, auch über Nord hinweg. |
+
+```json
+"horizon_source": "manual",
+"horizon": [{"azimuth_deg": -90, "elevation_deg": 4},
+            {"azimuth_deg": -45, "elevation_deg": 12},
+            {"azimuth_deg": 0, "elevation_deg": 18},
+            {"azimuth_deg": 45, "elevation_deg": 9},
+            {"azimuth_deg": 90, "elevation_deg": 0}]
+```
+
+**So rechnet Earnie:** Für jede Stunde bestimmt Earnie den Sonnenstand an vier Zeitpunkten. Liegt die Sonne unter dem Horizont ihrer Richtung, entfällt für diesen Teil der Stunde die direkte Einstrahlung auf die Fläche. Das diffuse Licht des Himmels und das vom Boden reflektierte Licht bleiben. Dafür fragt Earnie bei Open-Meteo zusätzlich die Direktstrahlung (`direct_normal_irradiance`) ab, und zwar nur, wenn ein Horizont eingeschaltet ist.
+
+**Wo der Horizont wirkt:**
+
+- **PV-Ertrag** im Szenarien-Explorer und im Jahresmodell (Open-Meteo-Archiv), auch im Prognose-Modus des Szenarien-Explorers.
+- **Solarthermie-Kollektor** und **solare Gewinne durch die Fenster**, im Jahresmodell und in der Live-Planung. Der Verlustkoeffizient H des Hauses wird mit den beschatteten Gewinnen kalibriert; die Jahres-Heizwärme bleibt also beim HWB.
+- **PV-Prognose im Live-Betrieb:** Earnie übergibt den eingetragenen Horizont an forecast.solar (in 10°-Schritten, ganze Grad). Fällt forecast.solar aus, wirkt er genauso im Ersatzweg über Open-Meteo.
+
+> **Wichtig für forecast.solar:** Ohne eingetragenen Horizont rechnet forecast.solar mit dem Gelände am Standort (PVGIS-Horizont). Der eingetragene Horizont **ersetzt** dieses Gelände. Tragen Sie deshalb auch entfernte Berge ein, nicht nur Nachbarhäuser und Bäume; sonst fehlt der Bergschatten in der PV-Prognose.
+
+> **Hinweis:** Ein eingeschalteter Horizont ändert die Ergebnisse: PV-Ertrag und Kollektorwärme sinken vor allem im Winter und in den Randstunden. Ohne die beiden Felder oder mit ausgeschaltetem Schalter bleibt alles wie bisher.
 
 ## Wechselrichter (`inverters[]`)
 

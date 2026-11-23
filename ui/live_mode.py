@@ -65,9 +65,17 @@ def _snapshot_cache_key(
     span: str,
 ) -> str:
     completed = snapshot_completed_at(snapshot) or ""
+    # main.py writes the display snapshot before it books the ledger slot; without the
+    # ledger's last booked slot in the key, Chart 2 lags one slot until the next run.
+    ledger_state = savings_ledger_store.peek_state().state
+    ledger_last = (
+        ledger_state.last_slot_start.isoformat()
+        if ledger_state is not None and ledger_state.last_slot_start is not None
+        else ""
+    )
     return (
         f"{current_slot}|{completed}|{simulation_settings_fingerprint()}"
-        f"|s2:{cycle_offset}:{segment_index}:{span}"
+        f"|s2:{cycle_offset}:{segment_index}:{span}|ledger:{ledger_last}"
     )
 
 
@@ -214,7 +222,7 @@ def _restore_cached_opt_in_bundle() -> None:
 
 
 def _opt_in_planning_inputs() -> tuple[object, list] | None:
-    """Planungsfenster + Matrix; None wenn keine Börsenpreise verfügbar sind."""
+    """Planungsfenster + Matrix; None ohne Börsenpreise, PV-Prognose oder Verbrauchsprofile."""
     planning_window = profile_manager.compute_live_planning_window()
     market_data = fetch_live_day_ahead_prices(planning_end=planning_window.end)
     if not market_data:
@@ -224,7 +232,14 @@ def _opt_in_planning_inputs() -> tuple[object, list] | None:
         )
         st.session_state.pop(SESSION_LIVE_DISPLAY_BUNDLE, None)
         return None
-    matrix = profile_manager.build_live_planning_matrix(market_data, planning_window)
+    from data.pv_forecast import PvForecastUnavailableError
+
+    try:
+        matrix = profile_manager.build_live_planning_matrix(market_data, planning_window)
+    except (PvForecastUnavailableError, profile_manager.ConsumptionProfileUnavailableError) as exc:
+        st.error(f"🚨 Planung nicht möglich: {exc}")
+        st.session_state.pop(SESSION_LIVE_DISPLAY_BUNDLE, None)
+        return None
     return planning_window, matrix
 
 
@@ -235,6 +250,12 @@ def _opt_in_consumption_snapshot(main_state: dict | None):
         if age is not None and age <= optimization_schedule.QUARTER_HOUR_SECONDS * 1.5:
             return main_state["consumption_snapshot"]
     return live_consumption.fetch_live_consumption_snapshot(main_state)
+
+
+def _opt_in_initial_soc(main_state: dict | None, current_soc: float) -> float:
+    """SOC of the last main run; the live SOC when the run stored none (missing or null)."""
+    stored = (main_state or {}).get("soc_percent")
+    return float(stored) if stored is not None else float(current_soc)
 
 
 def _store_opt_in_session_state(
@@ -278,7 +299,7 @@ def _run_opt_in_live_simulation(
     if snapshot and live_consumption.reject_live_matrix_snapshot_reason(snapshot) is None:
         matrix = live_consumption.apply_live_snapshot_to_matrix(matrix, snapshot, hour_index=0)
 
-    sim_soc = float(main_state.get("soc_percent", current_soc)) if main_state else current_soc
+    sim_soc = _opt_in_initial_soc(main_state, current_soc)
     targets = consumer_targets.resolve_consumer_daily_targets(matrix=matrix)
     savings_info = optimizer.calculate_optimization_savings(
         matrix,
@@ -381,6 +402,15 @@ def _live_optimization_prepare_fragment(current_soc: float) -> None:
     _render_main_down_notice(snapshot, persisted_fresh=False)
     if st.session_state.get(SESSION_OPT_IN_SIMULATION):
         _run_opt_in_live_simulation(current_soc, main_state, current_slot, reason)
+        return
+    # The opt-in flag is popped after the run; keep showing its result on later
+    # fragment ticks for the same slot instead of dropping the charts again.
+    if _opt_in_cache_valid(_opt_in_cache_key(current_slot, main_state)):
+        _restore_cached_opt_in_bundle()
+        st.caption(
+            "Angezeigt: einmalige UI-Simulation für diesen Viertelstunden-Slot "
+            "(kein main.py-Lauf)."
+        )
         return
 
     if snapshot:

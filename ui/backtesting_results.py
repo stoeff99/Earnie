@@ -30,7 +30,10 @@ from ui.backtesting_charts import scenario_monthly_cost_chart
 from ui.backtesting_cons_data import render_cons_data_section
 from ui.backtesting_deviation_list import render_deviation_list
 from ui.backtesting_ladder import render_ladder_headline
+from ui.backtesting_baseline import render_baseline_selector
 from ui.backtesting_results_helpers import (
+    _resolve_live_scenario_id,
+    _totals_with_fuel,
     build_annual_cost_rows,
     build_capacity_rows,
     build_scenario_consumption_rows,
@@ -168,7 +171,9 @@ def _annual_cost_details_markdown() -> str:
 
 def render_annual_cost_table(meta: dict) -> None:
     st.subheader("Gesamtkosten und -Verbrauch")
-    rows = build_annual_cost_rows(meta)
+    totals = _totals_with_fuel(meta, meta.get("summary", {}).get("total_eur", {}))
+    baseline = render_baseline_selector(meta, totals, _resolve_live_scenario_id(meta))
+    rows = build_annual_cost_rows(meta, baseline)
     if not rows:
         st.info("Keine Gesamtkosten im Log.")
         return
@@ -177,7 +182,12 @@ def render_annual_cost_table(meta: dict) -> None:
             "Gebuchte Verbrauchssummen fehlen in diesem Log (älterer Lauf). "
             "Bitte Szenario-Explorer neu berechnen."
         )
-    st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+    from house_config.currency_display import display_label
+
+    # Column names carry "€" (upstream constants): show them in the house currency.
+    frame = pd.DataFrame(rows)
+    frame.columns = [display_label(str(column)) for column in frame.columns]
+    st.dataframe(frame, width="stretch", hide_index=True)
     fee_map = meta.get("monthly_fee_by_scenario") or {}
     has_fees = any(float(v or 0) > 0 for v in fee_map.values())
     fee_note = (
@@ -198,6 +208,9 @@ def render_annual_cost_table(meta: dict) -> None:
         + fee_note
         + "Volumetrische **Netznutzung Arbeitspreis** (Hausprofil) fließt in die "
         "Kosten ein und erscheint in Fake-Jahresrechnungen getrennt. "
+        "**Δ** = Jahres Kosten des Szenarios minus Jahres Kosten der gewählten "
+        "Vergleichsbasis, negativ heißt günstiger; der Ladestand am Periodenende ist darin "
+        "nicht bewertet. "
         "Abweichung >5% vs. Live-Referenz → Warnung in Spalte Hinweis "
         "(Config-Dump über Info / About → Kontakt). "
         f"Details: {_annual_cost_details_markdown()}."

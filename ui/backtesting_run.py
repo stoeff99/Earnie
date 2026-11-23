@@ -30,8 +30,17 @@ from simulation.backtesting_progress import (
     format_progress_bar_caption,
     ordered_backtesting_result_ids,
 )
-from simulation.engine import HISTORICAL_REFERENCE_ID, plan_per_scenario_reference_tasks
-from simulation.reference_ladder import plan_ladder_reference_tasks
+from simulation.engine import HISTORICAL_REFERENCE_ID
+from simulation.run_exit_codes import EXIT_ABORTED
+from runtime_store.env_vars import is_rule_reference_enabled
+from simulation.reference_selection import (
+    DEFAULT_REFERENCES,
+    REF_HISTORICAL,
+    REF_L0,
+    REF_L1,
+    SELECTABLE_REFERENCES,
+    effective_references,
+)
 from simulation.horizon_mode import DEFAULT_HORIZON_MODE, FIXED_24H, SUNRISE_WINDOW
 from ui.backtesting_charts import scenario_monthly_cost_chart
 from ui.backtesting_cons_data import render_cons_data_section
@@ -52,6 +61,7 @@ from ui.backtesting_runner import (
     count_backtesting_parallel_tasks,
     default_progress_file_path,
     finish_backtesting_run,
+    plan_run_references,
     poll_backtesting_progress,
     start_backtesting_subprocess,
     suggest_test_month,
@@ -59,7 +69,7 @@ from ui.backtesting_runner import (
 from ui.backtesting_time_ranges import render_time_range_help
 from ui.doc_links import DocLink, get_page_docs, markdown_doc_link
 from ui.scenario_form_helpers import ordered_user_scenario_ids
-from scripts.run_backtesting import BACKTESTING_YEAR, HISTORICAL_REFERENCE_LABEL
+from scripts.run_backtesting import HISTORICAL_REFERENCE_LABEL
 _LEGACY_STALE_WARNING = (
     "Älterer Szenario-Explorer-Lauf ohne Konfigurations-Fingerabdruck — "
     "bitte einmal neu berechnen."
@@ -86,6 +96,9 @@ _BACKTESTING_LOG_ANCHOR_KEY = "_backtesting_log_anchor"
 # Running SE subprocess of this session: survives reruns and page changes, so the page
 # attaches to it again (progress, cancel) instead of losing it.
 _ACTIVE_RUN_KEY = "_backtesting_active_run"
+# Result of a run that failed or was cancelled, kept until the next run starts: a click at
+# the moment the run ends interrupts the script, and the result would be gone.
+_LAST_RESULT_KEY = "_backtesting_last_result"
 _CANCELLED_INFO = (
     "Szenario-Explorer abgebrochen. Es wurde kein neues Ergebnis gespeichert; "
     "die bisherigen Ergebnisse bleiben unverändert."
@@ -152,37 +165,28 @@ def _prepare_backtesting_run_context() -> dict | None:
     mark_se_simulation_started()
     scenarios, _ = try_get_backtesting_scenarios()
     live_scenario_id = config.get_live_scenario_id()
-    parallel_task_count = count_backtesting_parallel_tasks(
-        scenarios or {},
-        live_scenario_id=live_scenario_id,
-    )
     scenario_labels = config.get_scenario_labels()
-    own_ref_flags = config.get_own_reference_flags()
-    _, extra_ref_labels, extra_ref_specs = plan_per_scenario_reference_tasks(
+    references = selected_run_references()
+    plan = plan_run_references(
         scenarios or {},
         live_scenario_id=live_scenario_id,
+        references=references,
         scenario_labels=scenario_labels,
-        own_reference_by_scenario=own_ref_flags,
-    )
-    _, ladder_specs = plan_ladder_reference_tasks(
-        scenarios or {}, scenario_labels=scenario_labels
     )
     return {
-        "workers": auto_backtesting_workers(parallel_task_count),
+        "references": references,
+        "workers": auto_backtesting_workers(plan.parallel_task_count(len(scenarios or {}))),
         "progress_file": default_progress_file_path(),
         "labels_for_order": {
             HISTORICAL_REFERENCE_ID: HISTORICAL_REFERENCE_LABEL,
             **scenario_labels,
-            **extra_ref_labels,
-            **{spec.ref_id: spec.label for spec in ladder_specs},
+            **{ref_id: label for ref_id, _params, label in plan.l0_specs},
+            **{spec.ref_id: spec.label for spec in plan.ladder_specs},
         },
         "preferred_progress_ids": ordered_backtesting_result_ids(
             scenarios or {},
             live_scenario_id=live_scenario_id,
-            extra_ref_ids=[
-                *(ref_id for ref_id, _params, _label in extra_ref_specs),
-                *(spec.ref_id for spec in ladder_specs),
-            ],
+            extra_ref_ids=[ref_id for ref_id, _params, _label in plan.all_ref_specs],
         ),
         "eta_tracker": ProgressEtaTracker(),
     }
@@ -237,21 +241,24 @@ def _render_backtesting_progress(snapshot: dict, ctx: dict, progress_host) -> No
 
 def _execute_backtesting_run(
     *,
-    start_month: int | None = None,
-    end_month: int | None = None,
+    test_month: pd.Period | None = None,
     status_label: str,
     horizon_mode: str = DEFAULT_HORIZON_MODE,
 ) -> None:
     ctx = _prepare_backtesting_run_context()
     if ctx is None:
         return
+    # "YYYY-MM": a bare month number would land in the year of the cons_data end.
+    month_arg = None if test_month is None else f"{test_month.year}-{test_month.month:02d}"
+    st.session_state.pop(_LAST_RESULT_KEY, None)
     try:
         run = start_backtesting_subprocess(
-            start_month=start_month,
-            end_month=end_month,
+            start_month=month_arg,
+            end_month=month_arg,
             progress_file=ctx["progress_file"],
             horizon_mode=horizon_mode,
             workers=ctx["workers"],
+            references=ctx["references"],
         )
     except FileNotFoundError as exc:
         st.error(str(exc))
@@ -260,8 +267,7 @@ def _execute_backtesting_run(
         "run": run,
         "ctx": ctx,
         "status_label": status_label,
-        "start_month": start_month,
-        "end_month": end_month,
+        "calendar_month": None if test_month is None else int(test_month.month),
     }
     follow_active_backtesting_run()
 
@@ -280,10 +286,12 @@ def follow_active_backtesting_run() -> bool:
     """Show the session's running SE run (progress, cancel) until it ends. False without one.
 
     A click elsewhere interrupts this script run (Streamlit rerun), not the subprocess: the
-    run stays in the session and the next page run attaches to it again.
+    run stays in the session and the next page run attaches to it again. Without a run, the
+    result of the last failed or cancelled one is shown.
     """
     active = active_backtesting_run()
     if active is None:
+        _render_last_run_result()
         return False
     run: BacktestingRun = active["run"]
     ctx = active["ctx"]
@@ -303,68 +311,147 @@ def follow_active_backtesting_run() -> bool:
             _render_backtesting_progress(snapshot, ctx, progress_host)
 
         poll_backtesting_progress(run, _on_progress)
-        st.session_state.pop(_ACTIVE_RUN_KEY, None)
         exit_code, output = finish_backtesting_run(run)
-        _show_backtesting_run_result(status, exit_code, output, active)
+        # The result goes into the session before the run leaves it: an interrupted script
+        # run finds either the run (and finishes it again) or its result.
+        _store_backtesting_run_result(exit_code, output, active)
+        st.session_state.pop(_ACTIVE_RUN_KEY, None)
+        if exit_code == 0:
+            status.update(label="Szenario-Explorer abgeschlossen", state="complete")
+    # Rerun in every case: the page above was drawn while the run was still going.
+    st.rerun()
     return True
 
 
-def _show_backtesting_run_result(status, exit_code: int, output: str, active: dict) -> None:
-    start_month = active["start_month"]
-    end_month = active["end_month"]
+def _store_backtesting_run_result(exit_code: int, output: str, active: dict) -> None:
     if exit_code == 0:
-        status.update(label="Szenario-Explorer abgeschlossen", state="complete")
         load_backtesting_data.clear()
-        if (
-            start_month is not None
-            and end_month is not None
-            and int(start_month) == int(end_month)
-        ):
-            st.session_state["backtesting_calendar_month"] = int(start_month)
+        calendar_month = active["calendar_month"]
+        if calendar_month is not None:
+            st.session_state["backtesting_calendar_month"] = calendar_month
             st.session_state.pop("backtesting_calendar_date", None)
-        st.rerun()
         return
-    if exit_code == EXIT_CANCELLED and active["run"].cancel_requested:
-        status.update(label="Szenario-Explorer abgebrochen", state="error")
-        st.info(_CANCELLED_INFO)
+    st.session_state[_LAST_RESULT_KEY] = {
+        "exit_code": exit_code,
+        "output": output,
+        "cancelled": exit_code == EXIT_CANCELLED and active["run"].cancel_requested,
+    }
+
+
+def _render_last_run_result() -> None:
+    result = st.session_state.get(_LAST_RESULT_KEY)
+    if result is None:
         return
-    status.update(label="Szenario-Explorer fehlgeschlagen", state="error")
-    hint = _format_backtesting_run_error(output)
-    if hint:
-        st.error(hint)
-    st.error(f"Exit-Code {exit_code}")
-    tail = output[-8000:] if len(output) > 8000 else output
-    if tail:
-        st.code(tail)
+    if result["cancelled"]:
+        with st.status("Szenario-Explorer abgebrochen", state="error", expanded=True):
+            st.info(_CANCELLED_INFO)
+        return
+    title = (
+        "Szenario-Explorer nicht gestartet"
+        if result["exit_code"] == EXIT_ABORTED
+        else "Szenario-Explorer fehlgeschlagen"
+    )
+    with st.status(title, state="error", expanded=True):
+        output = result["output"]
+        hint = _format_backtesting_run_error(output)
+        if hint:
+            st.error(hint)
+        st.error(f"Exit-Code {result['exit_code']}")
+        tail = output[-8000:] if len(output) > 8000 else output
+        if tail:
+            st.code(tail)
 
 def _render_season_mirror_toggle() -> None:
     from data.cons_data_season_mirror import is_season_mirror_enabled
     from ui.house_config_io import load_main_config, save_main_config
 
     mirror_key = "backtesting_season_mirror_to_last_month"
-    if mirror_key not in st.session_state:
-        st.session_state[mirror_key] = is_season_mirror_enabled()
+
+    def _save_season_mirror() -> None:
+        cfg = load_main_config()
+        sim = dict(cfg.get("scenario_explorer_conf") or {})
+        sim["season_mirror_to_last_month"] = bool(st.session_state[mirror_key])
+        cfg["scenario_explorer_conf"] = sim
+        save_main_config(cfg)
+
+    # The file leads: only a click writes it (callback, before this script run), so a tab
+    # with an old widget value cannot write that value back.
+    st.session_state[mirror_key] = is_season_mirror_enabled()
     mirror_checked = st.checkbox(
         "Verbrauchsdaten auf letzten Kalendermonat spiegeln (aktuelle Tarife)",
         key=mirror_key,
+        on_change=_save_season_mirror,
         help=(
             "Kalendermonate aus cons_data auf die letzten 12 vollständigen Monate "
             "(Wanduhr) abbilden, damit Spot-/Tarifpreise aktuell sind. "
             "Die CSV-Datei auf der Festplatte bleibt unverändert."
         ),
     )
-    if bool(mirror_checked) != is_season_mirror_enabled():
-        cfg = load_main_config()
-        sim = dict(cfg.get("scenario_explorer_conf") or {})
-        sim["season_mirror_to_last_month"] = bool(mirror_checked)
-        cfg["scenario_explorer_conf"] = sim
-        save_main_config(cfg)
-        st.rerun()
     if mirror_checked:
         st.caption(
             "Season-Mirror aktiv: Verbrauch/PV nach Kalendermonat auf den "
             "aktuellen 12-Monats-Horizont gespiegelt."
         )
+
+
+_REFERENCE_BOX_KEYS = {
+    REF_HISTORICAL: "backtesting_reference_historical",
+    REF_L0: "backtesting_reference_l0",
+    REF_L1: "backtesting_reference_l1",
+}
+_REFERENCE_BOX_LABELS = {
+    REF_HISTORICAL: "Historisch",
+    REF_L0: "Referenz ohne Speicher",
+    REF_L1: "Wechselrichter-Eigenverbrauch (L1)",
+}
+_REFERENCE_BOX_HELP = {
+    REF_HISTORICAL: (
+        "Live-Szenario ohne PV und ohne Speicher, mit dem Tarif von Live. Eine Reihe für alle "
+        "Szenarien."
+    ),
+    REF_L0: (
+        "Je Szenario: Tarif und PV des Szenarios, ohne Speicher, Verbraucher zu ihren üblichen "
+        "Zeiten."
+    ),
+    REF_L1: (
+        "Je Szenario: Speicher im Eigenverbrauchsmodus des Wechselrichters, ohne Preislogik, "
+        "Verbraucher zu ihren üblichen Zeiten."
+    ),
+}
+
+
+def selected_run_references() -> tuple[str, ...]:
+    """The ticked reference boxes of the run page (without what L2 adds)."""
+    return tuple(
+        ref for ref in SELECTABLE_REFERENCES if st.session_state.get(_REFERENCE_BOX_KEYS[ref])
+    )
+
+
+def _render_reference_boxes(meta: dict | None) -> None:
+    """Three global boxes for the references of the next run, seeded from the last run."""
+    if not all(key in st.session_state for key in _REFERENCE_BOX_KEYS.values()):
+        last = (meta or {}).get("references")
+        seed = tuple(last) if isinstance(last, list) else DEFAULT_REFERENCES
+        for ref, key in _REFERENCE_BOX_KEYS.items():
+            st.session_state.setdefault(key, ref in seed)
+    rule_reference = is_rule_reference_enabled()
+    forced = set(effective_references((), rule_reference=rule_reference))
+    st.markdown("**Referenzen berechnen** (für alle aktiven Szenarien)")
+    for column, ref in zip(st.columns(len(SELECTABLE_REFERENCES)), SELECTABLE_REFERENCES):
+        if ref in forced:
+            st.session_state[_REFERENCE_BOX_KEYS[ref]] = True
+        column.checkbox(
+            _REFERENCE_BOX_LABELS[ref],
+            key=_REFERENCE_BOX_KEYS[ref],
+            disabled=ref in forced,
+            help=_REFERENCE_BOX_HELP[ref],
+        )
+    if forced:
+        st.caption(
+            "Standard-Regeln sind eingeschaltet: Referenz ohne Speicher und L1 laufen immer mit."
+        )
+    if not selected_run_references() and not forced:
+        st.caption("Keine Referenz gewählt: Die Szenarien werden nur mit Live verglichen.")
 
 
 def _render_horizon_select(log_exists: bool, meta: dict | None) -> tuple[str, bool]:
@@ -396,7 +483,7 @@ def _render_run_buttons(
     *,
     label: str,
     cons_data_ready: bool,
-    test_month: int | None,
+    test_month: pd.Period | None,
     horizon_mode: str,
     log_stale: bool,
 ) -> None:
@@ -422,10 +509,9 @@ def _render_run_buttons(
             "Testlauf (1 Monat) überschreibt das bestehende Szenario-Explorer-Log."
         )
         _execute_backtesting_run(
-            start_month=test_month,
-            end_month=test_month,
+            test_month=test_month,
             status_label=(
-                f"Szenario-Explorer-Testlauf (Monat {test_month}/{BACKTESTING_YEAR})…"
+                f"Szenario-Explorer-Testlauf (Monat {test_month.month}/{test_month.year})…"
             ),
             horizon_mode=horizon_mode,
         )
@@ -450,6 +536,7 @@ def _render_worker_and_pv_notice() -> None:
     parallel_task_count = count_backtesting_parallel_tasks(
         scenarios,
         live_scenario_id=live_scenario_id,
+        references=selected_run_references(),
     )
     worker_count = auto_backtesting_workers(parallel_task_count)
     if worker_count > 1:
@@ -501,6 +588,7 @@ def render_backtesting_run_controls(
         sync_horizon_selectbox_from_log(meta)
     _render_season_mirror_toggle()
     horizon_mode, horizon_stale = _render_horizon_select(log_exists, meta)
+    _render_reference_boxes(meta)
     _render_worker_and_pv_notice()
     _render_run_buttons(
         label=label,
@@ -537,13 +625,12 @@ def _warn_if_house_profile_imports_short_for_se() -> None:
         profile_csv_adequate_for_se,
         shared_import_span_hours,
     )
-    from house_config.scenario_resolution import DEFAULT_LIVE_SCENARIO_ID
     from ui.house_config_io import load_house_profiles
 
     scenarios, error = try_get_backtesting_scenarios()
     if error or not scenarios:
         return
-    live = scenarios.get(DEFAULT_LIVE_SCENARIO_ID) or next(iter(scenarios.values()), {})
+    live = scenarios.get(config.get_live_scenario_id()) or next(iter(scenarios.values()), {})
     profile = live.get("_house_profile") if isinstance(live, dict) else None
     if not isinstance(profile, dict):
         profiles = load_house_profiles().get("profiles", {})
@@ -566,7 +653,8 @@ def _warn_if_house_profile_imports_short_for_se() -> None:
     try:
         v_rows = load_hourly_profile_csv(v_path)
         p_rows = load_hourly_profile_csv(p_path) if p_path else None
-    except (OSError, ValueError, FileNotFoundError):
+    except (OSError, ValueError) as exc:
+        st.warning(f"Hausprofil-CSV-Import nicht lesbar: {exc}")
         return
     if shared_import_span_hours(v_rows, p_rows) < 8760:
         st.caption(

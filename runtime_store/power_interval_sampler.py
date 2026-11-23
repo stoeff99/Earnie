@@ -37,8 +37,11 @@ def _save_state(path: str, data: dict[str, Any]) -> None:
     parent = os.path.dirname(path)
     if parent:
         os.makedirs(parent, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
+    # Temp file + replace: a stop during the write must not leave a cut-off state file.
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, indent=2)
+    os.replace(tmp, path)
 
 
 def _load_state(path: str) -> dict[str, Any]:
@@ -213,6 +216,7 @@ def _sample_from_snapshot(
     *,
     now: datetime,
     soc_percent: float | None,
+    soc_percent_by_ess: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     flex = snapshot.get("flex_kw") or {}
     sample: dict[str, Any] = {
@@ -227,7 +231,17 @@ def _sample_from_snapshot(
     }
     if soc_percent is not None:
         sample["soc_percent"] = float(soc_percent)
+    if soc_percent_by_ess:
+        sample["soc_percent_by_ess"] = {str(k): float(v) for k, v in soc_percent_by_ess.items()}
     return sample
+
+
+def _several_house_batteries() -> bool:
+    """The plant SoC needs each battery's SoC only with more than one house battery."""
+    import config
+    from optimizer.sim_horizon_chart_soc import house_balance_batteries
+
+    return len(house_balance_batteries(config.get_battery_params_list())) >= 2
 
 
 def _read_live_sample(
@@ -236,6 +250,7 @@ def _read_live_sample(
     read_plant: Callable[[], dict[str, float] | None] | None = None,
     read_soc: Callable[[], float | None] | None = None,
     read_flex_chart: Callable[[], dict[str, float]] | None = None,
+    read_soc_by_id: Callable[[], dict[str, float]] | None = None,
 ) -> dict[str, Any] | None:
     from integrations import ehal_live
 
@@ -262,7 +277,16 @@ def _read_live_sample(
         soc = soc_fn()
     except Exception as exc:  # noqa: BLE001 — best-effort SoC on sample tick
         logger.debug("power_interval_sampler: SoC read failed: %s", exc)
-    return _sample_from_snapshot(snapshot, now=now, soc_percent=soc)
+    soc_by_id: dict[str, float] | None = None
+    if read_soc_by_id is not None or _several_house_batteries():
+        # Per-battery SoC for the savings ledger's plant SoC (``savings_ledger.with_plant_soc``).
+        try:
+            soc_by_id = (read_soc_by_id or ehal_live.read_ess_soc_by_id)()
+        except Exception as exc:  # noqa: BLE001 — best-effort SoC on sample tick
+            logger.debug("power_interval_sampler: SoC per battery read failed: %s", exc)
+    return _sample_from_snapshot(
+        snapshot, now=now, soc_percent=soc, soc_percent_by_ess=soc_by_id
+    )
 
 
 def _append_sample(state: dict[str, Any], sample: dict[str, Any]) -> None:
@@ -330,6 +354,10 @@ def _build_closed_interval(
     if socs:
         closed["soc_start_percent"] = round(socs[0], 2)
         closed["soc_end_percent"] = round(socs[-1], 2)
+    soc_maps = [s["soc_percent_by_ess"] for s in samples if s.get("soc_percent_by_ess")]
+    if soc_maps:
+        closed["soc_start_percent_by_ess"] = {k: round(float(v), 2) for k, v in soc_maps[0].items()}
+        closed["soc_end_percent_by_ess"] = {k: round(float(v), 2) for k, v in soc_maps[-1].items()}
     closed.update(_grid_import_from_samples(samples))
     return closed
 
@@ -389,6 +417,7 @@ def tick(
     read_soc: Callable[[], float | None] | None = None,
     read_flex_chart: Callable[[], dict[str, float]] | None = None,
     read_energy: Callable[[], dict[str, dict[str, float]] | None] | None = None,
+    read_soc_by_id: Callable[[], dict[str, float]] | None = None,
 ) -> bool:
     """Sample plant/flex/SoC when SAMPLE_INTERVAL_SEC elapsed (or force)."""
     path = state_path or _state_path()
@@ -408,6 +437,7 @@ def tick(
             read_plant=read_plant,
             read_soc=read_soc,
             read_flex_chart=read_flex_chart,
+            read_soc_by_id=read_soc_by_id,
         )
     except Exception as exc:  # noqa: BLE001 — never break the wait loop
         logger.warning("power_interval_sampler: tick failed: %s", exc)
@@ -514,19 +544,27 @@ def note_decision_sample(
     snapshot: dict[str, Any] | None,
     *,
     soc_percent: float | None = None,
+    soc_percent_by_ess: dict[str, float] | None = None,
     now: datetime | None = None,
     state_path: str | None = None,
 ) -> None:
-    """Count the QH decision-time snapshot toward the open interval."""
+    """Count the QH decision-time snapshot toward the open interval.
+
+    ``soc_percent_by_ess``: SoC per house battery, logged with more than one (plant SoC of
+    the savings ledger).
+    """
     if not snapshot:
         return
     path = state_path or _state_path()
     moment = now or datetime.now()
     moment = moment.replace(tzinfo=None) if moment.tzinfo else moment
+    by_ess = soc_percent_by_ess if soc_percent_by_ess and len(soc_percent_by_ess) > 1 else None
     state = _load_state(path)
     _append_sample(
         state,
-        _sample_from_snapshot(snapshot, now=moment, soc_percent=soc_percent),
+        _sample_from_snapshot(
+            snapshot, now=moment, soc_percent=soc_percent, soc_percent_by_ess=by_ess
+        ),
     )
     _save_state(path, state)
 
@@ -561,12 +599,19 @@ def finalize_closed_interval(
         closed_at=closed_at,
     )
     end = start + timedelta(minutes=QUARTER_HOUR_MINUTES)
+    # Also drop what lies before the closed slot: samples and anchors of slots no cycle
+    # closed (restart, skipped cycle) are never asked for again.
     kept: list[dict[str, Any]] = []
     for sample in samples:
         ts = _parse_ts(sample.get("ts"))
-        if ts is None or not (start <= ts < end):
+        if ts is None or ts >= end:
             kept.append(sample)
     state["samples"] = kept
+    state["energy_anchors"] = {
+        key: anchor
+        for key, anchor in (state.get("energy_anchors") or {}).items()
+        if (_parse_ts(key) or end) >= end
+    }
     _save_state(path, state)
     logger.info(
         "power_interval_sampler: closed %s samples=%d pv=%.3f kW src=%s",

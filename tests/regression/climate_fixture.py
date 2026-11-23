@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Iterator
 from zoneinfo import ZoneInfo
 
-import time_machine
+from freezegun import freeze_time
 
 from tests.fixtures.backtesting_fixtures import FIXTURES_ROOT
 
@@ -42,7 +42,9 @@ class ClimateFixtureMissingError(RuntimeError):
 
 
 def _refusing_fetch(fixture_dir: Path):
-    def _refuse_archive_fetch(*, lat, lon, timezone, start, end, hourly_vars, extra_params=None):
+    def _refuse_archive_fetch(
+        *, lat, lon, timezone, start, end, hourly_vars, extra_params=None, payload_transform=None
+    ):
         raise ClimateFixtureMissingError(
             f"Regression climate fixture missing in {fixture_dir}: "
             f"lat={lat} lon={lon} tz={timezone} {start}..{end} vars={hourly_vars} "
@@ -69,6 +71,9 @@ def frozen_climate_fixture(fixture_dir: Path = CLIMATE_FIXTURE_DIR) -> Iterator[
     previous_fetch = archive._fetch_hourly_archive_chunk
     previous_load = archive._load_bundle_from_cache
     previous_save = archive._save_bundle_to_cache
+    previous_raw_fetch = archive._fetch_archive_payload
+    previous_raw_load = archive._load_raw_from_cache
+    previous_raw_save = archive._save_raw_to_cache
 
     def _tracking_load(lat, lon, timezone, start, end, surfaces, *, cache_dir=None):
         bundle = previous_load(lat, lon, timezone, start, end, surfaces, cache_dir=cache_dir)
@@ -84,20 +89,45 @@ def frozen_climate_fixture(fixture_dir: Path = CLIMATE_FIXTURE_DIR) -> Iterator[
             lat, lon, timezone, start, end, surfaces, cache_dir=cache_dir
         ))
 
+    # A house with a horizon (SUSI P3a) reads and records the unshaded payloads of its site.
+    def _tracking_raw_load(path):
+        payloads = previous_raw_load(path)
+        if payloads is not None:
+            used.add(path)
+        return payloads
+
+    def _tracking_raw_save(path, payloads):
+        previous_raw_save(path, payloads)
+        used.add(path)
+
+    def _refuse_raw_fetch(*, lat, lon, start, end, hourly_vars, extra_params=None):
+        _refusing_fetch(fixture_dir)(
+            lat=lat, lon=lon, timezone="UTC", start=start, end=end,
+            hourly_vars=hourly_vars, extra_params=extra_params,
+        )
+
     archive.OPEN_METEO_CACHE_DIR = fixture_dir
     archive._load_bundle_from_cache = _tracking_load
     archive._save_bundle_to_cache = _tracking_save
+    archive._load_raw_from_cache = _tracking_raw_load
+    archive._save_raw_to_cache = _tracking_raw_save
     if not recording:
         archive._fetch_hourly_archive_chunk = _refusing_fetch(fixture_dir)
+        archive._fetch_archive_payload = _refuse_raw_fetch
     archive.clear_open_meteo_bundle_mem_cache()
     try:
-        with time_machine.travel(CLIMATE_FIXTURE_NOW, tick=True):
+        # freezegun's naive now() is UTC; the cache keys only use the date, which
+        # is the same in UTC and Vienna at the 12:00 fixture time.
+        with freeze_time(CLIMATE_FIXTURE_NOW, tick=True):
             yield used
     finally:
         archive.OPEN_METEO_CACHE_DIR = previous_dir
         archive._fetch_hourly_archive_chunk = previous_fetch
         archive._load_bundle_from_cache = previous_load
         archive._save_bundle_to_cache = previous_save
+        archive._fetch_archive_payload = previous_raw_fetch
+        archive._load_raw_from_cache = previous_raw_load
+        archive._save_raw_to_cache = previous_raw_save
         if previous_env is not None:
             os.environ[_CACHE_PATH_ENV] = previous_env
         archive.clear_open_meteo_bundle_mem_cache()

@@ -33,9 +33,10 @@ def _ok_response(value):
     return response
 
 
-def test_grid_sign_flip():
-    assert openems_grid_to_ehal_w(-77) == 77.0
-    assert openems_grid_to_ehal_w(50) == -50.0
+def test_grid_keeps_the_sign():
+    # OpenEMS sell-to-grid is negative, like EHAL export.
+    assert openems_grid_to_ehal_w(-77) == -77.0
+    assert openems_grid_to_ehal_w(50) == 50.0
 
 
 def test_ess_limit_mapping():
@@ -70,14 +71,14 @@ def test_read_telemetry_normalizes(get_mock):
     get_mock.side_effect = _get
     adapter = OpenemsAdapter(_cfg(evcs_channels=(("e_auto", "evcs0", "SetChargePowerLimit"),)))
     telemetry = adapter.read_telemetry()
-    assert telemetry["sens_grid_power_active"] == 100.0
+    assert telemetry["sens_grid_power_active"] == -100.0
     assert "sens_pv_production_active" not in telemetry
     assert "sens_ess_soc" not in telemetry
     assert adapter.read_ess_soc_pct() == pytest.approx(55.0)
     assert telemetry["sens_ess_power"] == 200.0
     assert telemetry["sens_evcs_active_power"] == 1200.0
-    # Plant AC PV from _sum (500) + import 100 + discharge 200
-    assert telemetry["sens_power_consumers"] == pytest.approx(800.0)
+    # Plant AC PV from _sum (500) − export 100 + discharge 200
+    assert telemetry["sens_power_consumers"] == pytest.approx(600.0)
 
 
 _TWO_CHARGERS = (
@@ -147,11 +148,12 @@ def test_a_failing_charger_does_not_stop_the_other(post_mock):
     error = adapter.write_evcs_setpoints("auto_a", _evcs_setpoint(10), voltage_v=230, phases=1)
     assert error is not None and error["failed_fields"] == ["set_evcs_max_current"]
     assert adapter.write_evcs_setpoints("auto_b", _evcs_setpoint(10), voltage_v=230, phases=1) is None
-    # auto_a stays disabled, auto_b keeps writing.
+    # Next cycle: auto_a is retried (and fails again), auto_b keeps writing.
     post_mock.reset_mock()
-    adapter.write_evcs_setpoints("auto_a", _evcs_setpoint(10), voltage_v=230, phases=1)
+    again = adapter.write_evcs_setpoints("auto_a", _evcs_setpoint(10), voltage_v=230, phases=1)
+    assert again is not None and again["failed_fields"] == ["set_evcs_max_current"]
     adapter.write_evcs_setpoints("auto_b", _evcs_setpoint(10), voltage_v=230, phases=1)
-    assert [("evcs1" in call.args[0]) for call in post_mock.call_args_list] == [True]
+    assert [("evcs1" in call.args[0]) for call in post_mock.call_args_list] == [False, True]
     assert adapter.capabilities()["supports_evcs_current"] is True
 
 
@@ -162,7 +164,7 @@ def test_charger_without_openems_address_is_skipped():
 
 
 @patch("integrations.openems_adapter.requests.post")
-def test_write_lock_degrades_ess(post_mock):
+def test_write_lock_reports_error_and_keeps_ess_capability(post_mock):
     response = MagicMock()
     response.status_code = 403
     post_mock.return_value = response
@@ -178,5 +180,6 @@ def test_write_lock_degrades_ess(post_mock):
     assert error is not None
     assert "set_ess_charge_power_limit" in error["failed_fields"]
     assert error["hub_status"] == "403"
+    # Reported every cycle, never a silent capability flip (retried next cycle).
     caps = adapter.capabilities()
-    assert caps["supports_ess_write"] is False
+    assert caps["supports_ess_write"] is True

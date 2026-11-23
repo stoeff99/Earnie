@@ -102,6 +102,7 @@ def save_full_support_package(
     title: str,
     symptom: str,
     attachments: list[tuple[str, bytes]],
+    full_history: bool = False,
 ) -> str:
     """Write the full support package (debug dump schema v3); returns the ZIP path."""
     bundle = st.session_state.get(SESSION_LIVE_DISPLAY_BUNDLE)
@@ -122,6 +123,7 @@ def save_full_support_package(
         title=title.strip(),
         symptom=symptom.strip(),
         attachments=attachments,
+        full_history=full_history,
     )
 
 
@@ -129,15 +131,19 @@ def _zip_file_name(zip_path: str) -> str:
     return zip_path.split("/")[-1].split("\\")[-1]
 
 
-def _render_config_only_download(attachments: list[Any], config_pack: bytes) -> None:
+def _render_config_only_download(attachments: list[Any]) -> None:
+    from runtime_store.config_pack import build_config_pack_bytes
+
     st.markdown("**Nur Konfiguration**")
     st.caption(
-        "Konfigurations-ZIP plus Anhänge, ohne Historie und Logs. Hilft nur bei "
-        "Fragen, die **nicht** den Live-Betrieb betreffen (Einrichtung, Hausprofil, "
-        "Szenarien, Backtesting)."
+        "Konfigurations-ZIP plus Anhänge, ohne Historie, Logs, hochgeladene CSV-Dateien "
+        "und Passwörter. Hilft nur bei Fragen, die **nicht** den Live-Betrieb betreffen "
+        "(Einrichtung, Hausprofil, Szenarien, Backtesting)."
     )
     try:
-        payload = build_config_only_bundle_bytes(attachments, config_pack=config_pack)
+        payload = build_config_only_bundle_bytes(
+            attachments, config_pack=build_config_pack_bytes(for_support=True)
+        )
     except (OSError, ValueError, zipfile.BadZipFile) as exc:
         st.error(f"ZIP-Erstellung fehlgeschlagen: {exc}")
         logger.exception("Support-Paket (nur Konfiguration) fehlgeschlagen")
@@ -155,13 +161,22 @@ def _render_config_only_download(attachments: list[Any], config_pack: bytes) -> 
 def _render_full_package(attachments: list[Any]) -> None:
     st.markdown("**Vollständig (Live-Betrieb)**")
     st.caption(
-        "Zusätzlich gesamte Optimierer-Historie, Cycle-Recorder "
+        "Zusätzlich Optimierer-Historie und Cycle-Recorder "
         f"(bis zu {config.get_recorder_retention_days()} Tage Lastprofile), "
         "Logs und — wenn die Monitor-Seite in dieser Sitzung offen war — die "
         "Chart-Daten. Nur an den Maintainer weitergeben, nicht öffentlich teilen."
     )
     st.text_input("Titel (optional)", key="support_package_title")
     st.text_area("Symptom (optional)", key="support_package_symptom")
+    st.checkbox(
+        "Vollständige Optimierer-Historie beilegen",
+        key="support_package_full_history",
+        help=(
+            "Standard: nur die Historie der Recorder-Tage. Die vollständige "
+            "Historie macht das Paket deutlich größer; nur beilegen, wenn der "
+            "Support danach fragt."
+        ),
+    )
     if st.button(
         "Support-Paket erstellen",
         key="support_package_create_btn",
@@ -173,6 +188,9 @@ def _render_full_package(attachments: list[Any]) -> None:
                     title=str(st.session_state.get("support_package_title") or ""),
                     symptom=str(st.session_state.get("support_package_symptom") or ""),
                     attachments=_attachment_pairs(attachments),
+                    full_history=bool(
+                        st.session_state.get("support_package_full_history")
+                    ),
                 )
         except (OSError, ValueError) as exc:
             logger.exception("Support-Paket konnte nicht erstellt werden")
@@ -221,5 +239,5 @@ def render_support_package_controls(config_pack: bytes | None) -> None:
     )
     attachment_list = list(attachments or [])
     if config_pack is not None:
-        _render_config_only_download(attachment_list, config_pack)
+        _render_config_only_download(attachment_list)
     _render_full_package(attachment_list)

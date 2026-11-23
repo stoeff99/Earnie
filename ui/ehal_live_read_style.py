@@ -37,6 +37,8 @@ _STALE_STATES = {
     NOT_ACTIVATED_STATUS,
     "0 angenommen (verstummt)",
     "0 angenommen (nie gesendet)",
+    # UI-side label of integrations.loxone_connectivity_base._never_received_warning
+    "nie empfangen",
     "Warnung",
 }
 _ERROR_STATES = {

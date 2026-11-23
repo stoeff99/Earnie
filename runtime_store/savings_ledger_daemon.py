@@ -35,6 +35,13 @@ _restart_reason: str | None = None
 _pending_without_chain: dict[str, Any] | None = None
 
 
+def _house_batteries() -> list[dict]:
+    """House-balance batteries of the live config: the shadow plant's (spec § 3)."""
+    from optimizer.sim_horizon_chart_soc import house_balance_batteries
+
+    return house_balance_batteries(config.get_battery_params_list())
+
+
 def reset() -> None:
     """Forget the in-memory state (tests; the next call reads the state file again)."""
     global _state, _loaded_path, _restart_reason, _pending_without_chain
@@ -93,11 +100,12 @@ def planning_shadow_soc(closed_interval: dict[str, Any] | None) -> float | None:
 
 
 def _planning_shadow_soc(closed_interval: dict[str, Any] | None) -> float | None:
-    batteries = config.get_battery_params_list()
+    batteries = _house_batteries()
     if not batteries:
         return None
     _ensure_loaded()
-    if _state is None:
+    if _state is None or _battery_presence_changed(_state, with_battery=True):
+        # No chain, or a chain without shadow battery: ``on_cycle`` starts a new one.
         return None
     if not isinstance(closed_interval, dict) or not closed_interval.get("interval_start"):
         return _state.shadow_soc
@@ -105,7 +113,9 @@ def _planning_shadow_soc(closed_interval: dict[str, Any] | None) -> float | None
     slot_start = _closed_slot_start(closed_interval, timezone_name)
     advanced, _row = sl.advance(
         _state,
-        store.ledger_input_from_pending(slot_start, closed_interval, _state.pending_slot),
+        store.ledger_input_from_pending(
+            slot_start, closed_interval, _state.pending_slot, batteries=batteries
+        ),
         sl.shadow_battery_params(batteries),
         store.sunrise_day_bounds(
             config.get("LATITUDE", cast=float),
@@ -116,6 +126,11 @@ def _planning_shadow_soc(closed_interval: dict[str, Any] | None) -> float | None
         day_flex=store.flex_day_provider(timezone_name),
     )
     return advanced.shadow_soc
+
+
+def _battery_presence_changed(state: sl.LedgerState, *, with_battery: bool) -> bool:
+    """True when the chain of ``state`` has a shadow battery and the house no longer one, or vice versa."""
+    return with_battery != (state.shadow_soc_day_start is not None)
 
 
 def _book_error_slot(closed_interval: dict[str, Any] | None) -> None:
@@ -140,7 +155,12 @@ def _write_day_slots(closing: sl.LedgerState) -> None:
     fail loud on the missing day (``savings_ledger_store.closed_day_slots``).
     """
     try:
-        store.append_day_slots(sl.day_slots_record(closing))
+        record = sl.day_slots_record(closing)
+        if store.last_line_has_day(
+            store.savings_ledger_slots_file(), record["day_start"], record["chain_start"]
+        ):
+            return
+        store.append_day_slots(record)
     except Exception as exc:  # noqa: BLE001 — see above
         logger.warning(
             "savings ledger: slots of day %s not written (%r); rebuild with: "
@@ -157,8 +177,8 @@ def _on_cycle(
     *,
     now: datetime | None,
 ) -> dict[str, Any] | None:
-    global _state, _pending_without_chain
-    batteries = config.get_battery_params_list()
+    global _state, _pending_without_chain, _restart_reason
+    batteries = _house_batteries()
     _ensure_loaded()
     timezone_name = config.get_planning_timezone()
     day_bounds = store.sunrise_day_bounds(
@@ -169,10 +189,25 @@ def _on_cycle(
     # Without a house battery the shadow plant has none either (v2, spec § 7): grid = load − pv.
     battery = sl.shadow_battery_params(batteries) if batteries else None
     pending = _state.pending_slot if _state is not None else _pending_without_chain
+    if _state is not None and _battery_presence_changed(_state, with_battery=battery is not None):
+        # The shadow plant of the chain no longer matches the house (spec § 4): the open day
+        # cannot be closed with either plant, so it is dropped and a new chain starts.
+        logger.warning(
+            "savings ledger: house battery %s; chain from %s ends, the open day %s (%d slots) "
+            "is not booked, a new chain starts.",
+            "added" if battery is not None else "removed",
+            _state.chain_start.isoformat(),
+            _state.day_start.isoformat(),
+            len(_state.slots),
+        )
+        _state = None
+        _restart_reason = sl.CHAIN_BATTERY_CHANGED
     row = None
     if isinstance(closed_interval, dict) and closed_interval.get("interval_start"):
         slot_start = _closed_slot_start(closed_interval, timezone_name)
-        inp = store.ledger_input_from_pending(slot_start, closed_interval, pending)
+        inp = store.ledger_input_from_pending(
+            slot_start, closed_interval, pending, batteries=batteries
+        )
         if _state is None:
             _state = sl.start_chain(
                 inp,
@@ -200,7 +235,18 @@ def _on_cycle(
                 row = closed_day.row
                 # Append before taking the new state: if the write fails, the next
                 # slot closes the same day again instead of losing the row.
-                store.append_row(row)
+                # A daemon that stopped between this append and the state save closes the
+                # same day again after its restart: the row is then already there.
+                if store.last_line_has_day(
+                    store.savings_ledger_file(), row["day_start"], row["chain_start"]
+                ):
+                    logger.warning(
+                        "savings ledger: day %s is already in the ledger (stop before the "
+                        "state was saved); not appended again.",
+                        row["day_start"],
+                    )
+                else:
+                    store.append_row(row)
                 _write_day_slots(closed_day.closing)
                 logger.info(
                     "savings ledger: day %s closed, saving %.2f EUR (adjusted %.2f EUR, coverage %.2f).",

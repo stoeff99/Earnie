@@ -292,6 +292,9 @@ def battery_params_from_planning(entry: dict) -> dict:
         "buffer_soc": float(entry.get("battery_buffer_soc", 0.0) or 0.0),
         "ehal_bindings": dict(entry.get("ehal_bindings") or {}),
     }
+    if entry.get("battery_wear") is not None:
+        # MILP wear per battery (optimizer.milp._wear_cent_per_kwh_by_ess).
+        out["battery_wear"] = dict(entry["battery_wear"])
     inv_id = str(entry.get("inverter_id") or "").strip()
     if inv_id:
         out["inverter_id"] = inv_id

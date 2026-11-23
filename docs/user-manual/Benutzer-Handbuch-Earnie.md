@@ -59,6 +59,12 @@ Earnie ist unabhängig von Energieversorger und Systemlieferant.
 - **Community:** z. B. Diskussionen im Loxone-Umfeld (LoxForum u. Ä.)
 - **Technische Doku:** [docs/README.md](../README.md)
 
+### Earnie unterstützen
+
+Wer die Weiterentwicklung von Earnie unterstützen möchte, kann das freiwillig über [GitHub Sponsors](https://github.com/sponsors/Earnie-HEMS) tun. Earnie bleibt für alle gleich; es gibt dafür keine Gegenleistung.
+
+In der Sidebar steht dafür der Knopf **Earnie unterstützen**; er öffnet die Sponsors-Seite in einem neuen Tab. Earnie sendet dabei nichts, auch nicht, ob der Knopf geklickt wurde. Wer den Knopf nicht sehen möchte, setzt unter **Info / About** das Häkchen **Unterstützen-Knopf ausblenden**. Das lässt sich jederzeit wieder rückgängig machen; die Einstellung liegt lokal in `runtime/sponsoring.json`.
+
 Einen vertraglichen Herstellersupport gibt es derzeit nicht. Umso mehr freuen wir uns über Ihre Rückmeldungen – gerade zu Hardware-Typen und Konfigurationen, die wir noch nicht kennen. Jeder Hinweis hilft, Earnie für alle besser zu machen.
 
 ---
@@ -253,12 +259,13 @@ Typische Vergleiche:
 
 **Pro Szenario einstellbar:**
 
-- **Aktiv für Szenario-Explorer:** Deaktivierte Varianten überspringt der Szenario-Explorer. Vorhandene Ergebnisse werden dadurch ungültig.
-- **Eigene Referenz ohne Optimierung:** Legt fest, ob Earnie für die Variante eine eigene Referenz berechnet, in der die Earnie-Optimierung nicht aktiv ist. Die Vorbelegung folgt einer Heuristik nach Tarif und PV; reine Batterie-Varianten teilen standardmäßig die Live-Referenz.
+- **Aktiv für Szenario-Explorer:** Deaktivierte Varianten überspringt der Szenario-Explorer. Vorhandene Ergebnisse werden dadurch ungültig. Das Live-Szenario ist immer aktiv, weil der Szenario-Explorer alle Varianten mit ihm vergleicht.
+
+Welche Referenzen der Szenario-Explorer rechnet, wird dort für den ganzen Lauf gewählt, nicht je Szenario (siehe [Szenario-Explorer ausführen](#szenario-explorer-ausführen)).
 
 **Tarife:** Bezugs- und Einspeisetarif kommen aus dem Tarifkatalog oder werden als **Eigener Festpreis** mit eigenem Wert in Cent/kWh eingetragen (der Wert gehört dann zum Szenario, nicht zum Katalog).
 
-**Bezugsgrenze:** Optionale Grenze für den Netzbezug je Viertelstunde, gedacht für den Leistungspreis. Leer bedeutet keine Grenze. Sie wirkt nur in Monaten, in denen der Netzbereich einen Leistungspreis hat, im Szenario-Explorer und im Live-Betrieb. Ist im laufenden Monat schon eine höhere Viertelstunde gemessen, plant Earnie bis zu dieser Höhe, weil sie ohnehin bezahlt wird. Ist der Monat noch ohne Messung, etwa direkt nach der Installation, hält der Plan die Grenze selbst. Kann Earnie nicht planen und schaltet in den Automatikbetrieb, gilt die Grenze nicht; das Protokoll und der [Monitor](#monitor) vermerken das. Der Monitor zeigt auch Monatsspitze, Betrag und Viertelstunden, in denen der Plan die Grenze nicht halten kann. Eine enge Grenze kann mehr kosten, als sie spart. Das zeigt ein Vergleich von Varianten mit verschiedenen Grenzen im Szenario-Explorer.
+**Bezugsgrenze:** Optionale Grenze für den Netzbezug je Viertelstunde, gedacht für den Leistungspreis. Leer bedeutet keine Grenze. Sie wirkt nur in Monaten, in denen der Netzbereich einen Leistungspreis hat, im Szenario-Explorer und im Live-Betrieb. Ist im laufenden Monat schon eine höhere Viertelstunde gemessen, plant Earnie bis zu dieser Höhe, weil sie ohnehin bezahlt wird. Ist der Monat noch ohne Messung, etwa direkt nach der Installation, hält der Plan die Grenze selbst. Kann Earnie nicht planen und schaltet in den Automatikbetrieb, gilt die Grenze nicht; das Protokoll und der [Monitor](#monitor) vermerken das. Der Monitor zeigt auch Monatsspitze, Betrag und Viertelstunden, in denen der Plan die Grenze nicht halten kann. Eine enge Grenze kann mehr kosten, als sie spart. Das zeigt ein Vergleich von Varianten mit verschiedenen Grenzen im Szenario-Explorer. Der Plan ist zuverlässig, aber keine Garantie: Earnie regelt nicht innerhalb der Viertelstunde nach, und Last, die die Prognose nicht kennt, kann die gemessene Spitze über die Grenze heben. Start je Netzbereich, Preise und Grenzen des Verfahrens: [Leistungspreis und Bezugsgrenze](../konfiguration/preise.md#leistungspreis-und-bezugsgrenze).
 
 **Im Live-Betrieb: Beobachten oder Danach planen.** Mit einer Bezugsgrenze legt das Szenario fest, was Earnie im Live-Betrieb damit tut. Vorgeschlagen ist **Beobachten**: Earnie plant und steuert wie ohne Grenze. Jede Viertelstunde rechnet er zusätzlich einen Plan mit Grenze, führt ihn aber nicht aus. Der [Monitor](#monitor) zeigt dann, wo und wie Earnie eingegriffen hätte, die geschätzte Monatsspitze und den Leistungspreis mit Earnie. So lässt sich die Grenze ohne Risiko ansehen, bevor sie steuert. **Danach planen** hält die Grenze ein, wie oben beschrieben. Die Wahl gilt nur für das Live-Szenario; der Szenario-Explorer plant immer mit der Grenze.
 
@@ -297,11 +304,12 @@ Technik: [Benutzertarife](../konfiguration/preise.md#benutzertarife-usertariffsj
 
 Der Szenario-Explorer steht unter **Konfiguration → Szenario-Explorer**, sobald die Planungs-Konfiguration vollständig genug ist.
 
-Er vergleicht Referenzen und eigene Szenarien über einen langen Zeitraum, typischerweise 12 Monate (für Tests auch kürzer, z. B. nur März):
+Er vergleicht eigene Szenarien mit dem Live-Szenario und mit Referenzen über einen langen Zeitraum, typischerweise 12 Monate (für Tests auch kürzer, z. B. nur März):
 
-- **Historisch:** das „nackte Haus“ ohne PV und ohne Speicher, mit den Tarifen des Live-Szenarios und ohne Lastverschiebung. Earnie berechnet diese Zeile automatisch.
-- **Referenzen ohne Optimierung:** die Live-Referenz und – je nach Szenario-Einstellung und Heuristik – eigene Referenzen bei abweichendem Tarif oder abweichender PV.
-- **Optimierte Szenarien:** mit Earnie-Planung (Batterie und flexible Verbraucher, sofern im Szenario vorhanden).
+- **Optimierte Szenarien:** mit Earnie-Planung (Batterie und flexible Verbraucher, sofern im Szenario vorhanden). Das Live-Szenario ist immer dabei.
+- **Historisch** (wählbar): das „nackte Haus“ ohne PV und ohne Speicher, mit den Tarifen des Live-Szenarios und ohne Lastverschiebung.
+- **Referenz ohne Speicher** (wählbar, je Szenario): Tarif und PV des Szenarios, ohne Speicher und ohne Lastverschiebung.
+- **Wechselrichter-Eigenverbrauch** (wählbar, je Szenario): der Speicher des Szenarios im Eigenverbrauchsmodus des Wechselrichters, ohne Preislogik und ohne Lastverschiebung.
 
 Der Szenario-Explorer ist kein tägliches Cockpit und ändert keine Steuerwerte an der Anlage.
 
@@ -320,12 +328,19 @@ Die erzeugten Verbrauchsverläufe lassen sich im Explorer prüfen (Plausibilitä
 
 Ändern sich Parameter, aus denen der Verbrauch berechnet wird (Hausprofil, PV), müssen die Verbrauchsdaten **neu erzeugt** werden. Bis dahin bleibt der Start der Rechnung gesperrt.
 
+**Lücken in den Verbrauchsdaten:** Szenario-Explorer und Backtesting rechnen nur mit lückenlosen Stundenwerten aus `cons_data.csv` (Verbrauch und PV). Fehlt eine Stunde oder ein ganzer Tag, den ein Rechenfenster braucht, bricht die Rechnung ab. Die Meldung nennt je Tag die fehlenden Uhrzeiten oder „keine Daten“. Abhilfe: den Zeitraum auf Tage mit vollständigen Daten einschränken oder die Verbrauchsdaten neu erzeugen. Zu beachten:
+
+- Ein Rechenfenster kann über den Zeitraum hinausreichen: Mit Ladeplan eines E-Autos beginnt es am Vortag zur Abfahrtszeit, im Sonnenaufgangs-Modus reicht es vom Vortag bis zum Folgetag. Diese Tage müssen ebenfalls Daten haben.
+- Am Tag der Umstellung auf Sommerzeit fehlt die Stunde 02:00 regulär; der Tag gilt mit 23 Stunden als vollständig.
+- Mit **Verbrauchsdaten auf letzten Kalendermonat spiegeln** spiegelt Earnie einen Tag vor und einen Tag nach dem Zeitraum mit. Fehlen dafür Quellstunden, bricht schon das Spiegeln mit einer Liste der Lücken ab.
+
 #### Szenario-Explorer ausführen
 
 1. Die Auswahl der Szenarien prüfen und ggf. im Szenarienkonfigurator anpassen.
 2. Optional **Verbrauchsdaten auf letzten Kalendermonat spiegeln (aktuelle Tarife)** aktivieren: Earnie legt die Verbrauchsmuster je Kalendermonat auf die letzten 12 vollständigen Monate, damit aktuelle Spot- und Tarifpreise gelten. Die CSV-Datei bleibt unverändert; die Auswahl wird in `scenario_explorer_conf` gespeichert.
-3. Rechnung starten. Je nach Umfang kann das länger dauern.
-4. Warten, bis die Auswertung fertig ist. Die Ergebnisse legt Earnie in der Laufzeitablage des Explorers ab.
+3. Unter **Referenzen berechnen** ankreuzen, welche Vergleichsreihen der Lauf rechnen soll: **Historisch**, **Referenz ohne Speicher**, **Wechselrichter-Eigenverbrauch (L1)**. Die Auswahl gilt für alle aktiven Szenarien. Ohne Kreuz vergleicht der Explorer die Szenarien nur mit Live. Jede Referenz kostet Rechenzeit; Szenarien, die sich nur im Tarif unterscheiden, teilen sich die Rechnung.
+4. Rechnung starten. Je nach Umfang kann das länger dauern.
+5. Warten, bis die Auswertung fertig ist. Die Ergebnisse legt Earnie in der Laufzeitablage des Explorers ab.
 
 **Lauf abbrechen:** Während der Rechnung steht im Fortschrittsblock die Schaltfläche **Abbrechen**. Earnie stoppt dann nach der gerade gerechneten Stunde und speichert nichts; die Ergebnisse des letzten vollständigen Laufs bleiben unverändert. Wer während der Rechnung eine andere Seite öffnet oder etwas anklickt, unterbricht nur die Anzeige: Die Rechnung läuft weiter, und beim nächsten Aufruf des Szenario-Explorers erscheinen Fortschritt und **Abbrechen** wieder. Nach einem Neuladen des Browser-Tabs ist der laufende Lauf nicht mehr sichtbar; er rechnet trotzdem zu Ende und speichert sein Ergebnis. Startet man in dieser Zeit einen neuen Lauf, stoppt Earnie den alten zuerst (Hinweis im Log) und rechnet von vorn. Bricht ein Lauf unerwartet ab (Container gestoppt, Absturz), bleiben die Ergebnisse des letzten vollständigen Laufs lesbar: Earnie ersetzt die Ergebnisdateien erst, wenn sie fertig geschrieben sind. Scheitert eine einzelne Berechnung (Szenario oder Referenz), stoppt Earnie sofort alle anderen und zeigt den Fehler, statt erst nach der längsten Rechnung.
 
@@ -333,14 +348,13 @@ Die erzeugten Verbrauchsverläufe lassen sich im Explorer prüfen (Plausibilitä
 
 > **Rechenzeit:** Earnie startet für jedes Szenario einen eigenen Prozess auf einem eigenen Prozessorkern. Auf Rechnern mit wenigen Kernen dauert die Rechnung entsprechend länger. Den Szenario-Explorer daher besser nicht auf der Hardware ausführen, die später den Live-Betrieb übernimmt.
 
-**Was rechnet die Zeile „Historisch“?** Die zuvor erzeugte Last mit den Tarifen des Live-Szenarios, **ohne** PV und **ohne** Batterie. Weitere Referenzen ohne Optimierung entstehen per Heuristik bzw. über die Einstellung **Eigene Referenz ohne Optimierung** (bei PV-Szenarien mit dem PV-Ertrag des jeweiligen Szenarios). Batterie und Lastverschiebung gehören zur **optimierten** Variante, nicht zur Zeile Historisch.
+**Was rechnet die Zeile „Historisch“?** Die zuvor erzeugte Last mit den Tarifen des Live-Szenarios, **ohne** PV und **ohne** Batterie. Die **Referenz ohne Speicher** rechnet dieselbe Last mit Tarif und PV-Ertrag des jeweiligen Szenarios; ein Szenario ohne PV mit dem Tarif von Live nimmt dafür die Zeile Historisch. Batterie und Lastverschiebung gehören zur **optimierten** Variante, nicht zu diesen Zeilen.
 
 #### Ergebnisse des Szenario-Explorers
 
 Die Auswertung umfasst unter anderem:
 
-- **Ersparnis gegen Standard-Regeln:** Was Earnie über Batterie und freie Regeln hinaus bringt, dazu der Anteil der Regeln an der Gesamtersparnis. Der Bereich **Alle Stufen** zeigt die Leiter von „Ohne Steuerung“ bis Earnie. Der Wert ist kleiner als die frühere Ersparnis gegen die Referenz ohne Optimierung, weil die Methode strenger ist. Details: [Betriebsmodi](../ui/betriebsmodi.md#ersparnis-gegen-standard-regeln)
-- **Gesamtkosten und -Verbrauch:** Tabelle mit Jahres Verbrauch, Speicher-Standby, Gesamtverbrauch, Jahres Kosten, Ersparnis gegen Standard-Regeln, Δ zur Live-Referenz und Hinweis
+- **Gesamtkosten und -Verbrauch:** Tabelle mit Jahres Verbrauch, Speicher-Standby, Gesamtverbrauch, Jahres Kosten, Δ und Hinweis. Über der Tabelle wählt **Vergleichsbasis**, womit Δ jedes Szenario vergleicht: Live oder eine der gerechneten Referenzen; bei Referenz ohne Speicher und Wechselrichter-Eigenverbrauch zusätzlich die eigene Reihe des Szenarios oder die von Live. Der Wechsel rechnet nichts neu.
 - **Kostenvergleich** je Monat (Referenz und optimierte Szenarien)
 - **Monatsverläufe** und Plausibilitätsansichten
 - Charts zu Leistung, Verbrauch und PV, je nach gewählter Ansicht
@@ -359,7 +373,7 @@ Alle Zeilen zählen dasselbe: den **gebuchten Hausverbrauch** der jeweiligen Zei
 | Zeilentyp                            | Was die Spalte zählt                                                                               |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------- |
 | **Historisch** (ohne Optimierung, …) | Last des Live-Hausprofils ohne PV und Batterie über dieselben Zeitfenster wie die Optimierung      |
-| **Referenz** (…) ohne Optimierung    | Last des Hausprofils des Szenarios über dieselben Zeitfenster wie die Optimierung                  |
+| **Referenz ohne Speicher** (…)       | Last des Hausprofils des Szenarios über dieselben Zeitfenster wie die Optimierung                  |
 | **Wechselrichter-Eigenverbrauch**, **Standard-Regeln** | Grundlast und flexible Verbraucher mit derselben Energie wie die Optimierung, ohne Speicher-Standby |
 | **Optimiertes Szenario**             | Gebuchte Last aus Grundlast und flexiblen Verbrauchern nach der Optimierung, ohne Speicher-Standby |
 
@@ -482,14 +496,14 @@ Der Monitor unter **Live-Cockpit → Monitor** (Sunset-2-Sunset) zeigt Vergangen
 
 **Mit Earnie gespart:** Die Kachel unter der Überschrift „Earnie-Effekt“, über Chart 2, zeigt das Ergebnis aller abgeschlossenen Sonnenaufgangs-Tage seit Beginn der Zählung, mit Datum und Anzahl der Tage. Darunter steht der laufende Tag („Heute bisher (vorläufig)“) mit denselben Zahlen wie in Chart 2, sobald der Tag gebuchte Viertelstunden hat. War Earnie insgesamt teurer, heißt die Kachel „Mit Earnie mehr ausgegeben“.
 
-- **Vergleich:** gleiche PV, gleiche Preise und je Gerät der gleiche Tagesverbrauch, aber zur gewohnten Zeit: Geräte so, wie das Hausprofil sie beschreibt (eingestellte Startzeit, Wärmemodell), der Poolfilter in seinem eigenen Fenster, das E-Auto ab dem Einstecken mit voller Leistung, ein Heizstab neben Gas, Öl oder Pellets aus und seine Wärme aus dem Brennstoff; eine Hausbatterie im Herstellermodus (Eigenverbrauch). Grundlage sind die gemessenen Werte, keine Planwerte.
+- **Vergleich:** gleiche PV, gleiche Preise und je Gerät der gleiche Tagesverbrauch, aber zur gewohnten Zeit: Geräte so, wie das Hausprofil sie beschreibt (eingestellte Startzeit, Wärmemodell), der Poolfilter in seinem eigenen Fenster, das E-Auto ab dem Einstecken mit voller Leistung, ein Heizstab neben Gas, Öl oder Pellets aus und seine Wärme aus dem Brennstoff; eine Hausbatterie im Herstellermodus (Eigenverbrauch), mehrere Hausbatterien als eine gemeinsame Batterie. Grundlage sind die gemessenen Werte, keine Planwerte.
 - **Laufender Tag:** Bis zum Tagesabschluss zählt nur die Batterie. Erst dann steht fest, wie viel Energie jedes Gerät bekommen hat; verschobene Geräte, E-Auto und Heizstab kommen dann dazu.
-- **Grenzen:** Die gewohnte Zeit ist das Modell aus dem Hausprofil, nicht der tatsächliche Tagesablauf. Gemessene Verbrauchsprofile nimmt das Buch bewusst nicht: Sie stammen aus der Zeit, in der Earnie die Geräte schon verschiebt. Geräte ohne eigenen Zähler zählen zur gemessenen Zeit, der Hilfetext der Kachel nennt sie. Die Szenario-Analyse vergleicht strenger, mit Standard-Regeln wie Laden bei PV-Überschuss; ihre Ersparnis ist deshalb meist kleiner. Was Powerstations aus ihrem Speicher liefern, ist nicht bewertet; ihr Laden zählt zur tatsächlichen Zeit.
+- **Grenzen:** Die gewohnte Zeit ist das Modell aus dem Hausprofil, nicht der tatsächliche Tagesablauf. Gemessene Verbrauchsprofile nimmt das Buch bewusst nicht: Sie stammen aus der Zeit, in der Earnie die Geräte schon verschiebt. Geräte ohne eigenen Zähler zählen zur gemessenen Zeit, der Hilfetext der Kachel nennt sie. Was Powerstations aus ihrem Speicher liefern, ist nicht bewertet; ihr Laden zählt zur tatsächlichen Zeit.
 - **Ohne Hausbatterie:** Das Buch läuft auch dann; die Vergleichsanlage hat keine Batterie und es gibt keine SoC-Korrektur.
 - **Genauigkeit:** Das Ergebnis hängt vom eingestellten Batterie-Wirkungsgrad ab und ist keine Stromrechnung. Einzelne Tage schwanken, aussagekräftig sind längere Zeiträume.
 - **Unvollständige Tage:** Tage mit weniger als 80 % gebuchten Viertelstunden zählen mit. Der Hilfetext der Kachel nennt ihre Anzahl, Chart 2 markiert sie mit „unvollständig“.
 
-**Ersparnis in Chart 2:** Chart 2 ist eine Kontoansicht: Zwei Linien zeigen den Kontostand seit Fensterstart mit und ohne Earnie (links von Jetzt gebucht aus dem Ersparnis-Buch, rechts der Plan gegen BL Ziel); fällt eine Linie, wird bezahlt. Der grüne oder rote Abstand zwischen den Linien ist die Ersparnis. Mit dem Umschalter **Ist bei Jetzt** treffen sich die Linien bei Jetzt (Abstand am Fensterstart = bisher, am Ende = erwartet), mit **Gemeinsamer Start** beginnen beide bei 0 € (Abstand bei Jetzt = bisher, am Ende = gesamt). Das Panel darunter prüft, ob beide Seiten mit demselben Verbrauch gerechnet wurden. Beträge stehen ohne Vorzeichen, die Bedeutung als Wort dabei („gespart“, „mehr ausgegeben“). Das Dezimalzeichen folgt der Sprache des Browsers: Steht in den Spracheinstellungen Englisch vor Deutsch, zeigt Earnie einen Punkt (`2.18 €`), sonst ein Komma (`2,18 €`). Das gilt auch für kWh, kW und Prozent, für Tabellen und für die Achsen der Charts. Nur Eingabefelder zeigen weiter einen Punkt. Die SoC-Korrektur steht als eigenes Label, abgeschlossene Tage zeigen ihr **Ergebnis** aus dem Buch, ein Fenster ohne Vergangenheit den **Plan**. Details: [Charts](../ui/charts.md#chart-2-kontostand-mit-und-ohne-earnie). Der Energievergleich im Expander bezieht sich dagegen auf den vollen Planungshorizont (jetzt bis übernächster Sonnenaufgang).
+**Ersparnis in Chart 2:** Chart 2 ist eine Kontoansicht: Zwei Linien zeigen den Kontostand seit Fensterstart mit und ohne Earnie (links von Jetzt gebucht aus dem Ersparnis-Buch, rechts der Plan gegen BL Ziel); fällt eine Linie, wird bezahlt. Die Fläche zwischen den Linien ist grün, wo die Linie mit Earnie oben liegt, sonst rot. Mit **Gemeinsamer Start** (Standard) beginnen beide bei 0 € (Abstand bei Jetzt = bisher, am Ende = gesamt), mit dem Umschalter **Ist bei Jetzt** treffen sich die Linien bei Jetzt (Abstand am Ende = erwartet, „Bisher“ als Label bei Jetzt). Das Panel darunter prüft, ob beide Seiten mit demselben Verbrauch gerechnet wurden. Beträge stehen ohne Vorzeichen, die Bedeutung als Wort dabei („gespart“, „mehr ausgegeben“). Das Dezimalzeichen folgt der Sprache des Browsers: Steht in den Spracheinstellungen Englisch vor Deutsch, zeigt Earnie einen Punkt (`2.18 €`), sonst ein Komma (`2,18 €`). Das gilt auch für kWh, kW und Prozent, für Tabellen und für die Achsen der Charts. Nur Eingabefelder zeigen weiter einen Punkt. Die SoC-Korrektur steht als eigenes Label, abgeschlossene Tage zeigen ihr **Ergebnis** aus dem Buch, ein Fenster ohne Vergangenheit den **Plan**. Details: [Charts](../ui/charts.md#chart-2-kontostand-mit-und-ohne-earnie). Der Energievergleich im Expander bezieht sich dagegen auf den vollen Planungshorizont (jetzt bis übernächster Sonnenaufgang).
 
 #### Chart 1: SoC-Linien (Plausibilität)
 
@@ -506,7 +520,7 @@ Die Seite **Live-Cockpit → Manuelle Geräte** zeigt alle Verbraucher mit der R
 
 ### Analyse Verbrauch & Kosten
 
-Die Seite **Live-Cockpit → Analyse Verbrauch & Kosten** gibt es nur im Live-Betrieb mit bestehender Smarthome-Verbindung (UI-Modus `live_environment`). Ganz oben steht **Mit Earnie gespart**, dieselbe Kachel wie im Monitor: die Ersparnis aller abgeschlossenen Tage seit Beginn der Zählung, mit SoC-Korrektur, plus der laufende Tag bis jetzt (vorläufig), unabhängig vom gewählten Zeitraum. Darunter folgt der **Kontostand mit und ohne Earnie** für den gewählten Zeitraum, aus dem Ersparnis-Buch und in derselben Darstellung wie Chart 2 im Monitor: Zwei Linien zeigen den Kontostand seit Fensterstart, mit dem Umschalter **Ist bei Jetzt** enden beide am Fensterende (der Abstand am Anfang ist die Ersparnis des Zeitraums), mit **Gemeinsamer Start** beginnen beide bei 0 €. Weil bei mehreren Wochen die Gesamtkosten die Skala bestimmen, zeigt ein Panel darunter die **Ersparnis seit Fensterstart** allein: grün gespart, rot mehr ausgegeben. Dieselbe Ersparnis steht auch im oberen Panel als grün gepunktete Linie auf der **rechten Achse** (Null auf gleicher Höhe wie links). Sie enthält den Speicherwert (SoC-Korrekturen), deshalb springt sie bei jedem Tagesabschluss und endet bei der Zahl der Kachel, solange das Fenster die ganze Zählung abdeckt. Achsen und Beträge zeigen die Währung des Hausprofils (CHF bei Land CH). Unvollständige Tage sind markiert; die SoC-Korrekturen der abgeschlossenen Tage stecken in keinem Abstand, eine Zeile unter dem Chart nennt ihre Summe.
+Die Seite **Live-Cockpit → Analyse Verbrauch & Kosten** gibt es nur im Live-Betrieb mit bestehender Smarthome-Verbindung (UI-Modus `live_environment`). Ganz oben steht **Mit Earnie gespart**, dieselbe Kachel wie im Monitor: die Ersparnis aller abgeschlossenen Tage seit Beginn der Zählung, mit SoC-Korrektur, plus der laufende Tag bis jetzt (vorläufig), unabhängig vom gewählten Zeitraum. Darunter folgt der **Kontostand mit und ohne Earnie** für den gewählten Zeitraum, aus dem Ersparnis-Buch und in derselben Darstellung wie Chart 2 im Monitor: Zwei Linien zeigen den Kontostand seit Fensterstart, mit **Gemeinsamer Start** (Standard) beginnen beide bei 0 € (der Abstand am Ende ist die Ersparnis des Zeitraums), mit dem Umschalter **Ist bei Jetzt** enden beide am Fensterende. Weil bei mehreren Wochen die Gesamtkosten die Skala bestimmen, zeigt ein Panel darunter die **Ersparnis seit Fensterstart** allein: grün gespart, rot mehr ausgegeben. Dieselbe Ersparnis steht auch im oberen Panel als grün gepunktete Linie auf der **rechten Achse** (Null auf gleicher Höhe wie links). Sie enthält den Speicherwert (SoC-Korrekturen), deshalb springt sie bei jedem Tagesabschluss und endet bei der Zahl der Kachel, solange das Fenster die ganze Zählung abdeckt. Achsen und Beträge zeigen die Währung des Hausprofils (CHF bei Land CH). Unvollständige Tage sind markiert; die SoC-Korrekturen der abgeschlossenen Tage stecken in keinem Abstand, eine Zeile unter dem Chart nennt ihre Summe.
 
 Darunter wertet die Seite das Produktiv-Log aus:
 

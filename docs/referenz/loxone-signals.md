@@ -151,9 +151,10 @@ Dieselbe Inbox-Regel gilt für **Loxone** (VO-Wiederholung) und **Home Assistant
 | --- | --- |
 | Mindest-Takt | Jedes Lesesignal mindestens alle `EARNIE_PILOT_PUSH_REPEAT_S` Sekunden pushen (Standard **10**). Frischegrenze in der Inbox: typisch 3 × Wiederholintervall. |
 | Link / Heartbeat | Solange die Verbindung frisch ist (Heartbeat oder ein anderer nicht-null Analogwert kürzlich angekommen), gilt die Null-Annahme unten. |
-| Verstummt (Leistung u. a.) | Bleibt ein Signal länger als die Frischegrenze aus und der Link ist frisch, nimmt Earnie **0** an. Status in Live-Lesen: `0 angenommen (verstummt)` (`STATE_ZERO_ASSUMED_SILENT`). Nie gesendet bei frischem Link: `0 angenommen (nie gesendet)`. |
+| Verstummt (nur Leistung) | Bleibt ein **Leistungssignal** länger als die Frischegrenze aus und der Link ist frisch, nimmt Earnie **0** an. Status in Live-Lesen: `0 angenommen (verstummt)` (`STATE_ZERO_ASSUMED_SILENT`). Nie gesendet bei frischem Link: `0 angenommen (nie gesendet)`. |
+| Verstummt (alles andere) | Ladestand, Grenzwerte (`get_*`) und Temperaturen werden **nie** als 0 angenommen. Earnie hält den letzten Wert 5 Minuten (`Zuletzt bekannt (gehalten)`), danach gilt `Lesefehler`. Live-Lesen und die Signalliste zeigen dasselbe wie der Lesepfad des Optimierers. |
 | Energiezähler | Kumulierte kWh-Felder (`*energy*`) werden **niemals** als 0 angenommen. Veraltet oder nie empfangen → kein Wert (kein Slot-Ist aus erfundener Null). |
-| Explizite 0 | Ein gepushter Wert `0` gilt als gehaltenes Off (`0 (gehalten)`), nicht als „verstummt“. |
+| Explizite 0 | Ein gepushter Wert `0` gilt als gehaltenes Off (`0 (gehalten)`), nicht als „verstummt“. Die Loxone-Vorlagen senden dafür bei analogen Ausgängen einen **Befehl bei Aus** mit dem Wert `0` (`/ehal/telemetry/<EHAL-ID>/0`). Ohne ihn kommt bei Wert 0 nichts an: Eine Einspeisegrenze von 0 kW, eine maximale Ladeleistung von 0 oder eine Außentemperatur von 0,0 °C wären dann nicht lesbar. Vorlagen, die vor dieser Änderung importiert wurden, haben den Befehl nicht: neu exportieren und importieren oder den Befehl bei Aus von Hand eintragen. |
 
 > **Hinweis:** Eine HA-Automation, die nur bei Zustandsänderung pusht, meldet einen konstanten Nicht-Null-Wert nach dem Takt als 0. Deshalb periodisch pushen – nicht nur `state` trigger.
 
@@ -179,6 +180,8 @@ Empfohlenes Vorgehen (Logikbausteine in Config, kein Earnie-Code):
 3. **Wenn die Rückfallebene auslöst:**
    - `Earnie_Steuerbefehl` / ESS-Modus lokal auf **Automatik** (`0`) setzen oder die sicheren ESS-Regeln der Anlage anwenden.
    - Flex-**Freigaben** (`Earnie_*_Freigabe`) auf `0` (gesperrt) setzen oder bekannte Notfalllogik anwenden.
+   - **SG-Ready-Zustand** der Wärmepumpe (`heatpump.<Kennung>.set_sg_ready_state`, Merker-Vorschlag `Earnie_Waermepumpe_SG_Ready_Soll`) auf `2` (Normalbetrieb) setzen. Die Regelung arbeitet dann mit ihren eigenen Sollwerten weiter.
+   - **Speicher-Ladeziel** (`heatpump.<Kennung>.set_temperature_heat_storage_target`, Merker-Vorschlag `Earnie_Waermespeicher_Ladeziel`) auf `0` (kein Ziel) setzen.
    - Keine EV-Sollwerte mehr aus dem Earnie-Merker übernehmen.
 4. **Wenn Earnie wieder erreichbar ist:** Die Earnie-Merker wie vorgesehen an Aktoren bzw. Programm durchreichen.
 
@@ -221,7 +224,7 @@ Miniserver-Bezeichnungen müssen eindeutig sein. Die `id` im Hausprofil (Kleinbu
 - Titel: `Earnie_Verbraucher_Waschmaschine_Leistung`
 - VO-Befehl bei Ein: `/ehal/telemetry/flex.waschmaschine.sens_power_act/<v>`
 - VI-Check (Freigabe): `"consumer.waschmaschine.set_enable":\v` (der Titel bleibt `Earnie_Verbraucher_Waschmaschine_Freigabe`)
-- EHAL-Com-Binding: `consumer.{hk_id}.sens_power_act` → Titel (bei `zaehler_<slug>`: Kennung ohne `zaehler_`)
+- EHAL-Com-Binding: `consumer.{hk_id}.sens_power_act` → Titel (bei `zaehler_<slug>`: Kennung ohne `zaehler_`). Zwei Verbraucher eines Hausprofils dürfen deshalb nicht `zaehler_<slug>` und `<slug>` heißen: Sie hätten dieselbe Kennung, und Earnie lehnt das Hausprofil beim Laden mit einer Meldung ab, die beide ids nennt.
 
 `<Slug>` **im Merker:** kurzer, stabiler Token (z. B. `Waschmaschine`). `{hk_id}`: derselbe Verbraucher wie im Hausprofil.
 
@@ -345,13 +348,22 @@ Bei geschichteten Speichern muss `T_eq` der energieäquivalente (volumengewichte
 | `sens_operating_mode` | 0 aus, 1 Raumheizung, 2 Warmwasser, 3 Abtauen, 4 gesperrt, 5 Kühlen, 6 Störung | `Earnie_Waermepumpe_Betriebsart` |
 | `sens_sg_ready_state` | 1–4 | `Earnie_Waermepumpe_SG_Ready` |
 | `sens_heat_power` | kW (EHAL: W) | `Earnie_Waermepumpe_Waermeleistung` |
-| `sens_temperature_source` | °C | `Earnie_Waermepumpe_Temp_Quelle` |
+| `sens_temperature_source` | °C, Quellentemperatur im Betrieb, im Stillstand gehalten (siehe unten) | `Earnie_Waermepumpe_Temp_Quelle` |
 | `sens_temperature_dhw` | °C | `Earnie_Warmwasser_Temp` |
 | `get_temperature_dhw_min` | °C | `Earnie_Warmwasser_Temp_min` |
 | `sens_temperature_room` | °C | `Earnie_Raum_Temp` |
 | `get_temperature_room_setpoint` | °C | `Earnie_Raum_Temp_Soll` |
 
 Sind Sollwert und Toleranz beide zugeordnet, plant Live mit dem Speicherband der Regelung statt mit `heat_storage.setpoint_c` / `tolerance_c`.
+
+**Quellentemperatur halten:** Der Fühler im Sole- oder Grundwasserkreis zeigt die Quelle nur, solange die Wärmepumpe läuft. `Earnie_Waermepumpe_Temp_Quelle` bekommt deshalb nicht den rohen Fühler, sondern einen gehaltenen Wert. Aufbau in Loxone Config:
+
+1. **Läuft:** elektrische Leistung der Wärmepumpe über einer Schwelle (Schwellwertschalter), nicht die Anforderung der Regelung.
+2. **Einschwingzeit:** Einschaltverzögerung auf „Läuft“ (einige Minuten, aus den Kurven der Anlage abgelesen). Erst danach zählt der Fühlerwert.
+3. **Wert bilden:** Mittelwert des Fühlers, solange „Läuft“ nach der Einschwingzeit aktiv ist. Einfachere Variante: der aktuelle Fühlerwert.
+4. **Halten:** Mit der fallenden Flanke von „Läuft“ den Wert in einen Analogspeicher übernehmen und bis zum nächsten gültigen Lauf halten. Der Merker sendet den gehaltenen Wert.
+
+Earnie filtert den Wert nicht selbst.
 
 ### EV (Präfix `Earnie_EAuto_`)
 

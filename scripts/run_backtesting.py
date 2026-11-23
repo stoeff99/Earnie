@@ -18,8 +18,16 @@ from pathlib import Path
 import pandas as pd
 
 from runtime_store.config_load import load_config_or_exit
+from simulation.run_exit_codes import aborted_exit
 
-config = load_config_or_exit()
+try:
+    config = load_config_or_exit()
+except SystemExit as _config_abort:
+    # As a process: a config that does not load or a pending migration is an abort (exit 2).
+    # Imported (UI, other scripts): unchanged.
+    if __name__ == "__main__":
+        raise aborted_exit(_config_abort) from None
+    raise
 import logger_config
 from data import profile_manager
 from simulation.backtesting_log import save_backtesting_log
@@ -46,11 +54,9 @@ from house_config.entity_resolution import strip_assets_for_reference
 from simulation.engine import (
     HISTORICAL_REFERENCE_ID,
     HistoricalDataCache,
-    build_per_scenario_reference_costs,
     compute_historical_reference_costs,
     list_simulation_anchors,
     list_sunrise_step_anchors,
-    plan_per_scenario_reference_tasks,
     print_plausibility_report,
     run_simulation,
     window_anchor_for_date,
@@ -58,12 +64,20 @@ from simulation.engine import (
 )
 from simulation.reference_costs import LADDER_L2
 from simulation.forecast_mode import PLAN_PRICE, parse_plan_forecast
+from simulation.reference_dedup import fill_rebooked_results
 from simulation.reference_ladder import (
     LadderReferenceSpec,
     compute_ladder_reference,
     ladder_soc_correction,
-    plan_ladder_reference_tasks,
     rule_share,
+)
+from simulation.reference_selection import (
+    DEFAULT_REFERENCES,
+    NO_REFERENCES,
+    SELECTABLE_REFERENCES,
+    format_references,
+    parse_references,
+    plan_references,
 )
 from simulation.backtesting_progress import (
     EXIT_CANCELLED,
@@ -98,7 +112,7 @@ def backtesting_base_year() -> int:
 
 
 def _month_arg_help() -> str:
-    return f"Monatsnummer 1–12 (Basisjahr {backtesting_base_year()})"
+    return f"Monatsnummer 1–12 (Basisjahr {backtesting_base_year()}) oder JJJJ-MM"
 
 
 def _format_month_period(start: pd.Timestamp, end: pd.Timestamp) -> str:
@@ -107,10 +121,40 @@ def _format_month_period(start: pd.Timestamp, end: pd.Timestamp) -> str:
     return f"Monat {start.month}–{end.month}/{start.year}"
 
 
+def calendar_window_anchors(
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    horizon_mode: str,
+) -> dict[str, str]:
+    """Calendar date → window anchor of this run (``window_anchor_for_date``).
+
+    Saved in the log, so the SE calendar maps its days as the run did, not as a later
+    charging plan would. Sunrise covers the dates of ``list_sunrise_step_anchors``.
+    """
+    first = start.normalize()
+    last = end.normalize()
+    if horizon_mode == SUNRISE_WINDOW:
+        days = pd.date_range(first - pd.Timedelta(days=1), last + pd.Timedelta(days=1), freq="D")
+        allowed = (first.date(), (last + pd.Timedelta(days=1)).date())
+    else:
+        days = pd.date_range(first, last, freq="D")
+        allowed = None
+    anchors: dict[str, str] = {}
+    for day in days:
+        anchor = window_anchor_for_date(day.date())
+        if allowed is not None and not allowed[0] <= anchor.date() <= allowed[1]:
+            continue
+        anchors[day.date().isoformat()] = anchor.isoformat()
+    return anchors
+
+
 def _parse_month(value: str) -> pd.Timestamp:
-    """Parst Monatsnummer 1–12 zum ersten Tag im cons_data-Basisjahr."""
+    """Parst ``JJJJ-MM`` oder eine Monatsnummer 1–12 (dann im cons_data-Basisjahr)."""
+    text = value.strip()
+    year_text, dash, month_text = text.partition("-")
     try:
-        month = int(value.strip())
+        year = int(year_text) if dash else None
+        month = int(month_text) if dash else int(text)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(
             f"Ungültiger Monat '{value}'. Erwartet wird {_month_arg_help()}."
@@ -119,7 +163,7 @@ def _parse_month(value: str) -> pd.Timestamp:
         raise argparse.ArgumentTypeError(
             f"Monat muss zwischen 1 und 12 liegen, nicht {value}."
         )
-    return pd.Timestamp(backtesting_base_year(), month, 1)
+    return pd.Timestamp(backtesting_base_year() if year is None else year, month, 1)
 
 
 def resolve_backtesting_window(
@@ -177,6 +221,10 @@ def resolve_backtesting_window(
     return start, end
 
 
+# Days of prices before the period start for perfect foresight (first window plans from SA₀).
+PERFECT_PRICE_LOOKBACK_DAYS = 3
+
+
 def _price_load_window(
     start: pd.Timestamp,
     end: pd.Timestamp,
@@ -184,12 +232,14 @@ def _price_load_window(
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
     """Preisabruf: Lookback für Spiegelung/Prognose, plus der Tag nach dem Ende.
 
-    Die Preissperre der Standard-Regeln rangiert am letzten Nachmittag auch den dann
-    veröffentlichten Folgetag (Spec ``rule-based-reference.md`` § 4.2).
+    Auch Perfect Foresight lädt Tage vor dem Start: das erste Sunrise-Fenster plant ab SA₀,
+    bis etwa zwei Tage vor dem Periodenstart. Die Preissperre der Standard-Regeln rangiert
+    am letzten Nachmittag auch den dann veröffentlichten Folgetag (Spec
+    ``rule-based-reference.md`` § 4.2).
     """
     load_end = end + pd.Timedelta(days=1)
     if price_strategy == PRICE_STRATEGY_PERFECT:
-        return start, load_end
+        return (start - pd.Timedelta(days=PERFECT_PRICE_LOOKBACK_DAYS)).normalize(), load_end
     from data.market_prices import MAX_MIRROR_LOOKBACK_DAYS
 
     load_start = (start - pd.Timedelta(days=MAX_MIRROR_LOOKBACK_DAYS + 1)).normalize()
@@ -249,9 +299,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description="Backtesting der Energie-Optimierung auf historischen Loxone-Daten.",
     )
     parser.add_argument(
-        "--skip-historical-reference",
+        "--references",
+        default=format_references(DEFAULT_REFERENCES),
+        metavar="LISTE",
+        help=(
+            f"Referenzen neben den Szenarien, kommagetrennt aus {','.join(SELECTABLE_REFERENCES)} "
+            f"oder {NO_REFERENCES}: historical = Live ohne PV und Speicher, l0 = Referenz ohne "
+            "Speicher je Szenario, l1 = Batterie im Eigenverbrauchsmodus je Szenario "
+            f"(Standard: {format_references(DEFAULT_REFERENCES)})."
+        ),
+    )
+    parser.add_argument(
+        "--rule-reference",
         action="store_true",
-        help="Referenz ohne PV und Batterie nicht rechnen (Studien). Jedes Szenario braucht dann own_reference.",
+        help=(
+            "Standard-Regeln (L2) mitrechnen (Dev), dann laufen l0 und l1 immer mit. Die UI "
+            "setzt das nur mit rule_reference in EARNIE_UI_MODES."
+        ),
     )
     parser.add_argument(
         "--start-month",
@@ -377,6 +441,13 @@ def _resolve_price_paths(args) -> tuple[Path | None, Path | None]:
     return dataset, model
 
 
+def _reference_feed_in_settings(scenario_params: dict | None):
+    """Feed-in settings an L0 series books with: its scenario's, else the global ones."""
+    if scenario_params is None:
+        return config.get_backtesting_feed_in_settings()
+    return config.get_backtesting_feed_in_settings(runtime_override=scenario_params)
+
+
 def _run_reference_worker(
     ref_id: str,
     start_iso: str,
@@ -398,11 +469,7 @@ def _run_reference_worker(
     mirror_window = (start, end) if is_season_mirror_enabled() else None
     cache = HistoricalDataCache(season_mirror_window=mirror_window)
     cache.load()
-    ref_settings = (
-        config.get_backtesting_feed_in_settings(runtime_override=scenario_params)
-        if scenario_params is not None
-        else config.get_backtesting_feed_in_settings()
-    )
+    ref_settings = _reference_feed_in_settings(scenario_params)
     worker_path = worker_progress_path(progress_file, worker_key)
     on_progress = (
         _make_progress_printer(
@@ -922,8 +989,10 @@ def print_ladder_summary(
     """Earnie gegen Standard-Regeln (L2 − L3 mit SoC-Bewertung) über den gebuchten Zeitraum.
 
     Dazu der Anteil der Regeln an der Gesamtersparnis; L0 hat keinen Speicher und bleibt
-    ohne SoC-Term.
+    ohne SoC-Term. Ohne ``--rule-reference`` gibt es keine Leiter und keinen Block.
     """
+    if not ladder_by_scenario:
+        return
     print("\n=== ERSPARNIS GEGEN STANDARD-REGELN ===")
     for scenario_id, steps in ladder_by_scenario.items():
         correction = soc_correction[scenario_id]["steps"][LADDER_L2]["correction_eur"]
@@ -1190,69 +1259,56 @@ def main(argv: list[str] | None = None):
             f"(SOC_min am Sonnenaufgang)"
         )
 
-    ref_settings = config.get_backtesting_feed_in_settings()
-    if live_params is not None:
-        ref_settings = config.get_backtesting_feed_in_settings(
-            runtime_override=live_params
-        )
     reference_params = (
         strip_assets_for_reference(live_params) if live_params is not None else None
     )
     progress_file = args.progress_file
     total_hours = len(anchors) * 24
-    reference_by_scenario, extra_ref_labels, extra_ref_specs = (
-        plan_per_scenario_reference_tasks(
-            all_scenarios,
-            live_scenario_id=live_scenario_id,
-            scenario_labels=scenario_labels,
-            own_reference_by_scenario=config.get_own_reference_flags(),
-        )
+    try:
+        chosen_references = parse_references(args.references)
+    except ValueError as exc:
+        raise SystemExit(f"--references: {exc}") from exc
+    plan = plan_references(
+        all_scenarios,
+        scenarios,
+        live_scenario_id=live_scenario_id,
+        references=chosen_references,
+        rule_reference=args.rule_reference,
+        historical_params=reference_params,
+        historical_label=HISTORICAL_REFERENCE_LABEL,
+        scenario_labels=scenario_labels,
     )
-    reference_by_scenario = {sid: reference_by_scenario[sid] for sid in scenarios}
-    used_references = set(reference_by_scenario.values())
-    if args.skip_historical_reference and HISTORICAL_REFERENCE_ID in used_references:
-        raise SystemExit(
-            "--skip-historical-reference: Ein Szenario nutzt die Referenz ohne PV und Batterie "
-            "(own_reference fehlt): "
-            + ", ".join(sid for sid, ref in reference_by_scenario.items() if ref == HISTORICAL_REFERENCE_ID)
-        )
-    extra_ref_specs = [spec for spec in extra_ref_specs if spec[0] in used_references]
-    labels.update(extra_ref_labels)
-    ladder_by_scenario, ladder_specs = plan_ladder_reference_tasks(
-        scenarios, scenario_labels=scenario_labels
-    )
-    labels.update({spec.ref_id: spec.label for spec in ladder_specs})
+    added = [name for name in plan.references if name not in chosen_references]
+    if added:
+        print(f"--rule-reference: rechne auch {', '.join(added)} (Standard-Regeln brauchen sie).")
+    print(f"Referenzen: {format_references(plan.references)}")
+    reference_by_scenario = plan.reference_by_scenario
+    ladder_by_scenario = plan.ladder_by_scenario
+    labels.update({ref_id: label for ref_id, _params, label in plan.l0_specs})
+    labels.update({spec.ref_id: spec.label for spec in plan.ladder_specs})
     # L0, L1 and L2 alike for what every result series needs (fees, fuel, invoices).
-    all_ref_specs = [
-        *extra_ref_specs,
-        *((spec.ref_id, spec.params, spec.label) for spec in ladder_specs),
-    ]
+    all_ref_specs = plan.all_ref_specs
+    params_by_ref_id = {
+        **{ref_id: params for ref_id, params, _label in plan.l0_specs},
+        **{spec.ref_id: spec.params for spec in plan.ladder_specs},
+    }
     # A gap in a grid area's capacity charge fails here, not after the run.
     for params in (
         *scenarios.values(),
         *(params for _ref_id, params, _label in all_ref_specs),
-        reference_params,
+        *((reference_params,) if plan.runs_historical else ()),
     ):
         check_capacity_coverage(params, start, end)
     ladder_report: dict[str, dict] = {}
+    # Only the series with flows of their own run; the others are booked from them afterwards.
     reference_specs: list[tuple[str, dict | None, str, str]] = [
-        *(
-            []
-            if args.skip_historical_reference
-            else [
-                (
-                    HISTORICAL_REFERENCE_ID,
-                    reference_params,
-                    HISTORICAL_REFERENCE_LABEL,
-                    "_reference",
-                )
-            ]
-        ),
-        *[
-            (ref_id, params, label, ref_id)
-            for ref_id, params, label in extra_ref_specs
-        ],
+        (ref_id, params, label, "_reference" if ref_id == HISTORICAL_REFERENCE_ID else ref_id)
+        for ref_id, params, label in plan.computed_l0_specs
     ]
+    ladder_specs = plan.computed_ladder_specs
+    shared = len(plan.l0_sharing.rebooked) + len(plan.l1_sharing.rebooked)
+    if shared:
+        print(f"{shared} Referenz(en) übernehmen die Energieflüsse eines Szenarios mit anderem Tarif.")
 
     if progress_file:
         prepare_progress_dir(progress_file)
@@ -1296,39 +1352,23 @@ def main(argv: list[str] | None = None):
     sim_results: dict[str, pd.DataFrame] = {}
 
     if args.workers == 1:
-        if not args.skip_historical_reference:
-            print(f"Berechne Referenz '{HISTORICAL_REFERENCE_LABEL}'...")
-            ref_progress_path = worker_progress_path(progress_file, "_reference")
-            ref_progress = _make_progress_printer(
-                HISTORICAL_REFERENCE_LABEL,
-                ref_progress_path,
-                phase="reference",
-                result_id=HISTORICAL_REFERENCE_ID,
-            )
-            sim_results[HISTORICAL_REFERENCE_ID] = compute_historical_reference_costs(
+        for ref_id, params, label, worker_key in reference_specs:
+            print(f"Berechne Referenz '{label}'...")
+            sim_results[ref_id] = compute_historical_reference_costs(
                 start,
                 end,
                 prices,
-                ref_settings,
+                _reference_feed_in_settings(params),
                 cache=cache,
-                scenario_params=reference_params,
+                scenario_params=params,
                 horizon_mode=horizon_mode,
-                on_progress=ref_progress,
+                on_progress=_make_progress_printer(
+                    label,
+                    worker_progress_path(progress_file, worker_key),
+                    phase="reference",
+                    result_id=ref_id,
+                ),
             )
-        extra_refs, _extra_labels, reference_by_scenario = (
-            build_per_scenario_reference_costs(
-                start,
-                end,
-                prices,
-                cache,
-                scenarios,
-                live_scenario_id=live_scenario_id,
-                scenario_labels=scenario_labels,
-                own_reference_by_scenario=config.get_own_reference_flags(),
-                horizon_mode=horizon_mode,
-            )
-        )
-        sim_results.update(extra_refs)
         for spec in ladder_specs:
             print(f"Berechne Referenz '{spec.label}'...")
             ladder = compute_ladder_reference(
@@ -1401,6 +1441,10 @@ def main(argv: list[str] | None = None):
         )
         for name in scenarios:
             print_plausibility_report(plausibility_by_scenario[name])
+    fill_rebooked_results(sim_results, plan.l0_sharing, params_by_ref_id, prices)
+    fill_rebooked_results(sim_results, plan.l1_sharing, params_by_ref_id, prices)
+    for ref_id, source_id in plan.l1_sharing.rebooked.items():
+        ladder_report[ref_id] = ladder_report[source_id]
 
     ordered_ids = ordered_backtesting_result_ids(
         scenarios,
@@ -1429,6 +1473,7 @@ def main(argv: list[str] | None = None):
         "start": start.date().isoformat(),
         "end": end.date().isoformat(),
         "windows": len(anchors),
+        "window_anchors": calendar_window_anchors(start, end, horizon_mode),
         "horizon_mode": horizon_mode,
         "start_month": args.start_month.month if args.start_month is not None else None,
         "end_month": args.end_month.month if args.end_month is not None else None,
@@ -1436,7 +1481,9 @@ def main(argv: list[str] | None = None):
         "price_source": price_source,
         "price_strategy": price_strategy,
         "season_mirror_to_last_month": is_season_mirror_enabled(),
+        "references": list(plan.references),
         "reference_by_scenario": reference_by_scenario,
+        "l1_by_scenario": plan.l1_by_scenario,
         "ladder_by_scenario": ladder_by_scenario,
         "ladder_report": ladder_report,
         "live_scenario_id": live_scenario_id,
@@ -1562,6 +1609,10 @@ def main(argv: list[str] | None = None):
 if __name__ == "__main__":
     try:
         main()
+    except SystemExit as abort:
+        # Every deliberate stop of the run (stale cons_data, bad arguments, tariff checks …)
+        # exits EXIT_ABORTED; a crash keeps Python's exit code 1.
+        raise aborted_exit(abort) from None
     except BacktestingCancelled as cancelled:
         # No log is written; the previous run's results stay as they were.
         print(f"\nSzenario-Explorer abgebrochen ({cancelled}). Kein Log geschrieben.", flush=True)

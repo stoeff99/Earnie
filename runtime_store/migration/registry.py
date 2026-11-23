@@ -1,6 +1,9 @@
 """Ordered MigrationStep registry (ConfigMigration P1)."""
 from __future__ import annotations
 
+from runtime_store.migration.steps.consumer_bare_bindings import (
+    STEP as CONSUMER_BARE_BINDINGS,
+)
 from runtime_store.migration.steps.consumer_flex_bindings import (
     STEP as CONSUMER_FLEX,
 )
@@ -42,12 +45,18 @@ from runtime_store.migration.steps.deviation_energy_shortfall import (
 from runtime_store.migration.steps.forced_charge_hint import STEP as FORCED_CHARGE_HINT
 from runtime_store.migration.steps.netznutzung_split import STEP as NETZNUTZUNG_SPLIT
 from runtime_store.migration.steps.scenario_feed_in import STEP as SCENARIO_FEED_IN
+from runtime_store.migration.steps.scenario_own_reference_removal import (
+    STEP as SCENARIO_OWN_REFERENCE_REMOVAL,
+)
 from runtime_store.migration.steps.se_conf_defaults import STEP as SE_CONF_DEFAULTS
 from runtime_store.migration.steps.tariff_format import STEP as TARIFF_FORMAT
 from runtime_store.migration.steps.topology import STEP as TOPOLOGY
 from runtime_store.migration.steps.v3_to_v4 import STEP as V3_TO_V4
 from runtime_store.migration.steps.vat_deductible import STEP as VAT_DEDUCTIBLE
 from runtime_store.migration.steps.wallboxes import STEP as WALLBOXES
+from runtime_store.migration.steps.wallbox_charger_keys import (
+    STEP as WALLBOX_CHARGER_KEYS,
+)
 from runtime_store.migration.types import MigrationStep
 
 # Inventory order (Earnie-env-home chronology + code dependencies). Data model 5 comes after
@@ -85,6 +94,9 @@ STEPS: tuple[MigrationStep, ...] = (
     HOUSE_COOLING,
     WALLBOXES,
     DEBUG_DUMP_FLAG_REMOVAL,
+    SCENARIO_OWN_REFERENCE_REMOVAL,
+    CONSUMER_BARE_BINDINGS,
+    WALLBOX_CHARGER_KEYS,
     TARIFF_FORMAT,
     GRID_AREA_LEVIES,
 )

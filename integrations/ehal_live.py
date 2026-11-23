@@ -57,6 +57,7 @@ from integrations.ehal_live_ops import (  # noqa: F401 — façade re-exports
     fetch_heat_feedback,
     fetch_heat_storage_temps,
     fetch_live_power,
+    fetch_network_flex_live_kw,
     fetch_ready_by_time,
     fetch_thermal_readings,
     format_ready_by_display,
@@ -532,12 +533,15 @@ def write_ess_setpoints_from_control(
     error = adapter.write_setpoints(setpoint)
     if error is not None:
         persist_write_error(error)
+    from integrations.ehal_live_records import _last_skipped_messages
+
     records = build_ehal_write_records(
         record_fields,
         written_at=ts,
         error=error,
         skipped=_last_skipped(adapter),
         unconfigured=_last_unconfigured(adapter),
+        skipped_messages=_last_skipped_messages(adapter),
     )
     return error, records
 
@@ -600,7 +604,19 @@ def _push_safe_setpoints_network() -> None:
         "Startup: sende sichere EHAL-Sollwerte (ESS Automatik, EVCS 0 A) an %s...",
         backend,
     )
-    err_ess, _ess_records = write_ess_setpoints_from_control(0, 0.0)
+    err_ess: Any = None
+    try:
+        telemetry = _startup_ess_limit_telemetry(config.get_battery_params())
+    except StartupEssLimitsMissing as exc:
+        logger.error("Startup: ESS-Sollwerte an %s nicht gesendet: %s", backend, exc)
+        err_ess = {"message": str(exc)}
+    else:
+        if telemetry is None:
+            err_ess, _ess_records = write_ess_setpoints_from_control(0, 0.0)
+        else:
+            err_ess, _ess_records = write_ess_setpoints_from_control(
+                0, 0.0, telemetry=telemetry
+            )
     err_evcs, _evcs_records = write_evcs_max_current_from_consumers({})
     err_inv, _inv_records = write_inv_ac_limits_from_plan(plant_curtail_kw=0.0)
     if err_ess is None and err_evcs is None and err_inv is None:
@@ -628,8 +644,30 @@ def _push_safe_setpoints_loxone() -> None:
     )
     # Automatik target SoC is 99 like the optimizer's Automatik; 0 would ask the
     # inverter to discharge to empty where it honours set_ess_target_soc.
-    huawei = write_huawei_modbus_states(0, 0.0, 99.0)
-    flex = write_flexible_consumer_states({}, None, None)
+    battery_params = config.get_battery_params()
+    ess_failed = 0
+    try:
+        telemetry = _startup_ess_limit_telemetry(battery_params)
+    except StartupEssLimitsMissing as exc:
+        logger.error("Startup: ESS-Sollwerte an Loxone nicht gesendet: %s", exc)
+        huawei = []
+        ess_failed = 1
+    else:
+        if telemetry is None:
+            huawei = write_huawei_modbus_states(0, 0.0, 99.0)
+        else:
+            from settings.ess_limits_resolve import apply_effective_ess_limits
+
+            huawei = write_huawei_modbus_states(
+                0,
+                0.0,
+                99.0,
+                battery_params=apply_effective_ess_limits(
+                    battery_params, telemetry=telemetry
+                ),
+            )
+    # Startup: no plan yet, so the store charge target is 0 (no target, HeatControl P3).
+    flex = write_flexible_consumer_states({}, None, None, heat_storage_targets={})
     _inv_err, inv_rows = write_inv_ac_limits_from_plan(plant_curtail_kw=0.0)
     failed = [
         row
@@ -637,13 +675,64 @@ def _push_safe_setpoints_loxone() -> None:
         if not getattr(row, "success", True)
     ]
     failed_inv = [row for row in inv_rows if not row.get("success")]
-    if not failed and not failed_inv:
+    if not failed and not failed_inv and not ess_failed:
         logger.info("Startup: sichere Loxone-Sollwerte gesendet.")
         return
     logger.error(
         "Startup: sichere Loxone-Sollwerte teilweise fehlgeschlagen (%s Feld(er)).",
-        len(failed) + len(failed_inv),
+        len(failed) + len(failed_inv) + ess_failed,
     )
+
+
+class StartupEssLimitsMissing(RuntimeError):
+    """The battery takes its limits from live values, but none are readable at startup."""
+
+
+_STARTUP_LIVE_POWER_KINDS: tuple[str, ...] = (
+    "get_ess_max_charge_power",
+    "get_ess_max_discharge_power",
+)
+
+
+def _missing_live_power_limits(
+    telemetry: dict[str, Any] | None, ess_id: str | None
+) -> list[str]:
+    from settings.ess_limits_resolve import _telemetry_power_kw, telemetry_for_ess
+
+    tel = telemetry_for_ess(telemetry, ess_id)
+    return [
+        kind
+        for kind in _STARTUP_LIVE_POWER_KINDS
+        if _telemetry_power_kw(tel, kind) is None
+    ]
+
+
+def _startup_ess_limit_telemetry(battery_params: dict) -> dict[str, Any] | None:
+    """Live ``get_ess_max_*`` for the startup push, like the cycle reads them.
+
+    ``None`` when the battery does not use ``limits_from_live`` (the HK limits apply).
+    Raises ``StartupEssLimitsMissing`` when a live power limit is not readable: the
+    startup push must not release more than the inverter allows (no HK fallback).
+    """
+    if not bool(battery_params.get("limits_from_live", False)):
+        return None
+    ess_id = str(battery_params.get("id") or "").strip() or None
+    telemetry = enrich_telemetry_with_ess_live_limits(None)
+    if not _missing_live_power_limits(telemetry, ess_id):
+        return telemetry
+    # Plant-flat get_ess_max_* (no entity-scoped binding) come only with the full read.
+    try:
+        telemetry = enrich_telemetry_with_ess_live_limits(get_adapter().read_telemetry())
+    except Exception as exc:  # noqa: BLE001 — reported as missing live limits below
+        raise StartupEssLimitsMissing(
+            f"Live-Limits der Batterie {ess_id or '?'} nicht lesbar ({exc})"
+        ) from exc
+    missing = _missing_live_power_limits(telemetry, ess_id)
+    if missing:
+        raise StartupEssLimitsMissing(
+            f"Live-Limits der Batterie {ess_id or '?'} fehlen: {', '.join(missing)}"
+        )
+    return telemetry
 
 
 def write_flex_enables_for_ha(
@@ -652,14 +741,22 @@ def write_flex_enables_for_ha(
     consumer_pv_follow: dict[str, int] | None = None,
     *,
     heat_controls: dict[str, dict[str, int]] | None = None,
+    heat_storage_targets: dict[str, float] | None = None,
+    heat_forced_charge: frozenset[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Publish the flex ``set_enable`` (heat pump, pool, generic) for the HA backend.
+    """Publish the flex ``set_enable`` (heat pump, pool, generic) for the HA backend,
+    plus the heat pump's SG-Ready state and store charge target (HeatControl P2/P3).
 
     Returns ``optimizer_run_state.ehal_writes`` rows. The EV current is not part of this
     (``write_evcs_max_current_from_consumers`` writes it).
     """
     records = write_flexible_consumer_enables(
-        consumer_powers, charging_contexts, consumer_pv_follow, heat_controls=heat_controls
+        consumer_powers,
+        charging_contexts,
+        consumer_pv_follow,
+        heat_controls=heat_controls,
+        heat_storage_targets=heat_storage_targets,
+        heat_forced_charge=heat_forced_charge,
     )
     return [
         {
@@ -680,6 +777,8 @@ def write_evcs_max_current_from_consumers(
 ) -> tuple[EhalWriteError | None, list[dict[str, Any]]]:
     """Write ``set_evcs_max_current`` (kW→A) for every EV ↔ wallbox pair (multi-EV M2).
 
+    The kW follow the same rule as the Loxone path (``loxone_control_outputs``): 0 or
+    [min_power_kw, nominal], P_max with PV follow.
     One adapter call per charger (``evcs.<Kennung>.*``) with the pair's voltage and phases:
     a failing charger does not stop the others. HA backend: also ``set_evcs_mode``
     (skipped by the adapter when not activated). With "Sofort laden" only the mode ``now``
@@ -753,25 +852,28 @@ def _write_one_charger(
     charging_contexts: dict[str, dict] | None,
     consumer_pv_follow: dict[str, int] | None,
 ) -> tuple[EhalWriteError | None, dict[str, Any], str]:
+    from integrations.loxone_writes import _effective_consumer_power_kw
+    from optimizer.consumer_power import loxone_control_outputs
+
     cid = consumer["id"]
-    planned_kw = max(0.0, float(consumer_powers.get(cid, 0.0) or 0.0))
-    ctx = (charging_contexts or {}).get(cid)
-    if ctx is not None and not ctx.get("active", True):
-        planned_kw = 0.0
-    if ctx is not None and ctx.get("anticipated") and not ctx.get("plugged_in"):
-        planned_kw = 0.0
+    contexts = charging_contexts or {}
+    ctx = contexts.get(cid)
+    # Same rule as the Loxone path (``flex_consumer_power_setpoint_kw``): inactive, or
+    # anticipated but not plugged in → 0 kW; otherwise 0 or [min_power_kw, nominal], and
+    # with PV follow P_max so the hub follows the surplus instead of the plan average.
+    planned_kw = _effective_consumer_power_kw(consumer, consumer_powers, contexts, cid)
+    plan_pv = int((consumer_pv_follow or {}).get(cid, 0) or 0)
+    setpoint_kw, pv_out = loxone_control_outputs(consumer, planned_kw, plan_pv)
     # The pair view carries the wallbox voltage and the pair's phases.
     voltage_v, phases = ev_nominal_power_conversion(consumer)
-    amps_out = max(0.0, kw_to_ampere(planned_kw, voltage_v=voltage_v, phases=phases))
+    amps_out = round(kw_to_ampere(setpoint_kw, voltage_v=voltage_v, phases=phases), 3)
     ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     written: dict[str, Any] = {}
     immediate = is_ha_backend() and bool((ctx or {}).get("skip_loxone_output"))
     if not immediate:
         written["set_evcs_max_current"] = amps_out
     if is_ha_backend():
-        written["set_evcs_mode"] = _evcs_mode_for_cycle(
-            consumer, planned_kw, amps_out, immediate, consumer_pv_follow
-        )
+        written["set_evcs_mode"] = _evcs_mode_for_cycle(pv_out, amps_out, immediate)
     setpoint = {
         "schema_version": EHAL_SCHEMA_VERSION,
         "ts": ts,
@@ -784,19 +886,16 @@ def _write_one_charger(
     return error, written, ts
 
 
-def _evcs_mode_for_cycle(
-    consumer: dict,
-    planned_kw: float,
-    amps: float,
-    immediate: bool,
-    consumer_pv_follow: dict[str, int] | None,
-) -> str:
-    from optimizer.consumer_power import loxone_control_outputs, set_evcs_mode_for_plan
+def _evcs_mode_for_cycle(pv_follow_out: int, amps: float, immediate: bool) -> str:
+    """Mode matching the current written this cycle.
 
-    plan_pv = int((consumer_pv_follow or {}).get(consumer["id"], 0) or 0)
-    _, pv_out = loxone_control_outputs(consumer, planned_kw, plan_pv)
+    ``pv_follow_out`` and ``amps`` come from the same ``loxone_control_outputs`` call, so
+    mode ``pv`` always goes with the P_max current and ``now`` with the clamped plan current.
+    """
+    from optimizer.consumer_power import set_evcs_mode_for_plan
+
     return set_evcs_mode_for_plan(
-        pv_follow=int(pv_out), immediate=immediate, charging=amps > 1e-6
+        pv_follow=int(pv_follow_out), immediate=immediate, charging=amps > 1e-6
     )
 
 

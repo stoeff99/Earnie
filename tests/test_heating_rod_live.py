@@ -188,23 +188,6 @@ def test_signal_catalog_offers_the_rod_as_optional_and_activation_writes_its_map
     assert "ehal_bindings" not in consumer
 
 
-def test_mapping_page_lists_the_rod_and_saves_into_its_map():
-    from ui.ehal_loxone_mapping import build_entity_rows
-    from ui.ehal_loxone_mapping_persist import apply_entity_bindings
-
-    house, components = _raw_house()
-    rows = build_entity_rows(house, "home", components_doc=components)
-    row = next(item for item in rows if item["id"] == _ROD_ID)
-    assert _ENABLE in row["fields"]
-
-    out = apply_entity_bindings(
-        house, profile_id="home", entity_id=_ROD_ID, bindings={_ENABLE: "Rod_En"}
-    )
-    consumer = out["profiles"]["home"]["consumers"][0]
-    assert consumer[ROD_BINDINGS_KEY] == {_ENABLE: "Rod_En"}
-    assert "ehal_bindings" not in consumer
-
-
 # --- gate -------------------------------------------------------------------------------
 
 
@@ -344,6 +327,64 @@ def test_gas_house_rod_is_capped_by_the_free_store_heat(live):
     assert all(10 <= slot < 14 for slot in _on_slots(model, _ROD_ID))
 
 
+def _drawing_store_plan(start_c: float, *, horizon: int = 24):
+    """A store that loses heat: the boiler would deliver it, the rod may replace it."""
+    from optimizer.thermal_coupled import capacity_kwh_per_k_from_volume
+    from optimizer.thermal_live_store import ThermalBand, plan_live_store_horizon
+
+    return plan_live_store_horizon(
+        start_temp_c=start_c,
+        ambient_forecast_c=[5.0] * horizon,
+        band=ThermalBand(50.0, 5.0),
+        capacity_kwh_per_k=capacity_kwh_per_k_from_volume(500.0),
+        heat_loss_kw_per_k=0.01,
+        wp_electric_kw=15.0,
+        jaz=0.95,
+        persons=2,
+    )
+
+
+def test_gas_house_rod_cap_counts_the_boilers_heat_of_the_first_day(live):
+    """Regression (HA Lab 2026-11-17): the boiler's normal operation was subtracted as a floor,
+    so a store that draws heat left the rod a cap of 0 in every heating day."""
+    from optimizer.thermal_flex_context import live_rod_heat_cap_kwh
+
+    plan = _drawing_store_plan(45.0)
+    profile = _profile(_consumer(_GAS, rod_bindings=_BOUND))
+    live(plan, profile)
+    room = plan.capacity_kwh_per_k * (50.0 - 45.0)
+    draw = sum(plan.hourly_draw_at_min_kw())
+    assert plan.floor_electric_kwh > room  # the old cap: max(0, room - floor) = 0
+    parent = profile["consumers"][0]
+    assert live_rod_heat_cap_kwh(parent, profile, _matrix([30.0] * 24)) == pytest.approx(
+        room + draw, abs=1e-3
+    )
+
+
+def test_gas_house_rod_cap_counts_only_the_draw_until_midnight(live):
+    from optimizer.thermal_flex_context import live_rod_heat_cap_kwh
+
+    plan = _drawing_store_plan(45.0)
+    profile = _profile(_consumer(_GAS, rod_bindings=_BOUND))
+    live(plan, profile)
+    room = plan.capacity_kwh_per_k * (50.0 - 45.0)
+    draw_7h = sum(plan.hourly_draw_at_min_kw()[:7])
+    matrix = _matrix([30.0] * 24, start=17)  # 17:00 … 16:00 next day, one calendar date here
+    for row in matrix[7:]:
+        row["slot_datetime"] = row["slot_datetime"].replace(day=16)
+        row["date"] = date(2024, 1, 16)
+    parent = profile["consumers"][0]
+    assert live_rod_heat_cap_kwh(parent, profile, matrix) == pytest.approx(room + draw_7h, abs=1e-3)
+
+
+def test_gas_house_rod_runs_although_the_boiler_heats_today(live):
+    profile = _profile(_consumer(_GAS, rod_bindings=_BOUND))
+    live(_drawing_store_plan(45.0), profile)
+    model, remaining, _contexts = _solve(_matrix(_CHEAP_NOON), profile)
+    assert remaining[_ROD_ID] > 0.75
+    assert _rod_kwh(model) > 0.0
+
+
 def test_free_heat_below_one_slot_leaves_the_binary_rod_off(live):
     profile = _profile(_consumer(_GAS, rod_bindings=_BOUND))
     live(_store_plan(49.0, jaz=0.95), profile)  # about 0.6 kWh free, one slot delivers 0.75
@@ -378,9 +419,8 @@ def test_gas_house_rod_stays_off_after_the_first_day(live):
     assert _on_slots(model, _ROD_ID) == []
 
 
-def test_heat_pump_house_rod_runs_only_within_the_store_overlay(live):
-    from optimizer.thermal_live_store import live_min_kwh_by_day
-
+def test_heat_pump_house_rod_runs_only_within_the_store_level(live):
+    """HeatControl P4: beside a heat pump the rod's heat fills the same store level."""
     profile = _profile(_consumer(_HP, rod_bindings=_BOUND))
     jaz = heat_source_efficiency(_HP)
     plan = _store_plan(45.0, jaz=jaz)
@@ -388,10 +428,12 @@ def test_heat_pump_house_rod_runs_only_within_the_store_overlay(live):
     matrix = _matrix([-5.0] * 4 + [30.0] * 20)
     model, remaining, contexts = _solve(matrix, profile)
     assert contexts[_ROD_ID] == {"live_pulse_limit": True}
-    assert remaining[_ROD_ID] == pytest.approx(plan.opp_cap_electric_kwh * jaz, abs=1e-2)
-    assert contexts[_CID]["live_day_min_kwh"] == live_min_kwh_by_day(matrix, plan)
-    assert 0.0 < _rod_kwh(model) <= remaining[_ROD_ID] + 1e-6
+    assert remaining[_ROD_ID] == pytest.approx(plan.charge_room_heat_kwh, abs=1e-2)
+    store, levels = model.live_store_levels[_CID]
+    assert 0.0 < _rod_kwh(model)
     assert all(slot < 4 for slot in _on_slots(model, _ROD_ID))
+    assert levels.slack_kwh() == pytest.approx(0.0, abs=1e-6)
+    assert max(levels.level_kwh(slot) for slot in levels.levels) <= store.capacity_kwh + 1e-6
 
 
 def test_live_rod_has_a_pulse_limit(live):

@@ -458,7 +458,11 @@ def _main_cycle(
                 "Loxone Silent-Modus aktiv: Optimierung ohne Schreibzugriffe auf den Miniserver."
             )
 
-    profile_manager.check_and_update_profile_if_new_month()
+    try:
+        profile_manager.check_and_update_profile_if_new_month()
+    except profile_manager.ConsumptionProfileUnavailableError as exc:
+        logger.error("Optimierung abgebrochen: %s", exc)
+        return False
 
     with timing.phase("ehal_read"):
         current_soc = ehal_live.read_ess_soc()
@@ -496,7 +500,10 @@ def _main_cycle(
             optimization_matrix = profile_manager.build_live_planning_matrix(
                 market_data, planning_window
             )
-        except pv_forecast.PvForecastUnavailableError as exc:
+        except (
+            pv_forecast.PvForecastUnavailableError,
+            profile_manager.ConsumptionProfileUnavailableError,
+        ) as exc:
             logger.error("Optimierung abgebrochen: %s", exc)
             return False
         cycle_duration_stats.set_horizon_slots(len(optimization_matrix))
@@ -527,7 +534,10 @@ def _main_cycle(
         flex_kw_for_matrix: dict[str, float] = {}
         if live_power:
             if ehal_live.is_ehal_network_backend():
-                flex_kw_for_matrix = {}
+                # HA: only the heating rod is measured here; it leaves the base load.
+                flex_kw_for_matrix = ehal_live.fetch_network_flex_live_kw(
+                    config.get_flexible_consumers()
+                )
             else:
                 flex_kw_for_matrix = ehal_live.fetch_flexible_consumers_live_kw()
             matrix_snapshot = live_consumption.build_consumption_snapshot(
@@ -872,12 +882,24 @@ def _main_cycle(
 
     with timing.phase("writes"):
         plant_curtail_kw = float((milp_plan or {}).get("p_pv_curtail") or 0.0)
+        # HeatControl P3: store charge target per heat pump; none planned → 0 (no target).
+        heat_storage_targets = dict((milp_plan or {}).get("heat_storage_targets") or {})
+        # HeatControl P5: heat pumps in a forced charge now (SG-Ready state 4).
+        heat_forced_charge = frozenset((milp_plan or {}).get("heat_forced_charge") or ())
+        from optimizer.heat_storage_target import attach_targets_to_observability
+
+        attach_targets_to_observability(
+            thermal_observability,
+            heat_storage_targets,
+            consumer_powers,
+            dict((milp_plan or {}).get("heat_storage_levels") or {}),
+        )
         # Export cap travels only on set_grid_export_power_limit; set_ess_mode stays battery-only.
         export_cap = export_ctx["effective_export_cap_kw"]
         if isinstance(battery_params, list):
-            from optimizer.milp_horizon import aggregate_battery_params_for_load
+            from optimizer.milp_horizon import primary_battery_with_plant_power
 
-            primary_battery = aggregate_battery_params_for_load(battery_params)
+            primary_battery = primary_battery_with_plant_power(battery_params)
         else:
             primary_battery = battery_params
         from optimizer.automatik_cap import automatik_cap_for_mode, lowest_cap_kw
@@ -996,6 +1018,8 @@ def _main_cycle(
                     charging_contexts,
                     consumer_pv_follow,
                     heat_controls=heat_controls,
+                    heat_storage_targets=heat_storage_targets,
+                    heat_forced_charge=heat_forced_charge,
                 )
             if err_ess is None and err_evcs is None and err_inv is None:
                 ehal_live.clear_write_error()
@@ -1014,6 +1038,10 @@ def _main_cycle(
                 target_soc,
                 export_cap_kw=export_cap,
                 automatik_discharge_cap_kw=automatik_discharge_cap,
+                # Same live limits the plan used (primary battery, before reserves).
+                battery_params=apply_effective_ess_limits(
+                    config.get_battery_params(), telemetry=telemetry_for_export
+                ),
             )
             logger.info("📤 Sende flexible Verbraucher-Sollwerte an Loxone...")
             flex_writes = ehal_live.write_flexible_consumer_states(
@@ -1021,6 +1049,8 @@ def _main_cycle(
                 charging_contexts,
                 consumer_pv_follow,
                 heat_controls=heat_controls,
+                heat_storage_targets=heat_storage_targets,
+                heat_forced_charge=heat_forced_charge,
             )
             logger.info("📤 Sende WR-AC-Limits an Loxone...")
             _err_inv, inv_rows = ehal_live.write_inv_ac_limits_from_plan(
@@ -1039,9 +1069,10 @@ def _main_cycle(
         from optimizer.charging_context import matrix_slot_datetime
 
         if ehal_live.is_ehal_network_backend():
-            flex_kw = {c["id"]: 0.0 for c in live_consumers}
+            measured_flex = ehal_live.fetch_network_flex_live_kw(live_consumers)
+            flex_kw = {c["id"]: measured_flex.get(c["id"], 0.0) for c in live_consumers}
             flex_chart_kw = dict(flex_kw)
-            live_flex_measured: set[str] = set()
+            live_flex_measured: set[str] = set(measured_flex)
         else:
             live_flex = ehal_live.resolve_flexible_consumers_live_power(
                 fallbacks=consumer_powers,
@@ -1068,7 +1099,12 @@ def _main_cycle(
             consumer_pv_follow,
             export_cap_kw=export_cap,
             heat_controls=heat_controls,
+            heat_storage_targets=heat_storage_targets,
+            heat_forced_charge=heat_forced_charge,
             automatik_discharge_cap_kw=automatik_discharge_cap,
+            battery_params=apply_effective_ess_limits(
+                config.get_battery_params(), telemetry=telemetry_for_export
+            ),
         )
         loxone_sent.update(
             planned_powerstation_loxone_sent(phys_charge, standby_sources)
@@ -1235,6 +1271,7 @@ def _main_cycle(
                 power_interval_sampler.note_decision_sample(
                     consumption_snapshot,
                     soc_percent=float(current_soc),
+                    soc_percent_by_ess=current_soc_by_id or None,
                 )
             run_state.save_run_state(run_payload)
             if run_payload.get("success"):
@@ -1370,10 +1407,7 @@ if __name__ == "__main__":
     ev_assignment_live.start()
     ehal_live.push_safe_setpoints_on_startup()
 
-    from runtime_store.dotenv_io import (
-        deferred_loxone_blocks_live,
-        needs_loxone_setup,
-    )
+    from runtime_store.dotenv_io import needs_loxone_setup
     from runtime_store.dotenv_loader import load_app_dotenv
     from runtime_store.daemon_heartbeat import touch_daemon_heartbeat
     from runtime_store.env_vars import is_planning_offline_gated
@@ -1409,21 +1443,6 @@ if __name__ == "__main__":
             config.reinit_config()
             continue
 
-        if deferred_loxone_blocks_live():
-            log_setup_gate_wait(
-                _setup_gate_state,
-                "loxone_deferred",
-                "Loxone-Zugangsdaten noch nicht hinterlegt (optional bis Live-/Silent-Betrieb). "
-                "Planung/Backtesting in der UI (Port %s) möglich. "
-                "Erneuter Versuch in %s Sekunden.",
-                config.get_ui_streamlit_port(),
-                _SETUP_WAIT_SEC,
-                level=logging.INFO,
-            )
-            time.sleep(_SETUP_WAIT_SEC)
-            config.reinit_config()
-            continue
-
         if is_planning_offline_gated():
             log_setup_gate_wait(
                 _setup_gate_state,
@@ -1452,46 +1471,6 @@ if __name__ == "__main__":
             time.sleep(_SETUP_WAIT_SEC)
             config.reinit_config()
             continue
-
-        from integrations.loxone_connectivity import (
-            LoxoneAuthError,
-            probe_current_loxone_credentials,
-        )
-        from runtime_store.loxone_auth_error import (
-            clear_loxone_auth_error,
-            needs_loxone_auth_recovery,
-            persist_loxone_auth_error,
-        )
-
-        if needs_loxone_auth_recovery():
-            from runtime_store.shadow.hooks import maybe_clear_auth_gate
-
-            if not maybe_clear_auth_gate():
-                ok, detail = probe_current_loxone_credentials()
-                if ok:
-                    clear_loxone_auth_error()
-                else:
-                    if detail.startswith("Loxone auth failed"):
-                        code = 401 if "HTTP 401" in detail else 403
-                        persist_loxone_auth_error(
-                            message=detail,
-                            http_status=code,
-                            source="main_gate",
-                        )
-                    log_setup_gate_wait(
-                        _setup_gate_state,
-                        "loxone_auth",
-                        "Loxone-Zugang verweigert (%s). "
-                        "Bitte Zugangsdaten in der Streamlit-UI (Port %s) unter "
-                        "Smarthome-Backend prüfen. Erneuter Versuch in %s Sekunden.",
-                        detail,
-                        config.get_ui_streamlit_port(),
-                        _SETUP_WAIT_SEC,
-                    )
-                    time.sleep(_SETUP_WAIT_SEC)
-                    load_app_dotenv(override=True)
-                    config.reinit_config()
-                    continue
 
         _setup_gate_state.clear()
         try:
@@ -1538,7 +1517,6 @@ if __name__ == "__main__":
                 next_trigger = _wait_after_aborted_cycle()
                 woke_at = datetime.now()
                 continue
-            clear_loxone_auth_error()
             next_trigger = TRIGGER_QUARTER_HOUR
             after_prod_cycle()
             from runtime_store.usage_ping import spawn_maybe_send_ping
@@ -1592,16 +1570,6 @@ if __name__ == "__main__":
                 optimize_trigger=TRIGGER_REQUEST_OPTIMIZE,
             )
 
-        except LoxoneAuthError as exc:
-            logger.error(
-                "Loxone-Zugang verweigert (HTTP %s). Optimierung pausiert — "
-                "erneuter Versuch in %s Sekunden.",
-                exc.http_status,
-                _SETUP_WAIT_SEC,
-            )
-            time.sleep(_SETUP_WAIT_SEC)
-            load_app_dotenv(override=True)
-            config.reinit_config()
         except Exception as e:
             logger.exception(
                 "🚨 Unerwarteter Fehler während des Durchlaufs: %s", e

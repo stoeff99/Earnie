@@ -117,6 +117,20 @@ def test_build_signal_rows_has_read_and_write() -> None:
     assert any("Einspeiseleistung" in label for label in write.required_by)
 
 
+def test_heartbeat_earnie_counts_as_published_once_status_json_was_fetched() -> None:
+    house, components = _minimal_docs()
+    fetched = build_signal_rows(
+        house, components, published={}, fetched_at="2026-11-12T10:00:00+00:00"
+    )
+    hb = next(r for r in fetched if r.ehal_id == "heartbeat_earnie")
+    assert hb.match_kind == "published"
+    assert hb.match_text == "MS-Abruf 2026-11-12T10:00:00+00:00"
+    never = build_signal_rows(house, components, published={}, fetched_at=None)
+    hb_never = next(r for r in never if r.ehal_id == "heartbeat_earnie")
+    assert hb_never.match_kind == "never"
+    assert hb_never.match_text == "status.json noch nicht abgerufen"
+
+
 def test_catalog_includes_optional_inactive() -> None:
     house, components = _minimal_docs()
     rows = build_signal_rows(house, components, inbox={}, published={}, fetched_at=None)
@@ -522,3 +536,106 @@ def test_consumer_activation_of_unknown_consumer_fails_loud() -> None:
             _heatpump_house(True), {}, component_kind="consumer", entity_id="nope",
             binding_key="heatpump.nope.sens_power_act", activated=True,
         )
+
+
+def _heatpump_docs(bindings: dict[str, str]) -> tuple[dict, dict]:
+    consumer = {
+        "id": "waermepumpe",
+        "type": "thermal_annual",
+        "ehal_bindings": dict(bindings),
+    }
+    return {"profiles": {"p": {"consumers": [consumer]}}}, {}
+
+
+def _heatpump_bindings(house: dict) -> dict:
+    return house["profiles"]["p"]["consumers"][0]["ehal_bindings"]
+
+
+def _catalog_entry(house: dict, components: dict, kind: str):
+    from ehal.signal_catalog import iter_catalog_entries
+
+    return next(
+        e
+        for e in iter_catalog_entries(house, components)
+        if e.entity_id == "waermepumpe" and e.binding_key.endswith(kind)
+    )
+
+
+def test_heat_store_kind_uses_the_mapping_spelling_and_sees_the_bare_key() -> None:
+    house, components = _heatpump_docs({"sens_temperature_heat_storage": ""})
+    entry = _catalog_entry(house, components, "sens_temperature_heat_storage")
+    # The mapping UI stores heat kinds bare; the exchange ID stays qualified.
+    assert entry.binding_key == "sens_temperature_heat_storage"
+    assert entry.ehal_id == "heatpump.waermepumpe.sens_temperature_heat_storage"
+    assert entry.is_activated
+    # A key left by an older signal list counts as activated too.
+    old_house, _ = _heatpump_docs({"heatpump.waermepumpe.sens_temperature_heat_storage_low": ""})
+    assert _catalog_entry(old_house, components, "sens_temperature_heat_storage_low").is_activated
+
+
+def test_activating_a_heat_store_kind_adds_no_second_key() -> None:
+    house, components = _heatpump_docs({"sens_temperature_heat_storage": "TempEq"})
+    house2, _ = set_binding_activation(
+        house,
+        components,
+        component_kind="consumer",
+        entity_id="waermepumpe",
+        binding_key="sens_temperature_heat_storage",
+        activated=True,
+        consumer_type="thermal_annual",
+    )
+    assert _heatpump_bindings(house2) == {"sens_temperature_heat_storage": "TempEq"}
+    house3, _ = set_binding_activation(
+        house2,
+        components,
+        component_kind="consumer",
+        entity_id="waermepumpe",
+        binding_key="get_temperature_heat_storage_setpoint",
+        activated=True,
+        consumer_type="thermal_annual",
+    )
+    assert _heatpump_bindings(house3) == {
+        "sens_temperature_heat_storage": "TempEq",
+        "get_temperature_heat_storage_setpoint": "",
+    }
+
+
+def test_deactivating_a_heat_store_kind_removes_every_spelling() -> None:
+    house, components = _heatpump_docs(
+        {
+            "sens_temperature_heat_storage": "",
+            "heatpump.waermepumpe.sens_temperature_heat_storage": "",
+            "heatpump.waermepumpe.set_enable": "",
+        }
+    )
+    house2, _ = set_binding_activation(
+        house,
+        components,
+        component_kind="consumer",
+        entity_id="waermepumpe",
+        binding_key="sens_temperature_heat_storage",
+        activated=False,
+        consumer_type="thermal_annual",
+    )
+    assert _heatpump_bindings(house2) == {"heatpump.waermepumpe.set_enable": ""}
+
+
+def test_two_pools_keep_their_bare_water_temperature_apart() -> None:
+    from ehal.signal_catalog import iter_catalog_entries
+
+    house = {
+        "profiles": {
+            "p": {
+                "consumers": [
+                    {"id": "pool_a", "type": "thermal_rc", "ehal_bindings": {}},
+                    {"id": "pool_b", "type": "thermal_rc", "ehal_bindings": {}},
+                ]
+            }
+        }
+    }
+    ids = {
+        e.ehal_id
+        for e in iter_catalog_entries(house, {})
+        if e.binding_key == "sens_temperature_water"
+    }
+    assert ids == {"pool.pool_a.sens_temperature_water", "pool.pool_b.sens_temperature_water"}

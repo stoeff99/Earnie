@@ -27,21 +27,20 @@ logger = logging.getLogger(__name__)
 NOTICE_NOT_RUNNING = "Mit Earnie gespart: Das Ersparnis-Buch läuft noch nicht."
 NOTICE_UNREADABLE = "Mit Earnie gespart: Das Ersparnis-Buch ist nicht lesbar, Details stehen im Log."
 
-# Method note of savings_v 2 (spec docs/dev/savings-ledger.md § 3, § 7).
+# Method note of savings_v 3 (spec docs/dev/savings-ledger.md § 3, § 7).
 _METHOD_HELP = (
     "**Vergleich „ohne Earnie“:** gleiche PV, gleiche Preise und je Gerät der gleiche "
     "Tagesverbrauch, aber zur gewohnten Zeit: Geräte laufen, wie das Hausprofil sie beschreibt "
     "(eingestellte Startzeit, Wärmemodell), der Poolfilter in seinem eigenen Fenster, das E-Auto lädt ab dem Einstecken "
     "mit voller Leistung, ein Heizstab neben Gas, Öl oder Pellets bleibt aus und die Wärme "
-    "kommt aus dem Brennstoff. Eine Hausbatterie läuft im Herstellermodus (Eigenverbrauch). "
+    "kommt aus dem Brennstoff. Eine Hausbatterie läuft im Herstellermodus (Eigenverbrauch), "
+    "mehrere Hausbatterien zählen dabei als eine gemeinsame Batterie. "
     "Gezählt sind die abgeschlossenen Tage von Sonnenaufgang zu Sonnenaufgang, jeweils mit "
     "der SoC-Korrektur, und der laufende Tag bis jetzt.\n\n"
     "**Heute bisher** ist vorläufig: Es zählt nur die Batterie. Verschobene Geräte, E-Auto "
     "und Heizstab kommen beim Tagesabschluss dazu.\n\n"
     "**Grenzen:** Die gewohnte Zeit ist das Modell aus dem Hausprofil, nicht der tatsächliche "
-    "Tagesablauf. Die "
-    "Szenario-Analyse vergleicht strenger, mit Standard-Regeln wie Laden bei PV-Überschuss; "
-    "ihre Ersparnis ist deshalb meist kleiner. Was Powerstations aus ihrem Speicher liefern, "
+    "Tagesablauf. Was Powerstations aus ihrem Speicher liefern, "
     "ist nicht bewertet; ihr Laden zählt zur tatsächlichen Zeit. Das Ergebnis hängt vom "
     "eingestellten Batterie-Wirkungsgrad ab und ist keine Stromrechnung."
 )
