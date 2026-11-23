@@ -115,6 +115,32 @@ def test_check_and_update_profile_triggers_when_missing(tmp_path, monkeypatch):
     assert called["n"] == 1
 
 
+def _profile_rows(hours) -> str:
+    return "Month;Weekday;Hour;Consumption\n" + "".join(f"11;0;{h};0.5\n" for h in hours)
+
+
+@pytest.mark.parametrize(
+    ("hours", "regenerates"),
+    [([13], True), (range(24), False)],
+)
+def test_check_and_update_regenerates_a_profile_missing_hours_in_the_same_month(
+    tmp_path, monkeypatch, hours, regenerates
+):
+    """A profile built from almost no cons_data is not kept until the next month."""
+    for name in ("c.csv", "t.csv"):
+        (tmp_path / name).write_text(_profile_rows(hours), encoding="utf-8")
+    monkeypatch.setattr(pm, "consumption_profiles_file", lambda: str(tmp_path / "c.csv"))
+    monkeypatch.setattr(pm, "total_consumption_profiles_file", lambda: str(tmp_path / "t.csv"))
+    monkeypatch.setattr(pm, "_flex_profile_needs_regeneration", lambda: False)
+    monkeypatch.setattr(pm, "planning_now", datetime.now)
+    called = {"n": 0}
+    monkeypatch.setattr(pm, "generate_consumption_profile", lambda: called.__setitem__("n", called["n"] + 1))
+
+    pm.check_and_update_profile_if_new_month()
+
+    assert called["n"] == (1 if regenerates else 0)
+
+
 def test_build_optimization_matrix_requires_equal_lengths():
     with pytest.raises(ValueError, match="gleiche Länge"):
         pm._build_optimization_matrix(
@@ -335,8 +361,9 @@ def test_check_and_update_profile_skips_when_current(tmp_path, monkeypatch):
     cons = tmp_path / "c.csv"
     total = tmp_path / "t.csv"
     flex = tmp_path / "f.csv"
-    for path in (cons, total, flex):
+    for path in (total, flex):
         path.write_text("Month;Weekday;Hour;ev\n", encoding="utf-8")
+    cons.write_text(_profile_rows(range(24)), encoding="utf-8")
     monkeypatch.setattr(pm, "consumption_profiles_file", lambda: str(cons))
     monkeypatch.setattr(pm, "total_consumption_profiles_file", lambda: str(total))
     monkeypatch.setattr(pm, "flexible_consumer_profiles_file", lambda: str(flex))

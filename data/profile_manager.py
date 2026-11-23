@@ -204,6 +204,15 @@ def _flex_profile_status_message() -> str:
     return f"flexible_consumer_profiles.csv OK ({len(data_cols)} Spalten: {', '.join(data_cols[:6])}{'…' if len(data_cols) > 6 else ''})"
 
 
+def _profile_missing_hours(profile_path: str) -> list[int] | None:
+    """Hours of the day without a row in the profile; None if the file is not readable."""
+    try:
+        hours = pd.read_csv(profile_path, sep=";", usecols=["Hour"])["Hour"]
+    except Exception:
+        return None
+    return sorted(set(range(24)) - {int(hour) for hour in hours.dropna()})
+
+
 def check_and_update_profile_if_new_month() -> None:
     """Überprüft, ob ein neuer Monat begonnen hat, und triggert ggf. das Profil-Update."""
     profile_path = consumption_profiles_file()
@@ -215,6 +224,13 @@ def check_and_update_profile_if_new_month() -> None:
         should_update = True
     elif not os.path.exists(total_consumption_profiles_file()):
         update_reason = "total_consumption_profiles.csv fehlt"
+        should_update = True
+    elif (missing_hours := _profile_missing_hours(profile_path)) != []:
+        update_reason = (
+            "consumption_profiles.csv nicht lesbar"
+            if missing_hours is None
+            else f"consumption_profiles.csv ohne Werte für {len(missing_hours)} Stunden"
+        )
         should_update = True
     elif _flex_profile_needs_regeneration():
         update_reason = "flexible_consumer_profiles.csv fehlt, unvollständig oder veraltet"
